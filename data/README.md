@@ -13,4 +13,6 @@ The importer:
 - Skips works that are not public domain.
 - Defers allowlisted commentaries/dictionaries/topics until later phases.
 
-Point the GUI at this file with `BIBLE_APP_DB` or the default XDG path (phase 1).
+Point the GUI at this file with `BIBLE_APP_DB` or the default XDG path.
+
+The importer also builds an FTS5 index of KJV verses. Opening an older database backfills that index.

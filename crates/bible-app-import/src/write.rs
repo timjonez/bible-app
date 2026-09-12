@@ -51,6 +51,7 @@ pub fn import_kjv(conn: &mut Connection, module: &KjvModule) -> Result<usize, Wr
             ])?;
         }
     }
+    bible_app_db::rebuild_verses_fts(&tx)?;
     tx.commit()?;
     Ok(module.index.len())
 }

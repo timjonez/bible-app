@@ -27,12 +27,13 @@ cargo run -p bible-app
 
 - Alt+Left / Alt+Right: previous / next chapter
 - Ctrl+L then type `John 3:16` and Enter
+- Ctrl+F to search the KJV; Enter on a result jumps to that verse
 - Last position is stored in `~/.config/bible-app/state.toml`
 
 ## Status
 
 - [x] Phase 0: import KJV → SQLite
 - [x] Phase 1: GTK4 + Libadwaita passage window
-- [ ] Phase 2: search
+- [x] Phase 2: search
 - [ ] Phase 3: Strong’s, TSK cross-references, Matthew Henry
 - [ ] Phase 4: remaining public-domain dictionaries and topics
