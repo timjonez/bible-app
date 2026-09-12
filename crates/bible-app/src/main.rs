@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod nav;
+mod search;
 
 fn main() {
     let app = relm4::RelmApp::new("io.github.timjonez.bible-app");

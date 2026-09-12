@@ -109,6 +109,7 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .any(|(s, _)| s.eq_ignore_ascii_case("MHC")));
 
     let conn = Connection::open(&out).unwrap();
+    bible_app_db::ensure_verses_fts(&conn).unwrap();
     assert_eq!(get_verse(&conn, 1, 1, 1).unwrap().text, GEN_1_1);
     assert!(get_verse(&conn, 1, 1, 1).unwrap().para_break);
     assert_eq!(get_verse(&conn, 43, 3, 16).unwrap().text, JOHN_3_16);
@@ -119,6 +120,10 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .query_row("SELECT COUNT(*) FROM verses", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 3);
+
+    let hits = bible_app_db::search_verses(&conn, "only begotten", 20).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!((hits[0].book, hits[0].chapter, hits[0].verse), (43, 3, 16));
 }
 
 #[test]
@@ -160,4 +165,11 @@ fn real_dump_kjv_goldens() {
     assert_eq!(get_verse(&conn, 43, 3, 16).unwrap().text, JOHN_3_16);
     assert_eq!(get_verse(&conn, 66, 22, 21).unwrap().text, REV_22_21);
     assert_eq!(bible_app_db::books(&conn).unwrap().len(), 66);
+
+    let hits = bible_app_db::search_verses(&conn, "only begotten", 50).unwrap();
+    assert!(
+        hits.iter()
+            .any(|h| h.book == 43 && h.chapter == 3 && h.verse == 16),
+        "John 3:16 missing from {hits:?}"
+    );
 }

@@ -119,12 +119,20 @@ fn normalize(s: &str) -> String {
 }
 
 pub fn format_chapter(books: &[Book], book: u8, chapter: u8) -> String {
-    let name = books
+    let name = book_name(books, book);
+    format!("{name} {chapter}")
+}
+
+pub fn format_ref(books: &[Book], at: Ref) -> String {
+    format!("{} {}:{}", book_name(books, at.book), at.chapter, at.verse)
+}
+
+fn book_name(books: &[Book], book: u8) -> &str {
+    books
         .iter()
         .find(|b| b.id == book)
         .map(|b| b.name.as_str())
-        .unwrap_or("Book");
-    format!("{name} {chapter}")
+        .unwrap_or("Book")
 }
 
 pub fn format_chapter_text(verses: &[bible_app_db::Verse]) -> String {
@@ -269,5 +277,21 @@ mod tests {
     fn one_john_not_john() {
         let b = books();
         assert_eq!(parse_ref("1 John 1:1", &b, cur()).unwrap().book, 62);
+    }
+
+    #[test]
+    fn formats_ref() {
+        let b = books();
+        assert_eq!(
+            format_ref(
+                &b,
+                Ref {
+                    book: 43,
+                    chapter: 3,
+                    verse: 16
+                }
+            ),
+            "John 3:16"
+        );
     }
 }

@@ -1,8 +1,14 @@
+mod search;
+
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub use search::{
+    ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
+};
+
+pub const SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -31,6 +37,8 @@ pub struct Verse {
 pub fn open(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    init_schema(&conn)?;
+    ensure_verses_fts(&conn)?;
     Ok(conn)
 }
 
@@ -76,6 +84,14 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
             stem   TEXT PRIMARY KEY,
             action TEXT NOT NULL,
             reason TEXT NOT NULL
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS verses_fts USING fts5(
+            text,
+            book UNINDEXED,
+            chapter UNINDEXED,
+            verse UNINDEXED,
+            tokenize = 'unicode61'
         );
         "#,
     )?;
