@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bible-app",
+    "crates/bible-app-db",
+    "crates/bible-app-import",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"

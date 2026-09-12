@@ -1,0 +1,10 @@
+/target
+/data/*.sqlite
+/data/*.sqlite-*
+/data/*.sqlite-journal
+/data/*.sqlite-wal
+/data/*.sqlite-shm
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
