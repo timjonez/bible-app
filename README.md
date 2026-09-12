@@ -18,10 +18,21 @@ Phase 0 imports **KJV only**. Other public-domain modules (commentaries, Strong�
 
 See `data/README.md`.
 
+## Run the reader
+
+```bash
+export BIBLE_APP_DB=data/bible-app.sqlite   # or ~/.local/share/bible-app/bible-app.sqlite
+cargo run -p bible-app
+```
+
+- Alt+Left / Alt+Right: previous / next chapter
+- Ctrl+L then type `John 3:16` and Enter
+- Last position is stored in `~/.config/bible-app/state.toml`
+
 ## Status
 
 - [x] Phase 0: import KJV → SQLite
-- [ ] Phase 1: GTK4 + Libadwaita passage window
+- [x] Phase 1: GTK4 + Libadwaita passage window
 - [ ] Phase 2: search
 - [ ] Phase 3: Strong’s, TSK cross-references, Matthew Henry
 - [ ] Phase 4: remaining public-domain dictionaries and topics

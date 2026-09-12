@@ -125,3 +125,100 @@ pub fn books(conn: &Connection) -> Result<Vec<Book>, DbError> {
 pub fn verse_count(conn: &Connection) -> Result<i64, DbError> {
     Ok(conn.query_row("SELECT COUNT(*) FROM verses", [], |row| row.get(0))?)
 }
+
+pub fn chapter(conn: &Connection, book: u8, chapter: u8) -> Result<Vec<Verse>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT book, chapter, verse, text, para_break
+         FROM verses
+         WHERE book = ?1 AND chapter = ?2
+         ORDER BY verse",
+    )?;
+    let rows = stmt.query_map([book, chapter], |row| {
+        Ok(Verse {
+            book: row.get(0)?,
+            chapter: row.get(1)?,
+            verse: row.get(2)?,
+            text: row.get(3)?,
+            para_break: row.get::<_, i32>(4)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn max_chapter(conn: &Connection, book: u8) -> Result<u8, DbError> {
+    let n: Option<u8> = conn.query_row(
+        "SELECT MAX(chapter) FROM verses WHERE book = ?1",
+        [book],
+        |row| row.get(0),
+    )?;
+    n.ok_or(DbError::MissingVerse {
+        book,
+        chapter: 1,
+        verse: 1,
+    })
+}
+
+pub fn max_verse(conn: &Connection, book: u8, chapter: u8) -> Result<u8, DbError> {
+    let n: Option<u8> = conn.query_row(
+        "SELECT MAX(verse) FROM verses WHERE book = ?1 AND chapter = ?2",
+        [book, chapter],
+        |row| row.get(0),
+    )?;
+    n.ok_or(DbError::MissingVerse {
+        book,
+        chapter,
+        verse: 1,
+    })
+}
+
+pub fn book_by_id(conn: &Connection, id: u8) -> Result<Book, DbError> {
+    let row = conn
+        .query_row(
+            "SELECT id, abbrev, name FROM books WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(Book {
+                    id: row.get(0)?,
+                    abbrev: row.get(1)?,
+                    name: row.get(2)?,
+                })
+            },
+        )
+        .optional()?;
+    row.ok_or(DbError::MissingVerse {
+        book: id,
+        chapter: 1,
+        verse: 1,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            INSERT INTO books (id, abbrev, name) VALUES (1, 'Ge', 'Genesis'), (2, 'Ex', 'Exodus');
+            INSERT INTO verses (book, chapter, verse, text, para_break) VALUES
+                (1, 1, 1, 'In the beginning', 1),
+                (1, 1, 2, 'And the earth', 0),
+                (1, 2, 1, 'Thus the heavens', 1),
+                (2, 1, 1, 'Now these are the names', 1);
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn chapter_lists_verses_in_order() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        let vs = chapter(&conn, 1, 1).unwrap();
+        assert_eq!(vs.len(), 2);
+        assert_eq!(vs[0].text, "In the beginning");
+        assert!(vs[0].para_break);
+        assert_eq!(max_chapter(&conn, 1).unwrap(), 2);
+        assert_eq!(max_verse(&conn, 1, 1).unwrap(), 2);
+    }
+}
