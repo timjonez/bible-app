@@ -104,7 +104,7 @@ impl SimpleComponent for App {
                     },
                     pack_end = &gtk::ToggleButton {
                         set_label: "Dict",
-                        set_tooltip_text: Some("Public-domain dictionaries (opens a second window)"),
+                        set_tooltip_text: Some("Dictionaries and topics (opens a second window)"),
                         set_valign: gtk::Align::Center,
                         #[watch]
                         set_active: model.dict.is_some(),

@@ -91,6 +91,45 @@ pub fn import_dictionaries(
     Ok(n)
 }
 
+pub fn import_topics(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+) -> Result<usize, WriteError> {
+    const STEMS: [&str; 12] = [
+        "Nave",
+        "Torrey",
+        "Bagster",
+        "Caryl",
+        "Contemp",
+        "Horne",
+        "Stackhouse",
+        "Tillotson",
+        "MER",
+        "700Sm",
+        "Popery",
+        "Josephus",
+    ];
+    let mut n = 0usize;
+    for stem in STEMS {
+        n += import_topic(conn, from, kjv, stem)?;
+    }
+    Ok(n)
+}
+
+fn import_topic(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+    stem: &str,
+) -> Result<usize, WriteError> {
+    if !from.join(format!("{stem}.tt4")).is_file() || !from.join(format!("{stem}.tt7")).is_file() {
+        return Ok(0);
+    }
+    let module = dumpfmt::load_topic(from, stem, &kjv.index, &kjv.books)?;
+    import_headwords(conn, &module, "topic")
+}
+
 fn import_dictionary(
     conn: &mut Connection,
     from: &Path,
@@ -101,17 +140,18 @@ fn import_dictionary(
         return Ok(0);
     }
     let module = dumpfmt::load_dictionary(from, stem, &kjv.index, &kjv.books)?;
-    import_headwords(conn, &module)
+    import_headwords(conn, &module, "dictionary")
 }
 
 fn import_headwords(
     conn: &mut Connection,
     module: &dumpfmt::HeadwordModule,
+    kind: &str,
 ) -> Result<usize, WriteError> {
     let tx = conn.transaction()?;
     tx.execute(
         "INSERT OR REPLACE INTO modules (id, kind, title, license) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![module.id, "dictionary", module.title, "public-domain"],
+        rusqlite::params![module.id, kind, module.title, "public-domain"],
     )?;
     tx.execute(
         "DELETE FROM entries WHERE module = ?1",

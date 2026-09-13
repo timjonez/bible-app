@@ -229,9 +229,10 @@ fn write_lemmas(dir: &Path, gcount: u32, hcount: u32, entries: &[(u16, &str, &st
     fs::write(dir.join("Strongs.sd1"), sd1).unwrap();
     fs::write(dir.join("Strongs.sd2"), pool).unwrap();
 
-    write_dictionary(
+    write_headwords(
         dir,
         "Easton",
+        "dt",
         "Easton's Bible Dictionary",
         "Easton",
         &[
@@ -239,15 +240,30 @@ fn write_lemmas(dir: &Path, gcount: u32, hcount: u32, entries: &[(u16, &str, &st
             ("Abaddon", "destruction"),
         ],
     );
+    write_headwords(
+        dir,
+        "Nave",
+        "tt",
+        "Nave's Topical Bible",
+        "Nave",
+        &[("AARON", "-Lineage of \x033\x03")],
+    );
 }
 
-fn write_dictionary(dir: &Path, stem: &str, title: &str, id: &str, entries: &[(&str, &str)]) {
+fn write_headwords(
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    title: &str,
+    id: &str,
+    entries: &[(&str, &str)],
+) {
     let mut header = vec![0u8; 80];
     header[0] = title.len() as u8;
     header[1..1 + title.len()].copy_from_slice(title.as_bytes());
     header[0x33] = id.len() as u8;
     header[0x34..0x34 + id.len()].copy_from_slice(id.as_bytes());
-    fs::write(dir.join(format!("{stem}.dt0")), header).unwrap();
+    fs::write(dir.join(format!("{stem}.{ext}0")), header).unwrap();
 
     let mut body = Vec::new();
     let mut idx = Vec::new();
@@ -260,8 +276,8 @@ fn write_dictionary(dir: &Path, stem: &str, title: &str, id: &str, entries: &[(&
         idx.extend_from_slice(&start.to_le_bytes());
         idx.extend_from_slice(&end.to_le_bytes());
     }
-    fs::write(dir.join(format!("{stem}.dt4")), body).unwrap();
-    fs::write(dir.join(format!("{stem}.dt7")), idx).unwrap();
+    fs::write(dir.join(format!("{stem}.{ext}4")), body).unwrap();
+    fs::write(dir.join(format!("{stem}.{ext}7")), idx).unwrap();
 }
 
 #[test]
@@ -298,7 +314,7 @@ fn synthetic_dump_imports_only_kjv_goldens() {
     assert_eq!(stats.xrefs, 1);
     assert!(stats.verse_words > 0);
     assert!(stats.strongs > 0);
-    assert!(stats.entries >= 2);
+    assert!(stats.entries >= 3);
     assert!(stats
         .report
         .imported
@@ -309,6 +325,11 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .imported
         .iter()
         .any(|(s, _)| s.eq_ignore_ascii_case("Easton")));
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("Nave")));
 
     let conn = Connection::open(&out).unwrap();
     bible_app_db::ensure_verses_fts(&conn).unwrap();
@@ -363,6 +384,9 @@ fn synthetic_dump_imports_only_kjv_goldens() {
     assert_eq!(head, "Aaron");
     assert!(text.contains("Amram"));
     assert!(text.contains("Revelation"));
+
+    let nave = bible_app_db::search_entries(&conn, "Nave", "AARON", 10).unwrap();
+    assert_eq!(nave[0].headword, "AARON");
 }
 
 #[test]
@@ -415,6 +439,16 @@ fn real_dump_kjv_goldens() {
         .imported
         .iter()
         .any(|(s, _)| s.eq_ignore_ascii_case("Smith")));
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("Nave")));
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("Torrey")));
     assert!(!stats
         .report
         .imported
@@ -508,5 +542,11 @@ fn real_dump_kjv_goldens() {
     assert!(
         text.to_lowercase().contains("amram") || text.to_lowercase().contains("moses"),
         "unexpected Easton Aaron: {text}"
+    );
+    let nave = bible_app_db::search_entries(&conn, "Nave", "AARON", 10).unwrap();
+    assert!(
+        nave.iter()
+            .any(|h| h.headword.eq_ignore_ascii_case("Aaron")),
+        "Nave missing AARON: {nave:?}"
     );
 }

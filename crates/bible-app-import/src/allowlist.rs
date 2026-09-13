@@ -79,10 +79,18 @@ pub fn classify(stem: &str) -> Classification {
         "PBAUTHORS" => skip(Kind::Other, "product index, not a public-domain work"),
 
         // Topics
-        "NAVE" | "TORREY" | "BAGSTER" | "CARYL" | "CONTEMP" | "HORNE" | "STACKHOUSE"
-        | "TILLOTSON" | "MER" | "700SM" | "POPERY" | "JOSEPHUS" => {
-            defer(Kind::Topic, "public-domain topical (later phase)")
-        }
+        "NAVE" => imp(Kind::Topic, "Nave's Topical Bible (public domain)"),
+        "TORREY" => imp(Kind::Topic, "Torrey's Topical Textbook (public domain)"),
+        "BAGSTER" => imp(Kind::Topic, "Bagster's Daily Light (public domain)"),
+        "CARYL" => imp(Kind::Topic, "Joseph Caryl quotations (public domain)"),
+        "CONTEMP" => imp(Kind::Topic, "Bishop Hall's Contemplations (public domain)"),
+        "HORNE" => imp(Kind::Topic, "Horne on the Psalms (public domain)"),
+        "STACKHOUSE" => imp(Kind::Topic, "Stackhouse Body of Divinity (public domain)"),
+        "TILLOTSON" => imp(Kind::Topic, "Tillotson Attributes of God (public domain)"),
+        "MER" => imp(Kind::Topic, "Spurgeon Morning and Evening (public domain)"),
+        "700SM" => imp(Kind::Topic, "Spurgeon sermons (public domain)"),
+        "POPERY" => imp(Kind::Topic, "Nevins Thoughts on Popery (public domain)"),
+        "JOSEPHUS" => imp(Kind::Topic, "Josephus (public domain)"),
         "CHAIN" => skip(Kind::Topic, "Thompson Chain: still commercial"),
         "ELR" | "SERMONS" | "SERMONII" | "QUOTES" | "HISTORYUS" | "WILSON" | "FUNERALS"
         | "GOSPEL" | "CHRIST" | "CHRISTO" | "CHURCHSTAT" | "HURST" | "MESSIAH" | "PRAYERS"
@@ -201,6 +209,15 @@ mod tests {
         let c = classify("bcdxrefs");
         assert_eq!(c.decision, Decision::Skip);
         assert_eq!(c.kind, Kind::Xref);
+    }
+
+    #[test]
+    fn topics_imported() {
+        for id in ["Nave", "Torrey", "Bagster", "700Sm", "Josephus"] {
+            let c = classify(id);
+            assert_eq!(c.decision, Decision::Import, "{id}");
+            assert_eq!(c.kind, Kind::Topic, "{id}");
+        }
     }
 
     #[test]
