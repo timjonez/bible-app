@@ -44,10 +44,14 @@ pub fn classify(stem: &str) -> Classification {
         "NIV" | "NASB" | "NAS95" | "NRSV" | "NKJV" | "RSV" | "MKJV" | "BBE" | "FILIPINO"
         | "FILIP" | "RVG04" | "SRVA" => skip(Kind::Bible, "not public domain"),
 
-        // Commentaries — PD, later phases
-        "ACC" | "BARNES" | "DODDRIDGE" | "GBN" | "HALLS" | "HAWEIS" | "JFB" | "JWN" | "MHC"
-        | "MHCC" | "MACKNIGHT" | "PLWL" | "PNTC" | "PNT" | "POOLE" | "SCM" | "SDC" | "SCOTT"
-        | "TFG" | "TOD" | "TSK" | "WBN" => {
+        // Commentaries — MHC this phase; the rest later
+        "MHC" => imp(
+            Kind::Commentary,
+            "Matthew Henry's Commentary (public domain)",
+        ),
+        "ACC" | "BARNES" | "DODDRIDGE" | "GBN" | "HALLS" | "HAWEIS" | "JFB" | "JWN" | "MHCC"
+        | "MACKNIGHT" | "PLWL" | "PNTC" | "PNT" | "POOLE" | "SCM" | "SDC" | "SCOTT" | "TFG"
+        | "TOD" | "TSK" | "WBN" => {
             defer(Kind::Commentary, "public-domain commentary (later phase)")
         }
 
@@ -159,8 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn mhc_deferred() {
+    fn mhc_imported() {
         let c = classify("MHC");
+        assert_eq!(c.decision, Decision::Import);
+        assert_eq!(c.kind, Kind::Commentary);
+    }
+
+    #[test]
+    fn tsk_still_deferred() {
+        let c = classify("TSK");
         assert_eq!(c.decision, Decision::Defer);
         assert_eq!(c.kind, Kind::Commentary);
     }

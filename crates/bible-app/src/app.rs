@@ -1,4 +1,5 @@
 use crate::config;
+use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::search;
 use adw::prelude::*;
@@ -25,6 +26,7 @@ pub struct App {
     search_status: String,
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
+    mhc: Option<mhc::MhcWidgets>,
 }
 
 #[derive(Debug)]
@@ -37,6 +39,8 @@ pub enum Msg {
     Search(String),
     SearchActivate,
     OpenHit(i32),
+    ToggleMhc,
+    MhcClosed,
 }
 
 #[relm4::component(pub)]
@@ -75,6 +79,16 @@ impl SimpleComponent for App {
                         #[watch]
                         set_sensitive: !model.search_open,
                         connect_clicked => Msg::NextChapter,
+                    },
+                    pack_end = &gtk::ToggleButton {
+                        set_label: "MHC",
+                        set_tooltip_text: Some("Matthew Henry (opens a second window)"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_active: model.mhc.is_some(),
+                        #[watch]
+                        set_sensitive: model.error.is_none(),
+                        connect_clicked => Msg::ToggleMhc,
                     },
                     pack_end = &gtk::ToggleButton {
                         set_icon_name: "edit-find-symbolic",
@@ -259,6 +273,7 @@ impl SimpleComponent for App {
             search_status: search::status("", 0, bible_app_db::DEFAULT_LIMIT),
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
+            mhc: None,
         };
         model.refresh_chapter(false);
 
@@ -327,7 +342,7 @@ impl SimpleComponent for App {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             Msg::SelectBook(id) => {
                 self.at = Ref {
@@ -404,6 +419,20 @@ impl SimpleComponent for App {
             Msg::OpenHit(idx) => {
                 self.open_hit(idx);
             }
+            Msg::ToggleMhc => {
+                if let Some(widgets) = self.mhc.take() {
+                    widgets.window.close();
+                } else if self.error.is_none() {
+                    let widgets = mhc::open(sender.input_sender().clone(), self.at, &self.books);
+                    if let Some(conn) = &self.conn {
+                        mhc::fill(&widgets, conn, &self.books, self.at);
+                    }
+                    self.mhc = Some(widgets);
+                }
+            }
+            Msg::MhcClosed => {
+                self.mhc = None;
+            }
         }
     }
 }
@@ -470,6 +499,13 @@ impl App {
         } else {
             self.scroll_to_top();
         }
+        self.refresh_mhc();
+    }
+
+    fn refresh_mhc(&self) {
+        let Some(widgets) = &self.mhc else { return };
+        let Some(conn) = &self.conn else { return };
+        mhc::fill(widgets, conn, &self.books, self.at);
     }
 
     fn highlight_verse(&self, verse: u8) {

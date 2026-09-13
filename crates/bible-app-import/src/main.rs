@@ -22,7 +22,12 @@ fn main() -> ExitCode {
     match import_from(&args.from, &args.out) {
         Ok(stats) => {
             stats.report.print();
-            eprintln!("wrote {} KJV verses → {}", stats.verses, args.out.display());
+            eprintln!(
+                "wrote {} KJV verses, {} MHC comments → {}",
+                stats.verses,
+                stats.resources,
+                args.out.display()
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

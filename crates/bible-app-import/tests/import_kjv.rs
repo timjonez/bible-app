@@ -80,6 +80,20 @@ fn write_synthetic_dump(dir: &Path) {
     mhc[0x33] = 3;
     mhc[0x34..0x37].copy_from_slice(b"MHC");
     fs::write(dir.join("MHC.ct0"), mhc).unwrap();
+
+    let mut mhc4 = Vec::new();
+    mhc4.extend_from_slice(b"1\x00Henry on Genesis 1:1.");
+    let v2 = mhc4.len() as u32;
+    mhc4.extend_from_slice(b"16\x00Henry on John 3:16, the only begotten Son.");
+    fs::write(dir.join("MHC.ct4"), &mhc4).unwrap();
+    let mut mhc7 = Vec::new();
+    mhc7.extend_from_slice(&0u32.to_le_bytes());
+    mhc7.extend_from_slice(&2u32.to_le_bytes());
+    mhc7.extend_from_slice(&v2.to_le_bytes());
+    mhc7.extend_from_slice(&(v2 + 3).to_le_bytes());
+    mhc7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    mhc7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    fs::write(dir.join("MHC.ct7"), mhc7).unwrap();
 }
 
 #[test]
@@ -104,9 +118,10 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .any(|(s, _)| s.eq_ignore_ascii_case("NIV")));
     assert!(stats
         .report
-        .deferred
+        .imported
         .iter()
         .any(|(s, _)| s.eq_ignore_ascii_case("MHC")));
+    assert_eq!(stats.resources, 2);
 
     let conn = Connection::open(&out).unwrap();
     bible_app_db::ensure_verses_fts(&conn).unwrap();
@@ -124,6 +139,11 @@ fn synthetic_dump_imports_only_kjv_goldens() {
     let hits = bible_app_db::search_verses(&conn, "only begotten", 20).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!((hits[0].book, hits[0].chapter, hits[0].verse), (43, 3, 16));
+
+    let henry = bible_app_db::resource_covering(&conn, "MHC", 43, 3, 16)
+        .unwrap()
+        .unwrap();
+    assert!(henry.text.contains("only begotten"));
 }
 
 #[test]
@@ -136,11 +156,22 @@ fn real_cd_kjv_goldens() {
     let out = tmp.path().join("bible-app.sqlite");
     let stats = import_from(&from, &out).unwrap();
     assert_eq!(stats.verses, 31_102);
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("KJV")));
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("MHC")));
+    assert!(stats.resources > 0);
     assert!(!stats
         .report
         .imported
         .iter()
-        .any(|(s, _)| !s.eq_ignore_ascii_case("KJV")));
+        .any(|(s, _)| s.eq_ignore_ascii_case("NIV")));
     for banned in ["NIV", "WEB", "NASB", "NKJV", "RSV"] {
         assert_eq!(classify(banned).decision, Decision::Skip, "{banned}");
         assert!(
@@ -156,7 +187,7 @@ fn real_cd_kjv_goldens() {
         .report
         .deferred
         .iter()
-        .any(|(s, _)| s.eq_ignore_ascii_case("MHC")));
+        .any(|(s, _)| s.eq_ignore_ascii_case("TSK")));
 
     let conn = bible_app_db::open(&out).unwrap();
     let gen = get_verse(&conn, 1, 1, 1).unwrap();
@@ -165,6 +196,16 @@ fn real_cd_kjv_goldens() {
     assert_eq!(get_verse(&conn, 43, 3, 16).unwrap().text, JOHN_3_16);
     assert_eq!(get_verse(&conn, 66, 22, 21).unwrap().text, REV_22_21);
     assert_eq!(bible_app_db::books(&conn).unwrap().len(), 66);
+
+    let henry = bible_app_db::resource_covering(&conn, "MHC", 43, 3, 16)
+        .unwrap()
+        .expect("MHC should cover John 3:16");
+    assert!(
+        henry.text.to_lowercase().contains("eternal")
+            || henry.text.to_lowercase().contains("believ"),
+        "unexpected MHC covering John 3:16: {}",
+        henry.text
+    );
 
     let hits = bible_app_db::search_verses(&conn, "only begotten", 50).unwrap();
     assert!(
