@@ -14,7 +14,7 @@ cargo run -p bible-app-import -- \
   --out data/bible-app.sqlite
 ```
 
-The importer brings in **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, and **Strong’s**. Other public-domain modules (more commentaries, dictionaries, topics) come in later phases. Copyrighted Bibles and modules are skipped.
+The importer brings in **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, and the public-domain dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society). Remaining commentaries and topics come later. Copyrighted Bibles and modules are skipped.
 
 See `data/README.md`.
 
@@ -31,6 +31,7 @@ cargo run -p bible-app
 - MHC opens Matthew Henry for the current verse in a second window
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
 - Click an underlined KJV word for its Strong’s number, lemma, and definition
+- Dict opens Easton (and Smith, Hitchcock, ATSD); type a headword and click a result
 - Last position is stored in `~/.config/bible-app/state.toml`
 
 ## Status
@@ -39,4 +40,4 @@ cargo run -p bible-app
 - [x] Phase 1: GTK4 + Libadwaita passage window
 - [x] Phase 2: search
 - [x] Phase 3: Strong’s, TSK cross-references, Matthew Henry
-- [ ] Phase 4: remaining public-domain dictionaries and topics
+- [ ] Phase 4: remaining public-domain topics (dictionaries are in)

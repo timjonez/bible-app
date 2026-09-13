@@ -78,6 +78,56 @@ pub fn import_tsk(
     Ok((n, x))
 }
 
+pub fn import_dictionaries(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+) -> Result<usize, WriteError> {
+    const STEMS: [&str; 4] = ["Easton", "Smith", "Names", "ATSD"];
+    let mut n = 0usize;
+    for stem in STEMS {
+        n += import_dictionary(conn, from, kjv, stem)?;
+    }
+    Ok(n)
+}
+
+fn import_dictionary(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+    stem: &str,
+) -> Result<usize, WriteError> {
+    if !from.join(format!("{stem}.dt4")).is_file() || !from.join(format!("{stem}.dt7")).is_file() {
+        return Ok(0);
+    }
+    let module = pbcd::load_dictionary(from, stem, &kjv.index, &kjv.books)?;
+    import_headwords(conn, &module)
+}
+
+fn import_headwords(
+    conn: &mut Connection,
+    module: &pbcd::HeadwordModule,
+) -> Result<usize, WriteError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO modules (id, kind, title, license) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![module.id, "dictionary", module.title, "public-domain"],
+    )?;
+    tx.execute(
+        "DELETE FROM entries WHERE module = ?1",
+        rusqlite::params![module.id],
+    )?;
+    {
+        let mut stmt =
+            tx.prepare("INSERT INTO entries (module, i, headword, text) VALUES (?1, ?2, ?3, ?4)")?;
+        for e in &module.entries {
+            stmt.execute(rusqlite::params![module.id, e.i, e.headword, e.text])?;
+        }
+    }
+    tx.commit()?;
+    Ok(module.entries.len())
+}
+
 pub fn import_strongs(
     conn: &mut Connection,
     from: &Path,
