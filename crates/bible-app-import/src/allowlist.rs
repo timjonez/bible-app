@@ -82,8 +82,15 @@ pub fn classify(stem: &str) -> Classification {
         | "GOSPEL" | "CHRIST" | "CHRISTO" | "CHURCHSTAT" | "HURST" | "MESSIAH" | "PRAYERS"
         | "TRAVELL" | "TRINITY" | "WALDENSES" => skip(Kind::Topic, "compilation/edition unclear"),
 
-        // Strong's (later) and vendor xref DB (never)
-        "STRGRK" | "STRHEB" | "STRONGS" => defer(Kind::Strongs, "Strong's 1890 (later phase)"),
+        "STRGRK" => imp(
+            Kind::Strongs,
+            "Strong's Greek dictionary (public domain, 1890)",
+        ),
+        "STRHEB" => imp(
+            Kind::Strongs,
+            "Strong's Hebrew dictionary (public domain, 1890)",
+        ),
+        "STRONGS" => imp(Kind::Strongs, "Strong's lemmas (public domain, 1890)"),
         "BCDXREFS" => skip(Kind::Xref, "vendor xref database; use TSK instead"),
 
         _ => skip(Kind::Other, "not on the allowlist"),
@@ -188,6 +195,15 @@ mod tests {
         let c = classify("bcdxrefs");
         assert_eq!(c.decision, Decision::Skip);
         assert_eq!(c.kind, Kind::Xref);
+    }
+
+    #[test]
+    fn strongs_imported() {
+        for id in ["StrGrk", "StrHeb", "Strongs"] {
+            let c = classify(id);
+            assert_eq!(c.decision, Decision::Import, "{id}");
+            assert_eq!(c.kind, Kind::Strongs, "{id}");
+        }
     }
 
     #[test]

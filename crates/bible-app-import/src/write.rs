@@ -78,6 +78,87 @@ pub fn import_tsk(
     Ok((n, x))
 }
 
+pub fn import_strongs(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+) -> Result<(usize, usize), WriteError> {
+    let mapped = dumpfmt::load_word_map(from, kjv)?;
+    let lexicon = dumpfmt::load_lexicon(from)?;
+    let words = import_verse_words(conn, &mapped)?;
+    let defs = import_lexicon(conn, &lexicon)?;
+    Ok((words, defs))
+}
+
+fn import_verse_words(
+    conn: &mut Connection,
+    mapped: &[dumpfmt::MappedVerse],
+) -> Result<usize, WriteError> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM verse_words", [])?;
+    let mut n = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO verse_words (book, chapter, verse, i, start, end_pos, strongs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for v in mapped {
+            for w in &v.words {
+                if w.refs.is_empty() {
+                    continue;
+                }
+                let codes: Vec<String> = w.refs.iter().map(|r| r.code()).collect();
+                n += stmt.execute(rusqlite::params![
+                    v.book,
+                    v.chapter,
+                    v.verse,
+                    w.i,
+                    w.start,
+                    w.end,
+                    codes.join(" "),
+                ])?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(n)
+}
+
+fn import_lexicon(conn: &mut Connection, entries: &[dumpfmt::LexEntry]) -> Result<usize, WriteError> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO modules (id, kind, title, license) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            "STRONGS",
+            "strongs",
+            "Strong's Exhaustive Concordance (1890)",
+            "public-domain"
+        ],
+    )?;
+    tx.execute("DELETE FROM strongs", [])?;
+    let mut n = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO strongs (num, lang, lemma, pronunciation, definition)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for e in entries {
+            n += stmt.execute(rusqlite::params![
+                e.num,
+                e.lang,
+                e.lemma,
+                e.pronunciation,
+                e.definition,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(n)
+}
+
 fn import_commentary(
     conn: &mut Connection,
     from: &Path,

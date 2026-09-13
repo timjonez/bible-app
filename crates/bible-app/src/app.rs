@@ -2,9 +2,10 @@ use crate::config;
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::search;
+use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
-use bible_app_db::{self, Book, SearchHit};
+use bible_app_db::{self, Book, SearchHit, Verse};
 use gtk::glib;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
@@ -29,6 +30,14 @@ pub struct App {
     search_entry: gtk::SearchEntry,
     mhc: Option<mhc::MhcWidgets>,
     tsk: Option<tsk::TskWidgets>,
+    chapter_words: Vec<TaggedWord>,
+    strongs_popover: gtk::Popover,
+}
+
+struct TaggedWord {
+    start: i32,
+    end: i32,
+    codes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -46,6 +55,7 @@ pub enum Msg {
     ToggleTsk,
     TskClosed,
     OpenTskXref(i32),
+    ClickWord(i32),
 }
 
 #[relm4::component(pub)]
@@ -238,6 +248,7 @@ impl SimpleComponent for App {
                                 set_bottom_margin: 16,
                                 set_pixels_above_lines: 2,
                                 set_pixels_below_lines: 2,
+                                set_tooltip_text: Some("Click an underlined word for Strong's"),
                                 set_accessible_role: gtk::AccessibleRole::Document,
                             }
                         }
@@ -257,6 +268,8 @@ impl SimpleComponent for App {
         let search_entry = gtk::SearchEntry::new();
         let chapter_view = gtk::TextView::new();
         let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+        buffer.tag_table().add(&strongs::make_tag());
+        let strongs_popover = strongs::create(&chapter_view);
 
         let (conn, books, at, error) = match load_library() {
             Ok((conn, books, at)) => (Some(conn), books, at, None),
@@ -290,6 +303,8 @@ impl SimpleComponent for App {
             search_entry: search_entry.clone(),
             mhc: None,
             tsk: None,
+            chapter_words: Vec::new(),
+            strongs_popover,
         };
         model.refresh_chapter(false);
 
@@ -354,6 +369,19 @@ impl SimpleComponent for App {
             glib::Propagation::Proceed
         });
         model.search_entry.add_controller(down);
+
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        let view = model.chapter_view.clone();
+        let click_sender = sender.clone();
+        click.connect_released(move |_, _, x, y| {
+            let (bx, by) =
+                view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            if let Some(iter) = view.iter_at_location(bx, by) {
+                click_sender.input(Msg::ClickWord(iter.offset()));
+            }
+        });
+        model.chapter_view.add_controller(click);
 
         ComponentParts { model, widgets }
     }
@@ -474,6 +502,9 @@ impl SimpleComponent for App {
                 self.refresh_chapter(true);
                 self.sync_book_row();
             }
+            Msg::ClickWord(offset) => {
+                self.open_strongs(offset);
+            }
         }
     }
 }
@@ -517,23 +548,30 @@ impl App {
     }
 
     fn refresh_chapter(&mut self, highlight: bool) {
-        let Some(conn) = &self.conn else {
-            self.title = "bible-app".into();
-            return;
+        let verses = {
+            let Some(conn) = &self.conn else {
+                self.title = "bible-app".into();
+                return;
+            };
+            self.title = nav::format_chapter(&self.books, self.at.book, self.at.chapter);
+            match bible_app_db::chapter(conn, self.at.book, self.at.chapter) {
+                Ok(verses) if !verses.is_empty() => {
+                    self.chapter_text = nav::format_chapter_text(&verses);
+                    verses
+                }
+                Ok(_) => {
+                    self.chapter_text = "No verses in this chapter.".into();
+                    Vec::new()
+                }
+                Err(e) => {
+                    self.chapter_text = e.to_string();
+                    Vec::new()
+                }
+            }
         };
-        self.title = nav::format_chapter(&self.books, self.at.book, self.at.chapter);
-        match bible_app_db::chapter(conn, self.at.book, self.at.chapter) {
-            Ok(verses) if !verses.is_empty() => {
-                self.chapter_text = nav::format_chapter_text(&verses);
-            }
-            Ok(_) => {
-                self.chapter_text = "No verses in this chapter.".into();
-            }
-            Err(e) => {
-                self.chapter_text = e.to_string();
-            }
-        }
+        self.strongs_popover.popdown();
         self.buffer.set_text(&self.chapter_text);
+        self.tag_strongs(&verses);
         config::save_state(self.at);
         if highlight {
             self.highlight_verse(self.at.verse);
@@ -557,6 +595,64 @@ impl App {
         if let Some(widgets) = &mut self.tsk {
             tsk::fill(widgets, conn, &books, at);
         }
+    }
+
+    fn tag_strongs(&mut self, verses: &[Verse]) {
+        self.chapter_words.clear();
+        let Some(tag) = self.buffer.tag_table().lookup("strongs") else {
+            return;
+        };
+        let start = self.buffer.start_iter();
+        let end = self.buffer.end_iter();
+        self.buffer.remove_tag(&tag, &start, &end);
+        let Some(conn) = &self.conn else { return };
+        let Ok(words) = bible_app_db::chapter_words(conn, self.at.book, self.at.chapter) else {
+            return;
+        };
+        let starts = nav::verse_body_offsets(verses);
+        for w in words {
+            let Some((_, body)) = starts.iter().find(|(v, _)| *v == w.verse) else {
+                continue;
+            };
+            let start = *body + w.start;
+            let end = *body + w.end;
+            if start < 0 || end <= start {
+                continue;
+            }
+            let s = self.buffer.iter_at_offset(start);
+            let e = self.buffer.iter_at_offset(end);
+            self.buffer.apply_tag(&tag, &s, &e);
+            self.chapter_words.push(TaggedWord {
+                start,
+                end,
+                codes: w
+                    .strongs
+                    .split_whitespace()
+                    .map(ToString::to_string)
+                    .collect(),
+            });
+        }
+    }
+
+    fn open_strongs(&self, offset: i32) {
+        let Some(word) = self
+            .chapter_words
+            .iter()
+            .find(|w| offset >= w.start && offset < w.end)
+        else {
+            self.strongs_popover.popdown();
+            return;
+        };
+        let Some(conn) = &self.conn else { return };
+        let defs: Vec<_> = word
+            .codes
+            .iter()
+            .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
+            .collect();
+        if defs.is_empty() {
+            return;
+        }
+        strongs::present(&self.strongs_popover, &self.chapter_view, word.start, &defs);
     }
 
     fn highlight_verse(&self, verse: u8) {

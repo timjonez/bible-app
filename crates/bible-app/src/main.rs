@@ -3,6 +3,7 @@ mod config;
 mod mhc;
 mod nav;
 mod search;
+mod strongs;
 mod tsk;
 
 fn main() {

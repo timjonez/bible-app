@@ -11,6 +11,7 @@ The importer:
 - Copies **KJV** verse text into SQLite (public domain, 1769).
 - Copies **Matthew Henry** comments keyed to KJV verses.
 - Copies **Treasury of Scripture Knowledge** notes and builds cross-references from TSK (not the dump xref database).
+- Copies **Strong’s** 1890 Hebrew/Greek definitions and maps them onto KJV words (`KJV.bt8`).
 - Skips every other Bible (this app is KJV-only).
 - Skips works that are not public domain.
 - Defers remaining allowlisted commentaries/dictionaries/topics until later phases.

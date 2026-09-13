@@ -8,7 +8,7 @@ pub use search::{
     ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
 };
 
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -102,6 +102,27 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
                 from_book, from_chapter, from_verse,
                 to_book, to_chapter, to_verse
             )
+        );
+
+        CREATE TABLE IF NOT EXISTS verse_words (
+            book    INTEGER NOT NULL,
+            chapter INTEGER NOT NULL,
+            verse   INTEGER NOT NULL,
+            i       INTEGER NOT NULL,
+            start   INTEGER NOT NULL,
+            end_pos INTEGER NOT NULL,
+            strongs TEXT NOT NULL,
+            PRIMARY KEY (book, chapter, verse, i),
+            FOREIGN KEY (book) REFERENCES books(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS strongs (
+            num            INTEGER NOT NULL,
+            lang           TEXT NOT NULL,
+            lemma          TEXT NOT NULL,
+            pronunciation  TEXT NOT NULL,
+            definition     TEXT NOT NULL,
+            PRIMARY KEY (num, lang)
         );
 
         CREATE TABLE IF NOT EXISTS import_log (
@@ -257,6 +278,92 @@ pub struct Xref {
     pub verse: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerseWord {
+    pub book: u8,
+    pub chapter: u8,
+    pub verse: u8,
+    pub i: i32,
+    pub start: i32,
+    pub end: i32,
+    pub strongs: String,
+}
+
+pub fn chapter_words(conn: &Connection, book: u8, chapter: u8) -> Result<Vec<VerseWord>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT book, chapter, verse, i, start, end_pos, strongs
+         FROM verse_words
+         WHERE book = ?1 AND chapter = ?2
+         ORDER BY verse, i",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![book, chapter], |row| {
+        Ok(VerseWord {
+            book: row.get(0)?,
+            chapter: row.get(1)?,
+            verse: row.get(2)?,
+            i: row.get(3)?,
+            start: row.get(4)?,
+            end: row.get(5)?,
+            strongs: row.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrongDef {
+    pub num: i32,
+    pub lang: String,
+    pub lemma: String,
+    pub pronunciation: String,
+    pub definition: String,
+}
+
+pub fn parse_strongs_code(code: &str) -> Option<(i32, String)> {
+    let code = code.trim();
+    let (lang, rest) = code.split_at(code.chars().next()?.len_utf8());
+    let lang = lang.to_ascii_uppercase();
+    if lang != "G" && lang != "H" {
+        return None;
+    }
+    let num: i32 = rest.parse().ok()?;
+    if num <= 0 {
+        return None;
+    }
+    Some((num, lang))
+}
+
+pub fn lookup_strongs(conn: &Connection, code: &str) -> Result<Option<StrongDef>, DbError> {
+    let Some((num, lang)) = parse_strongs_code(code) else {
+        return Ok(None);
+    };
+    let row = conn
+        .query_row(
+            "SELECT num, lang, lemma, pronunciation, definition
+             FROM strongs WHERE num = ?1 AND lang = ?2",
+            rusqlite::params![num, lang],
+            |row| {
+                Ok(StrongDef {
+                    num: row.get(0)?,
+                    lang: row.get(1)?,
+                    lemma: row.get(2)?,
+                    pronunciation: row.get(3)?,
+                    definition: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row.or_else(|| {
+        Some(StrongDef {
+            num,
+            lang,
+            lemma: String::new(),
+            pronunciation: String::new(),
+            definition: String::new(),
+        })
+    }))
+}
+
 pub fn xrefs_from(
     conn: &Connection,
     book: u8,
@@ -366,5 +473,26 @@ mod tests {
         assert_eq!(xs.len(), 1);
         assert_eq!((xs[0].book, xs[0].chapter, xs[0].verse), (2, 1, 1));
         assert!(xrefs_from(&conn, 1, 1, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chapter_words_and_strongs_lookup() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO verse_words (book, chapter, verse, i, start, end_pos, strongs)
+            VALUES (1, 1, 1, 0, 0, 3, 'H7225');
+            INSERT INTO strongs (num, lang, lemma, pronunciation, definition)
+            VALUES (7225, 'H', 're''shiyth', 'ray-sheeth''', 'the first');
+            "#,
+        )
+        .unwrap();
+        let ws = chapter_words(&conn, 1, 1).unwrap();
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].strongs, "H7225");
+        let def = lookup_strongs(&conn, "H7225").unwrap().unwrap();
+        assert_eq!(def.lemma, "re'shiyth");
+        assert_eq!(parse_strongs_code("G2316"), Some((2316, "G".into())));
     }
 }
