@@ -94,6 +94,26 @@ fn write_synthetic_dump(dir: &Path) {
     mhc7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     mhc7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     fs::write(dir.join("MHC.ct7"), mhc7).unwrap();
+
+    let mut tsk = vec![0u8; 80];
+    let t = b"The Treasury of Scripture Knowledge";
+    tsk[0] = t.len() as u8;
+    tsk[1..1 + t.len()].copy_from_slice(t);
+    tsk[0x33] = 3;
+    tsk[0x34..0x37].copy_from_slice(b"TSK");
+    fs::write(dir.join("TSK.ct0"), tsk).unwrap();
+    // Hex 3 in this 3-verse index is Revelation 22:21.
+    let mut tsk4 = Vec::new();
+    tsk4.extend_from_slice(b"1\x00beginning. \x033\x03");
+    fs::write(dir.join("TSK.ct4"), &tsk4).unwrap();
+    let mut tsk7 = Vec::new();
+    tsk7.extend_from_slice(&0u32.to_le_bytes());
+    tsk7.extend_from_slice(&2u32.to_le_bytes());
+    tsk7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    tsk7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    tsk7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    tsk7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    fs::write(dir.join("TSK.ct7"), tsk7).unwrap();
 }
 
 #[test]
@@ -121,7 +141,13 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .imported
         .iter()
         .any(|(s, _)| s.eq_ignore_ascii_case("MHC")));
-    assert_eq!(stats.resources, 2);
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("TSK")));
+    assert_eq!(stats.resources, 3);
+    assert_eq!(stats.xrefs, 1);
 
     let conn = Connection::open(&out).unwrap();
     bible_app_db::ensure_verses_fts(&conn).unwrap();
@@ -144,6 +170,12 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .unwrap()
         .unwrap();
     assert!(henry.text.contains("only begotten"));
+    let xrefs = bible_app_db::xrefs_from(&conn, 1, 1, 1).unwrap();
+    assert_eq!(xrefs.len(), 1);
+    assert_eq!(
+        (xrefs[0].book, xrefs[0].chapter, xrefs[0].verse),
+        (66, 22, 21)
+    );
 }
 
 #[test]
@@ -166,7 +198,13 @@ fn real_cd_kjv_goldens() {
         .imported
         .iter()
         .any(|(s, _)| s.eq_ignore_ascii_case("MHC")));
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("TSK")));
     assert!(stats.resources > 0);
+    assert!(stats.xrefs > 0);
     assert!(!stats
         .report
         .imported
@@ -185,9 +223,9 @@ fn real_cd_kjv_goldens() {
     }
     assert!(stats
         .report
-        .deferred
+        .skipped
         .iter()
-        .any(|(s, _)| s.eq_ignore_ascii_case("TSK")));
+        .any(|(s, _)| s.eq_ignore_ascii_case("bcdxrefs")));
 
     let conn = bible_app_db::open(&out).unwrap();
     let gen = get_verse(&conn, 1, 1, 1).unwrap();
@@ -196,6 +234,16 @@ fn real_cd_kjv_goldens() {
     assert_eq!(get_verse(&conn, 43, 3, 16).unwrap().text, JOHN_3_16);
     assert_eq!(get_verse(&conn, 66, 22, 21).unwrap().text, REV_22_21);
     assert_eq!(bible_app_db::books(&conn).unwrap().len(), 66);
+
+    let tsk = bible_app_db::resource_covering(&conn, "TSK", 43, 3, 16)
+        .unwrap()
+        .expect("TSK should cover John 3:16");
+    assert!(!tsk.text.is_empty());
+    let xrefs = bible_app_db::xrefs_from(&conn, 43, 3, 16).unwrap();
+    assert!(
+        !xrefs.is_empty(),
+        "TSK should yield cross-references for John 3:16"
+    );
 
     let henry = bible_app_db::resource_covering(&conn, "MHC", 43, 3, 16)
         .unwrap()

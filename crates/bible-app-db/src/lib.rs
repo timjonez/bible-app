@@ -8,7 +8,7 @@ pub use search::{
     ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
 };
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -89,6 +89,19 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
             PRIMARY KEY (module, book, chapter, verse),
             FOREIGN KEY (module) REFERENCES modules(id),
             FOREIGN KEY (book) REFERENCES books(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS xrefs (
+            from_book    INTEGER NOT NULL,
+            from_chapter INTEGER NOT NULL,
+            from_verse   INTEGER NOT NULL,
+            to_book      INTEGER NOT NULL,
+            to_chapter   INTEGER NOT NULL,
+            to_verse     INTEGER NOT NULL,
+            PRIMARY KEY (
+                from_book, from_chapter, from_verse,
+                to_book, to_chapter, to_verse
+            )
         );
 
         CREATE TABLE IF NOT EXISTS import_log (
@@ -237,6 +250,35 @@ pub fn resource_covering(
     Ok(row)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Xref {
+    pub book: u8,
+    pub chapter: u8,
+    pub verse: u8,
+}
+
+pub fn xrefs_from(
+    conn: &Connection,
+    book: u8,
+    chapter: u8,
+    verse: u8,
+) -> Result<Vec<Xref>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT to_book, to_chapter, to_verse
+         FROM xrefs
+         WHERE from_book = ?1 AND from_chapter = ?2 AND from_verse = ?3
+         ORDER BY to_book, to_chapter, to_verse",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![book, chapter, verse], |row| {
+        Ok(Xref {
+            book: row.get(0)?,
+            chapter: row.get(1)?,
+            verse: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn book_by_id(conn: &Connection, id: u8) -> Result<Book, DbError> {
     let row = conn
         .query_row(
@@ -305,5 +347,24 @@ mod tests {
         assert_eq!(at.verse, 1);
         assert_eq!(at.text, "comment on verse 1");
         assert!(resource_covering(&conn, "MHC", 1, 2, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn xrefs_from_lists_destinations() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO xrefs (
+                from_book, from_chapter, from_verse,
+                to_book, to_chapter, to_verse
+            ) VALUES (1, 1, 1, 2, 1, 1);
+            "#,
+        )
+        .unwrap();
+        let xs = xrefs_from(&conn, 1, 1, 1).unwrap();
+        assert_eq!(xs.len(), 1);
+        assert_eq!((xs[0].book, xs[0].chapter, xs[0].verse), (2, 1, 1));
+        assert!(xrefs_from(&conn, 1, 1, 2).unwrap().is_empty());
     }
 }
