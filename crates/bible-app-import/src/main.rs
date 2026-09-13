@@ -23,10 +23,12 @@ fn main() -> ExitCode {
         Ok(stats) => {
             stats.report.print();
             eprintln!(
-                "wrote {} KJV verses, {} comments, {} xrefs → {}",
+                "wrote {} KJV verses, {} comments, {} xrefs, {} word maps, {} Strong's entries → {}",
                 stats.verses,
                 stats.resources,
                 stats.xrefs,
+                stats.verse_words,
+                stats.strongs,
                 args.out.display()
             );
             ExitCode::SUCCESS

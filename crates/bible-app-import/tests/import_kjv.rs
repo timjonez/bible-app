@@ -114,6 +114,120 @@ fn write_synthetic_dump(dir: &Path) {
     tsk7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     tsk7.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     fs::write(dir.join("TSK.ct7"), tsk7).unwrap();
+
+    let gen_nums: [i16; 7] = [-7225, -430, -1254, -853, -8064, -853, -776];
+    let john_nums: [i16; 22] = [
+        1063, 2316, 3779, 25, 2889, 5620, 1325, 846, 3439, 5207, 2443, 3956, 4100, 1519, 846, 622,
+        3361, 622, 235, 2192, 166, 2222,
+    ];
+    let rev_nums: [i16; 9] = [5485, 2257, 2962, 2424, 5547, 3326, 5213, 3956, 281];
+    let mut bt8 = Vec::new();
+    let mut payload = Vec::new();
+    for nums in [&gen_nums[..], &john_nums[..], &rev_nums[..]] {
+        bt8.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        for n in nums {
+            payload.extend_from_slice(&n.to_le_bytes());
+        }
+    }
+    bt8.extend_from_slice(&payload);
+    fs::write(dir.join("KJV.bt8"), bt8).unwrap();
+
+    write_lexicon(
+        dir,
+        "StrGrk",
+        "gx",
+        "StrGrk",
+        "Strong's Greek Dictionary",
+        &[(2316, "a deity, especially the supreme Divinity.")],
+    );
+    write_lexicon(
+        dir,
+        "StrHeb",
+        "hx",
+        "StrHeb",
+        "Strong's Hebrew Dictionary",
+        &[(430, "gods in the ordinary sense; the supreme God.")],
+    );
+    write_lemmas(
+        dir,
+        2317,
+        431,
+        &[
+            (430, "H", "'elohiym", "el-o-heem'"),
+            (2316, "G", "theos", "theh'-os"),
+        ],
+    );
+}
+
+fn write_lexicon(
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    id: &str,
+    title: &str,
+    entries: &[(u16, &str)],
+) {
+    let mut header = vec![0u8; 80];
+    header[0] = title.len() as u8;
+    header[1..1 + title.len()].copy_from_slice(title.as_bytes());
+    header[0x33] = id.len() as u8;
+    header[0x34..0x34 + id.len()].copy_from_slice(id.as_bytes());
+    fs::write(dir.join(format!("{stem}.{ext}0")), header).unwrap();
+
+    let mut body = Vec::new();
+    let mut idx = Vec::new();
+    for (num, def) in entries {
+        let start = body.len() as u32;
+        body.extend_from_slice(num.to_string().as_bytes());
+        body.push(0);
+        let end = body.len() as u32;
+        body.extend_from_slice(def.as_bytes());
+        idx.extend_from_slice(&start.to_le_bytes());
+        idx.extend_from_slice(&end.to_le_bytes());
+    }
+    fs::write(dir.join(format!("{stem}.{ext}4")), body).unwrap();
+    fs::write(dir.join(format!("{stem}.{ext}7")), idx).unwrap();
+}
+
+fn write_lemmas(dir: &Path, gcount: u32, hcount: u32, entries: &[(u16, &str, &str, &str)]) {
+    let mut sd0 = Vec::new();
+    sd0.extend_from_slice(&gcount.to_le_bytes());
+    sd0.extend_from_slice(&hcount.to_le_bytes());
+    fs::write(dir.join("Strongs.sd0"), sd0).unwrap();
+
+    let mut pool = vec![0u8];
+    pool.extend_from_slice(b"No Value\0");
+    let mut lemma_at = std::collections::HashMap::new();
+    for (num, lang, lemma, pron) in entries {
+        let lo = pool.len() as u32;
+        pool.extend_from_slice(lemma.as_bytes());
+        pool.push(0);
+        let po = pool.len() as u32;
+        pool.extend_from_slice(pron.as_bytes());
+        pool.push(0);
+        lemma_at.insert((*num, *lang), (lo, po));
+    }
+
+    let n = (gcount + hcount) as usize;
+    let mut sd1 = vec![0u8; n * 12];
+    for i in 0..n {
+        let off = i * 12;
+        sd1[off..off + 4].copy_from_slice(&1u32.to_le_bytes());
+        sd1[off + 4..off + 8].copy_from_slice(&0u32.to_le_bytes());
+        sd1[off + 8..off + 12].copy_from_slice(&1u32.to_le_bytes());
+    }
+    for ((num, lang), (lo, po)) in lemma_at {
+        let idx = if lang == "H" {
+            usize::from(num)
+        } else {
+            hcount as usize + usize::from(num)
+        };
+        let off = idx * 12;
+        sd1[off + 4..off + 8].copy_from_slice(&lo.to_le_bytes());
+        sd1[off + 8..off + 12].copy_from_slice(&po.to_le_bytes());
+    }
+    fs::write(dir.join("Strongs.sd1"), sd1).unwrap();
+    fs::write(dir.join("Strongs.sd2"), pool).unwrap();
 }
 
 #[test]
@@ -148,6 +262,13 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         .any(|(s, _)| s.eq_ignore_ascii_case("TSK")));
     assert_eq!(stats.resources, 3);
     assert_eq!(stats.xrefs, 1);
+    assert!(stats.verse_words > 0);
+    assert!(stats.strongs > 0);
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("StrGrk")));
 
     let conn = Connection::open(&out).unwrap();
     bible_app_db::ensure_verses_fts(&conn).unwrap();
@@ -176,6 +297,23 @@ fn synthetic_dump_imports_only_kjv_goldens() {
         (xrefs[0].book, xrefs[0].chapter, xrefs[0].verse),
         (66, 22, 21)
     );
+
+    let words = bible_app_db::chapter_words(&conn, 43, 3).unwrap();
+    let god = words
+        .iter()
+        .find(|w| w.verse == 16 && w.strongs.split_whitespace().any(|s| s == "G2316"))
+        .expect("John 3:16 God should be G2316");
+    let verse = get_verse(&conn, 43, 3, 16).unwrap();
+    assert_eq!(&verse.text[god.start as usize..god.end as usize], "God");
+    let def = bible_app_db::lookup_strongs(&conn, "G2316")
+        .unwrap()
+        .unwrap();
+    assert_eq!(def.lemma, "theos");
+    assert!(def.definition.contains("deity"));
+    let h430 = bible_app_db::lookup_strongs(&conn, "H430")
+        .unwrap()
+        .unwrap();
+    assert_eq!(h430.lemma, "'elohiym");
 }
 
 #[test]
@@ -205,6 +343,18 @@ fn real_cd_kjv_goldens() {
         .any(|(s, _)| s.eq_ignore_ascii_case("TSK")));
     assert!(stats.resources > 0);
     assert!(stats.xrefs > 0);
+    assert!(stats.verse_words > 0);
+    assert!(stats.strongs > 0);
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("StrGrk")));
+    assert!(stats
+        .report
+        .imported
+        .iter()
+        .any(|(s, _)| s.eq_ignore_ascii_case("StrHeb")));
     assert!(!stats
         .report
         .imported
@@ -243,6 +393,31 @@ fn real_cd_kjv_goldens() {
     assert!(
         !xrefs.is_empty(),
         "TSK should yield cross-references for John 3:16"
+    );
+
+    let words = bible_app_db::chapter_words(&conn, 43, 3).unwrap();
+    let god = words
+        .iter()
+        .find(|w| w.verse == 16 && w.strongs.split_whitespace().any(|s| s == "G2316"))
+        .expect("John 3:16 God should be G2316");
+    let john = get_verse(&conn, 43, 3, 16).unwrap();
+    assert_eq!(&john.text[god.start as usize..god.end as usize], "God");
+    let theos = bible_app_db::lookup_strongs(&conn, "G2316")
+        .unwrap()
+        .expect("G2316 in lexicon");
+    assert!(
+        theos.lemma.to_lowercase().contains("theos")
+            || theos.definition.to_lowercase().contains("deity")
+            || theos.definition.to_lowercase().contains("god"),
+        "unexpected G2316: {theos:?}"
+    );
+    let elohim = bible_app_db::lookup_strongs(&conn, "H430")
+        .unwrap()
+        .expect("H430 in lexicon");
+    assert!(
+        elohim.lemma.to_lowercase().contains("elohiym")
+            || elohim.definition.to_lowercase().contains("god"),
+        "unexpected H430: {elohim:?}"
     );
 
     let henry = bible_app_db::resource_covering(&conn, "MHC", 43, 3, 16)

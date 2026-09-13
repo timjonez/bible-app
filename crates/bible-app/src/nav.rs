@@ -136,7 +136,18 @@ fn book_name(books: &[Book], book: u8) -> &str {
 }
 
 pub fn format_chapter_text(verses: &[bible_app_db::Verse]) -> String {
+    layout_chapter(verses).0
+}
+
+/// Character offset in the chapter string where each verse's body begins
+/// (after the `"12  "` prefix).
+pub fn verse_body_offsets(verses: &[bible_app_db::Verse]) -> Vec<(u8, i32)> {
+    layout_chapter(verses).1
+}
+
+fn layout_chapter(verses: &[bible_app_db::Verse]) -> (String, Vec<(u8, i32)>) {
     let mut out = String::new();
+    let mut offsets = Vec::with_capacity(verses.len());
     for v in verses {
         if v.para_break && !out.is_empty() {
             out.push('\n');
@@ -144,9 +155,11 @@ pub fn format_chapter_text(verses: &[bible_app_db::Verse]) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("{}  {}", v.verse, v.text));
+        out.push_str(&format!("{}  ", v.verse));
+        offsets.push((v.verse, out.chars().count() as i32));
+        out.push_str(&v.text);
     }
-    out
+    (out, offsets)
 }
 
 pub fn next_chapter(
@@ -292,6 +305,33 @@ mod tests {
                 }
             ),
             "John 3:16"
+        );
+    }
+
+    #[test]
+    fn verse_body_offsets_skip_number_prefix() {
+        let verses = vec![
+            bible_app_db::Verse {
+                book: 1,
+                chapter: 1,
+                verse: 1,
+                text: "In the beginning".into(),
+                para_break: true,
+            },
+            bible_app_db::Verse {
+                book: 1,
+                chapter: 1,
+                verse: 2,
+                text: "And the earth".into(),
+                para_break: false,
+            },
+        ];
+        let (text, offs) = super::layout_chapter(&verses);
+        assert_eq!(text, "1  In the beginning\n2  And the earth");
+        assert_eq!(offs, vec![(1, 3), (2, 23)]);
+        assert_eq!(
+            &text[offs[0].1 as usize..offs[0].1 as usize + 16],
+            "In the beginning"
         );
     }
 }
