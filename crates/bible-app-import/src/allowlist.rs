@@ -49,11 +49,13 @@ pub fn classify(stem: &str) -> Classification {
             Kind::Commentary,
             "Matthew Henry's Commentary (public domain)",
         ),
+        "TSK" => imp(
+            Kind::Commentary,
+            "Treasury of Scripture Knowledge (public domain)",
+        ),
         "ACC" | "BARNES" | "DODDRIDGE" | "GBN" | "HALLS" | "HAWEIS" | "JFB" | "JWN" | "MHCC"
         | "MACKNIGHT" | "PLWL" | "PNTC" | "PNT" | "POOLE" | "SCM" | "SDC" | "SCOTT" | "TFG"
-        | "TOD" | "TSK" | "WBN" => {
-            defer(Kind::Commentary, "public-domain commentary (later phase)")
-        }
+        | "TOD" | "WBN" => defer(Kind::Commentary, "public-domain commentary (later phase)"),
 
         "RWP" => skip(
             Kind::Commentary,
@@ -170,9 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn tsk_still_deferred() {
+    fn tsk_imported() {
         let c = classify("TSK");
-        assert_eq!(c.decision, Decision::Defer);
+        assert_eq!(c.decision, Decision::Import);
         assert_eq!(c.kind, Kind::Commentary);
     }
 

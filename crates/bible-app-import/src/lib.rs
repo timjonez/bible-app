@@ -23,6 +23,7 @@ pub enum ImportError {
 pub struct ImportStats {
     pub verses: usize,
     pub resources: usize,
+    pub xrefs: usize,
     pub report: scan::ScanReport,
 }
 
@@ -46,10 +47,12 @@ pub fn import_from(from: &Path, out: &Path) -> Result<ImportStats, ImportError> 
     }
     let module = load_kjv(from)?;
     let verses = write::import_kjv(&mut conn, &module)?;
-    let resources = write::import_mhc(&mut conn, from, &module)?;
+    let mhc = write::import_mhc(&mut conn, from, &module)?;
+    let (tsk, xrefs) = write::import_tsk(&mut conn, from, &module)?;
     Ok(ImportStats {
         verses,
-        resources,
+        resources: mhc + tsk,
+        xrefs,
         report,
     })
 }

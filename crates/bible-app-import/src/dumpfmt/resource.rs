@@ -18,12 +18,20 @@ const ALT: u8 = 0x05;
 const ITALIC: u8 = 0x06;
 const HEADING: u8 = 0x07;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XrefDest {
+    pub book: u8,
+    pub chapter: u8,
+    pub verse: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceEntry {
     pub book: u8,
     pub chapter: u8,
     pub verse: u8,
     pub text: String,
+    pub xrefs: Vec<XrefDest>,
 }
 
 pub struct ResourceModule {
@@ -106,15 +114,21 @@ pub fn parse_entries(
             return Err(Error::Format("resource text range inverted".into()));
         }
         let rec = kjv_index[span.verse_i];
-        let text = decode_markup(&ct4[text_start..text_end], &resolve);
+        let raw = &ct4[text_start..text_end];
+        let text = decode_markup(raw, &resolve);
         if text.trim().is_empty() {
             continue;
         }
+        let xrefs = hex_targets(raw, kjv_index)
+            .into_iter()
+            .filter(|d| !(d.book == rec.book && d.chapter == rec.chapter && d.verse == rec.verse))
+            .collect();
         entries.push(ResourceEntry {
             book: rec.book,
             chapter: rec.chapter,
             verse: rec.verse,
             text,
+            xrefs,
         });
     }
     Ok(entries)
@@ -240,6 +254,62 @@ fn compact_range(left: &str, right: &str) -> String {
     }
 }
 
+pub fn hex_targets(raw: &[u8], index: &[VerseRec]) -> Vec<XrefDest> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] != REF {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let start = i;
+        while i < raw.len() && raw[i] != REF {
+            i += 1;
+        }
+        let body = std::str::from_utf8(&raw[start..i]).unwrap_or("");
+        if i < raw.len() {
+            i += 1;
+        }
+        out.extend(hex_span(body, index));
+    }
+    out
+}
+
+fn hex_span(body: &str, index: &[VerseRec]) -> Vec<XrefDest> {
+    let s = body.trim();
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let rec_of = |hex: u32| -> Option<XrefDest> {
+        let rec = index.get(hex.checked_sub(1)? as usize)?;
+        Some(XrefDest {
+            book: rec.book,
+            chapter: rec.chapter,
+            verse: rec.verse,
+        })
+    };
+    if let Some((a, b)) = s.split_once('-') {
+        let Ok(x) = u32::from_str_radix(a.trim(), 16) else {
+            return Vec::new();
+        };
+        let Ok(y) = u32::from_str_radix(b.trim(), 16) else {
+            return Vec::new();
+        };
+        let (lo, hi) = if x <= y { (x, y) } else { (y, x) };
+        if hi.saturating_sub(lo) > 32 {
+            return [lo, hi].into_iter().filter_map(rec_of).collect();
+        }
+        (lo..=hi).filter_map(rec_of).collect()
+    } else {
+        u32::from_str_radix(s, 16)
+            .ok()
+            .and_then(rec_of)
+            .into_iter()
+            .collect()
+    }
+}
+
 fn hex_label(hex: u32, index: &[VerseRec], books: &[BookName]) -> Option<String> {
     let rec = index.get(hex.checked_sub(1)? as usize)?;
     let name = books
@@ -303,5 +373,32 @@ mod tests {
     fn compact_same_chapter_range() {
         assert_eq!(compact_range("John 1:1", "John 1:3"), "John 1:1–3");
         assert_eq!(compact_range("John 1:1", "John 2:1"), "John 1:1–John 2:1");
+    }
+
+    #[test]
+    fn hex_targets_expand_short_range() {
+        let index = [rec(1, 1, 1), rec(1, 1, 2), rec(43, 3, 16)];
+        let raw = b"see \x031-2\x03 and \x033\x03.";
+        let dests = hex_targets(raw, &index);
+        assert_eq!(
+            dests,
+            [
+                XrefDest {
+                    book: 1,
+                    chapter: 1,
+                    verse: 1
+                },
+                XrefDest {
+                    book: 1,
+                    chapter: 1,
+                    verse: 2
+                },
+                XrefDest {
+                    book: 43,
+                    chapter: 3,
+                    verse: 16
+                },
+            ]
+        );
     }
 }

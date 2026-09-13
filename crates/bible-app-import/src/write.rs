@@ -61,10 +61,33 @@ pub fn import_mhc(
     from: &Path,
     kjv: &KjvModule,
 ) -> Result<usize, WriteError> {
-    if !from.join("MHC.ct4").is_file() || !from.join("MHC.ct7").is_file() {
+    import_commentary(conn, from, kjv, "MHC")
+}
+
+pub fn import_tsk(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+) -> Result<(usize, usize), WriteError> {
+    if !from.join("TSK.ct4").is_file() || !from.join("TSK.ct7").is_file() {
+        return Ok((0, 0));
+    }
+    let module = dumpfmt::load_commentary(from, "TSK", &kjv.index, &kjv.books)?;
+    let n = import_resource(conn, &module)?;
+    let x = import_xrefs(conn, &module)?;
+    Ok((n, x))
+}
+
+fn import_commentary(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+    stem: &str,
+) -> Result<usize, WriteError> {
+    if !from.join(format!("{stem}.ct4")).is_file() || !from.join(format!("{stem}.ct7")).is_file() {
         return Ok(0);
     }
-    let module = dumpfmt::load_commentary(from, "MHC", &kjv.index, &kjv.books)?;
+    let module = dumpfmt::load_commentary(from, stem, &kjv.index, &kjv.books)?;
     import_resource(conn, &module)
 }
 
@@ -91,6 +114,29 @@ fn import_resource(conn: &mut Connection, module: &ResourceModule) -> Result<usi
     }
     tx.commit()?;
     Ok(module.entries.len())
+}
+
+fn import_xrefs(conn: &mut Connection, module: &ResourceModule) -> Result<usize, WriteError> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM xrefs", [])?;
+    let mut n = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO xrefs (
+                from_book, from_chapter, from_verse,
+                to_book, to_chapter, to_verse
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for e in &module.entries {
+            for d in &e.xrefs {
+                n += stmt.execute(rusqlite::params![
+                    e.book, e.chapter, e.verse, d.book, d.chapter, d.verse
+                ])?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(n)
 }
 
 pub fn create_db(path: &Path) -> Result<Connection, WriteError> {

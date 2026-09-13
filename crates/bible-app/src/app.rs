@@ -2,6 +2,7 @@ use crate::config;
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::search;
+use crate::tsk;
 use adw::prelude::*;
 use bible_app_db::{self, Book, SearchHit};
 use gtk::glib;
@@ -27,6 +28,7 @@ pub struct App {
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
     mhc: Option<mhc::MhcWidgets>,
+    tsk: Option<tsk::TskWidgets>,
 }
 
 #[derive(Debug)]
@@ -41,6 +43,9 @@ pub enum Msg {
     OpenHit(i32),
     ToggleMhc,
     MhcClosed,
+    ToggleTsk,
+    TskClosed,
+    OpenTskXref(i32),
 }
 
 #[relm4::component(pub)]
@@ -79,6 +84,16 @@ impl SimpleComponent for App {
                         #[watch]
                         set_sensitive: !model.search_open,
                         connect_clicked => Msg::NextChapter,
+                    },
+                    pack_end = &gtk::ToggleButton {
+                        set_label: "TSK",
+                        set_tooltip_text: Some("Treasury of Scripture Knowledge (opens a second window)"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_active: model.tsk.is_some(),
+                        #[watch]
+                        set_sensitive: model.error.is_none(),
+                        connect_clicked => Msg::ToggleTsk,
                     },
                     pack_end = &gtk::ToggleButton {
                         set_label: "MHC",
@@ -274,6 +289,7 @@ impl SimpleComponent for App {
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
             mhc: None,
+            tsk: None,
         };
         model.refresh_chapter(false);
 
@@ -433,6 +449,31 @@ impl SimpleComponent for App {
             Msg::MhcClosed => {
                 self.mhc = None;
             }
+            Msg::ToggleTsk => {
+                if let Some(widgets) = self.tsk.take() {
+                    widgets.window.close();
+                } else if self.error.is_none() {
+                    let mut widgets =
+                        tsk::open(sender.input_sender().clone(), self.at, &self.books);
+                    if let Some(conn) = &self.conn {
+                        tsk::fill(&mut widgets, conn, &self.books, self.at);
+                    }
+                    self.tsk = Some(widgets);
+                }
+            }
+            Msg::TskClosed => {
+                self.tsk = None;
+            }
+            Msg::OpenTskXref(idx) => {
+                let Some(widgets) = &self.tsk else { return };
+                let Some(at) = tsk::xref_at(widgets, idx) else {
+                    return;
+                };
+                self.at = at;
+                self.search_open = false;
+                self.refresh_chapter(true);
+                self.sync_book_row();
+            }
         }
     }
 }
@@ -500,12 +541,22 @@ impl App {
             self.scroll_to_top();
         }
         self.refresh_mhc();
+        self.refresh_tsk();
     }
 
     fn refresh_mhc(&self) {
         let Some(widgets) = &self.mhc else { return };
         let Some(conn) = &self.conn else { return };
         mhc::fill(widgets, conn, &self.books, self.at);
+    }
+
+    fn refresh_tsk(&mut self) {
+        let Some(conn) = &self.conn else { return };
+        let books = self.books.clone();
+        let at = self.at;
+        if let Some(widgets) = &mut self.tsk {
+            tsk::fill(widgets, conn, &books, at);
+        }
     }
 
     fn highlight_verse(&self, verse: u8) {
