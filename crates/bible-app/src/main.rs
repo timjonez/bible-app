@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod dict;
 mod mhc;
 mod nav;
 mod search;

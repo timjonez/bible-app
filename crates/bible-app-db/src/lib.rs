@@ -8,7 +8,7 @@ pub use search::{
     ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
 };
 
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -124,6 +124,16 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
             definition     TEXT NOT NULL,
             PRIMARY KEY (num, lang)
         );
+
+        CREATE TABLE IF NOT EXISTS entries (
+            module   TEXT NOT NULL,
+            i        INTEGER NOT NULL,
+            headword TEXT NOT NULL,
+            text     TEXT NOT NULL,
+            PRIMARY KEY (module, i),
+            FOREIGN KEY (module) REFERENCES modules(id)
+        );
+        CREATE INDEX IF NOT EXISTS entries_headword ON entries(module, headword COLLATE NOCASE);
 
         CREATE TABLE IF NOT EXISTS import_log (
             stem   TEXT PRIMARY KEY,
@@ -364,6 +374,88 @@ pub fn lookup_strongs(conn: &Connection, code: &str) -> Result<Option<StrongDef>
     }))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictModule {
+    pub id: String,
+    pub title: String,
+}
+
+pub fn dictionary_modules(conn: &Connection) -> Result<Vec<DictModule>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title FROM modules
+         WHERE kind = 'dictionary'
+         ORDER BY CASE id WHEN 'Easton' THEN 0 ELSE 1 END, title",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DictModule {
+            id: row.get(0)?,
+            title: row.get(1)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictHit {
+    pub i: i32,
+    pub headword: String,
+}
+
+pub const ENTRY_LIMIT: i32 = 200;
+
+pub fn search_entries(
+    conn: &Connection,
+    module: &str,
+    query: &str,
+    limit: i32,
+) -> Result<Vec<DictHit>, DbError> {
+    let pattern = like_prefix(query);
+    let mut stmt = conn.prepare(
+        "SELECT i, headword FROM entries
+         WHERE module = ?1 AND headword LIKE ?2 ESCAPE '\\'
+         ORDER BY headword COLLATE NOCASE, i
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![module, pattern, limit], |row| {
+        Ok(DictHit {
+            i: row.get(0)?,
+            headword: row.get(1)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn like_prefix(query: &str) -> String {
+    let q = query.trim();
+    if q.is_empty() {
+        return "%".into();
+    }
+    let mut out = String::new();
+    for c in q.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+pub fn get_entry(
+    conn: &Connection,
+    module: &str,
+    i: i32,
+) -> Result<Option<(String, String)>, DbError> {
+    let row = conn
+        .query_row(
+            "SELECT headword, text FROM entries WHERE module = ?1 AND i = ?2",
+            rusqlite::params![module, i],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn xrefs_from(
     conn: &Connection,
     book: u8,
@@ -494,5 +586,29 @@ mod tests {
         let def = lookup_strongs(&conn, "H7225").unwrap().unwrap();
         assert_eq!(def.lemma, "re'shiyth");
         assert_eq!(parse_strongs_code("G2316"), Some((2316, "G".into())));
+    }
+
+    #[test]
+    fn search_entries_prefix() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license)
+            VALUES ('Easton', 'dictionary', 'Easton''s Bible Dictionary', 'public-domain');
+            INSERT INTO entries (module, i, headword, text) VALUES
+                ('Easton', 0, 'Aaron', 'the eldest son of Amram'),
+                ('Easton', 1, 'Abaddon', 'destruction'),
+                ('Easton', 2, 'Zuzims', 'restless');
+            "#,
+        )
+        .unwrap();
+        let hits = search_entries(&conn, "Easton", "Aa", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].headword, "Aaron");
+        let (head, text) = get_entry(&conn, "Easton", 0).unwrap().unwrap();
+        assert_eq!(head, "Aaron");
+        assert!(text.contains("Amram"));
+        assert_eq!(dictionary_modules(&conn).unwrap()[0].id, "Easton");
     }
 }

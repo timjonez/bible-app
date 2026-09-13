@@ -26,6 +26,7 @@ pub struct ImportStats {
     pub xrefs: usize,
     pub verse_words: usize,
     pub strongs: usize,
+    pub entries: usize,
     pub report: scan::ScanReport,
 }
 
@@ -52,12 +53,14 @@ pub fn import_from(from: &Path, out: &Path) -> Result<ImportStats, ImportError> 
     let mhc = write::import_mhc(&mut conn, from, &module)?;
     let (tsk, xrefs) = write::import_tsk(&mut conn, from, &module)?;
     let (verse_words, strongs) = write::import_strongs(&mut conn, from, &module)?;
+    let entries = write::import_dictionaries(&mut conn, from, &module)?;
     Ok(ImportStats {
         verses,
         resources: mhc + tsk,
         xrefs,
         verse_words,
         strongs,
+        entries,
         report,
     })
 }

@@ -65,10 +65,16 @@ pub fn classify(stem: &str) -> Classification {
             skip(Kind::Commentary, "edition/rights unclear")
         }
 
-        // Dictionaries
-        "EASTON" | "SMITH" | "NAMES" | "ATSD" => {
-            defer(Kind::Dictionary, "public-domain dictionary (later phase)")
-        }
+        "EASTON" => imp(
+            Kind::Dictionary,
+            "Easton's Bible Dictionary (public domain)",
+        ),
+        "SMITH" => imp(Kind::Dictionary, "Smith's Bible Dictionary (public domain)"),
+        "NAMES" => imp(Kind::Dictionary, "Hitchcock's Bible Names (public domain)"),
+        "ATSD" => imp(
+            Kind::Dictionary,
+            "American Tract Society Dictionary (public domain)",
+        ),
         "ISBE" | "PROTESTANT" => skip(Kind::Dictionary, "edition not confirmed public domain"),
         "PBAUTHORS" => skip(Kind::Other, "product index, not a public-domain work"),
 
@@ -195,6 +201,15 @@ mod tests {
         let c = classify("bcdxrefs");
         assert_eq!(c.decision, Decision::Skip);
         assert_eq!(c.kind, Kind::Xref);
+    }
+
+    #[test]
+    fn dictionaries_imported() {
+        for id in ["Easton", "Smith", "Names", "ATSD"] {
+            let c = classify(id);
+            assert_eq!(c.decision, Decision::Import, "{id}");
+            assert_eq!(c.kind, Kind::Dictionary, "{id}");
+        }
     }
 
     #[test]

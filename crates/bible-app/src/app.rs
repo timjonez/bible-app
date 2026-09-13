@@ -1,4 +1,5 @@
 use crate::config;
+use crate::dict;
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::search;
@@ -30,6 +31,7 @@ pub struct App {
     search_entry: gtk::SearchEntry,
     mhc: Option<mhc::MhcWidgets>,
     tsk: Option<tsk::TskWidgets>,
+    dict: Option<dict::DictWidgets>,
     chapter_words: Vec<TaggedWord>,
     strongs_popover: gtk::Popover,
 }
@@ -56,6 +58,11 @@ pub enum Msg {
     TskClosed,
     OpenTskXref(i32),
     ClickWord(i32),
+    ToggleDict,
+    DictClosed,
+    DictSearch(String),
+    DictModule,
+    DictOpen(i32),
 }
 
 #[relm4::component(pub)]
@@ -94,6 +101,16 @@ impl SimpleComponent for App {
                         #[watch]
                         set_sensitive: !model.search_open,
                         connect_clicked => Msg::NextChapter,
+                    },
+                    pack_end = &gtk::ToggleButton {
+                        set_label: "Dict",
+                        set_tooltip_text: Some("Public-domain dictionaries (opens a second window)"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_active: model.dict.is_some(),
+                        #[watch]
+                        set_sensitive: model.error.is_none(),
+                        connect_clicked => Msg::ToggleDict,
                     },
                     pack_end = &gtk::ToggleButton {
                         set_label: "TSK",
@@ -303,6 +320,7 @@ impl SimpleComponent for App {
             search_entry: search_entry.clone(),
             mhc: None,
             tsk: None,
+            dict: None,
             chapter_words: Vec::new(),
             strongs_popover,
         };
@@ -504,6 +522,44 @@ impl SimpleComponent for App {
             }
             Msg::ClickWord(offset) => {
                 self.open_strongs(offset);
+            }
+            Msg::ToggleDict => {
+                if let Some(widgets) = self.dict.take() {
+                    widgets.window.close();
+                } else if self.error.is_none() {
+                    let mut widgets = dict::open(sender.input_sender().clone());
+                    if let Some(conn) = &self.conn {
+                        dict::load_modules(&mut widgets, conn);
+                        dict::search(&mut widgets, conn);
+                    }
+                    self.dict = Some(widgets);
+                }
+            }
+            Msg::DictClosed => {
+                self.dict = None;
+            }
+            Msg::DictSearch(query) => {
+                let Some(widgets) = &mut self.dict else {
+                    return;
+                };
+                widgets.query = query;
+                if let Some(conn) = &self.conn {
+                    dict::search(widgets, conn);
+                }
+            }
+            Msg::DictModule => {
+                let Some(widgets) = &mut self.dict else {
+                    return;
+                };
+                if let Some(conn) = &self.conn {
+                    dict::search(widgets, conn);
+                }
+            }
+            Msg::DictOpen(idx) => {
+                let Some(widgets) = &self.dict else { return };
+                if let Some(conn) = &self.conn {
+                    dict::open_hit(widgets, conn, idx);
+                }
             }
         }
     }

@@ -17,6 +17,8 @@ const TRANSLIT: u8 = 0x04;
 const ALT: u8 = 0x05;
 const ITALIC: u8 = 0x06;
 const HEADING: u8 = 0x07;
+const SEE_OPEN: u8 = 0xBB;
+const SEE_CLOSE: u8 = 0xAB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XrefDest {
@@ -38,6 +40,19 @@ pub struct ResourceModule {
     pub id: String,
     pub title: String,
     pub entries: Vec<ResourceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadwordEntry {
+    pub i: i32,
+    pub headword: String,
+    pub text: String,
+}
+
+pub struct HeadwordModule {
+    pub id: String,
+    pub title: String,
+    pub entries: Vec<HeadwordEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +150,14 @@ pub fn parse_entries(
 }
 
 pub fn decode_markup(raw: &[u8], resolve: impl Fn(u32) -> Option<String>) -> String {
+    decode_markup_with(raw, resolve, |_| None)
+}
+
+pub fn decode_markup_with(
+    raw: &[u8],
+    resolve: impl Fn(u32) -> Option<String>,
+    resolve_entry: impl Fn(u32) -> Option<String>,
+) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < raw.len() {
@@ -156,6 +179,25 @@ pub fn decode_markup(raw: &[u8], resolve: impl Fn(u32) -> Option<String>) -> Str
                 }
                 push_ref(&mut out, body, &resolve);
             }
+            SEE_OPEN => {
+                i += 1;
+                let start = i;
+                while i < raw.len() && raw[i] != SEE_CLOSE && raw[i] != 0 {
+                    i += 1;
+                }
+                let body = std::str::from_utf8(&raw[start..i]).unwrap_or("").trim();
+                if i < raw.len() && raw[i] == SEE_CLOSE {
+                    i += 1;
+                }
+                if let Ok(n) = body.parse::<u32>() {
+                    if let Some(label) = resolve_entry(n) {
+                        if !out.is_empty() && !out.ends_with([' ', '\n', '(']) {
+                            out.push(' ');
+                        }
+                        out.push_str(&label);
+                    }
+                }
+            }
             ITALIC | HEADING | TRANSLIT | ALT => i += 1,
             _ => {
                 let start = i;
@@ -172,7 +214,7 @@ pub fn decode_markup(raw: &[u8], resolve: impl Fn(u32) -> Option<String>) -> Str
 fn is_markup(b: u8) -> bool {
     matches!(
         b,
-        0x00 | 0x0A | 0x0D | REF | TRANSLIT | ALT | ITALIC | HEADING
+        0x00 | 0x0A | 0x0D | REF | TRANSLIT | ALT | ITALIC | HEADING | SEE_OPEN
     )
 }
 
@@ -310,6 +352,94 @@ fn hex_span(body: &str, index: &[VerseRec]) -> Vec<XrefDest> {
     }
 }
 
+pub fn load_dictionary(
+    dir: &Path,
+    stem: &str,
+    kjv_index: &[VerseRec],
+    books: &[BookName],
+) -> Result<HeadwordModule, Error> {
+    load_headwords(dir, stem, "dt", kjv_index, books)
+}
+
+fn load_headwords(
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    kjv_index: &[VerseRec],
+    books: &[BookName],
+) -> Result<HeadwordModule, Error> {
+    let header = super::header::ModuleHeader::read(&dir.join(format!("{stem}.{ext}0")))?;
+    let index = std::fs::read(dir.join(format!("{stem}.{ext}7")))?;
+    let body = std::fs::read(dir.join(format!("{stem}.{ext}4")))?;
+    let (chunks, rest) = index.as_chunks::<8>();
+    if !rest.is_empty() {
+        return Err(Error::Format(format!(
+            "{stem}.{ext}7 length {} is not a multiple of 8",
+            index.len()
+        )));
+    }
+    let mut labels: Vec<Option<String>> = vec![None; chunks.len()];
+    let mut recs = Vec::new();
+    for (slot, chunk) in chunks.iter().enumerate() {
+        let start_u = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+        let end_u = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+        if start_u == NONE {
+            continue;
+        }
+        let start = start_u as usize;
+        let end = end_u as usize;
+        if start > end || end > body.len() {
+            return Err(Error::Format(format!(
+                "{stem} span {start}..{end} out of {}",
+                body.len()
+            )));
+        }
+        let headword = std::str::from_utf8(&body[start..end])
+            .unwrap_or("")
+            .trim_end_matches('\0')
+            .trim()
+            .to_string();
+        if !headword.is_empty() {
+            labels[slot] = Some(headword.clone());
+        }
+        recs.push((headword, start, end));
+    }
+    let resolve = |hex: u32| hex_label(hex, kjv_index, books);
+    let resolve_entry = |idx: u32| {
+        labels
+            .get(idx as usize)
+            .cloned()
+            .flatten()
+            .filter(|s| !s.is_empty())
+    };
+
+    let mut entries = Vec::new();
+    for (i, (headword, _, label_end)) in recs.iter().enumerate() {
+        if headword.is_empty() {
+            continue;
+        }
+        let text_end = recs.get(i + 1).map(|r| r.1).unwrap_or(body.len());
+        if *label_end > text_end {
+            return Err(Error::Format(format!("{stem} text range inverted")));
+        }
+        let text = decode_markup_with(&body[*label_end..text_end], resolve, resolve_entry);
+        if text.is_empty() {
+            continue;
+        }
+        let idx = i32::try_from(entries.len()).unwrap_or(i32::MAX);
+        entries.push(HeadwordEntry {
+            i: idx,
+            headword: headword.clone(),
+            text,
+        });
+    }
+    Ok(HeadwordModule {
+        id: header.id,
+        title: header.title,
+        entries,
+    })
+}
+
 fn hex_label(hex: u32, index: &[VerseRec], books: &[BookName]) -> Option<String> {
     let rec = index.get(hex.checked_sub(1)? as usize)?;
     let name = books
@@ -331,6 +461,25 @@ mod tests {
             chapter,
             verse,
         }
+    }
+
+    #[test]
+    fn decodes_see_entry_index() {
+        let raw = b"See ALPHA\r\nSee \xbb1\xab";
+        let text = decode_markup_with(
+            raw,
+            |_| None,
+            |n| if n == 1 { Some("Alpha".into()) } else { None },
+        );
+        assert!(text.contains("ALPHA"));
+        assert!(text.contains("Alpha"));
+        assert!(!text.contains('\u{bb}'));
+    }
+
+    #[test]
+    fn lone_guillemet_does_not_hang() {
+        let text = decode_markup(b"see \xabnote\xbb", |_| None);
+        assert!(text.contains("note"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub use bible::{
     VerseWord,
 };
 pub use header::ModuleHeader;
-pub use resource::{load_commentary, ResourceModule, XrefDest};
+pub use resource::{load_commentary, load_dictionary, HeadwordModule, ResourceModule, XrefDest};
 pub use strongs::{load_lexicon, load_word_map, LexEntry, MappedVerse};
 pub use verse_id::hex_id_to_index;
 
