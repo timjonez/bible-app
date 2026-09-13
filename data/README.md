@@ -9,9 +9,10 @@ cargo run -p bible-app-import -- --from /path/to/source-dump --out data/bible-ap
 The importer:
 
 - Copies **KJV** verse text into SQLite (public domain, 1769).
+- Copies **Matthew Henry** comments keyed to KJV verses.
 - Skips every other Bible (this app is KJV-only).
 - Skips works that are not public domain.
-- Defers allowlisted commentaries/dictionaries/topics until later phases.
+- Defers remaining allowlisted commentaries/dictionaries/topics until later phases.
 
 Point the GUI at this file with `BIBLE_APP_DB` or the default XDG path.
 

@@ -8,7 +8,7 @@ pub use search::{
     ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
 };
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -77,6 +77,17 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
             text       TEXT NOT NULL,
             para_break INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (book, chapter, verse),
+            FOREIGN KEY (book) REFERENCES books(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS resources (
+            module  TEXT NOT NULL,
+            book    INTEGER NOT NULL,
+            chapter INTEGER NOT NULL,
+            verse   INTEGER NOT NULL,
+            text    TEXT NOT NULL,
+            PRIMARY KEY (module, book, chapter, verse),
+            FOREIGN KEY (module) REFERENCES modules(id),
             FOREIGN KEY (book) REFERENCES books(id)
         );
 
@@ -187,6 +198,45 @@ pub fn max_verse(conn: &Connection, book: u8, chapter: u8) -> Result<u8, DbError
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resource {
+    pub module: String,
+    pub book: u8,
+    pub chapter: u8,
+    pub verse: u8,
+    pub text: String,
+}
+
+/// Latest resource on or before this verse in the same book and chapter.
+pub fn resource_covering(
+    conn: &Connection,
+    module: &str,
+    book: u8,
+    chapter: u8,
+    verse: u8,
+) -> Result<Option<Resource>, DbError> {
+    let row = conn
+        .query_row(
+            "SELECT module, book, chapter, verse, text
+             FROM resources
+             WHERE module = ?1 AND book = ?2 AND chapter = ?3 AND verse <= ?4
+             ORDER BY verse DESC
+             LIMIT 1",
+            rusqlite::params![module, book, chapter, verse],
+            |row| {
+                Ok(Resource {
+                    module: row.get(0)?,
+                    book: row.get(1)?,
+                    chapter: row.get(2)?,
+                    verse: row.get(3)?,
+                    text: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn book_by_id(conn: &Connection, id: u8) -> Result<Book, DbError> {
     let row = conn
         .query_row(
@@ -236,5 +286,24 @@ mod tests {
         assert!(vs[0].para_break);
         assert_eq!(max_chapter(&conn, 1).unwrap(), 2);
         assert_eq!(max_verse(&conn, 1, 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn resource_covers_later_verse_in_chapter() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license)
+            VALUES ('MHC', 'commentary', 'Matthew Henry', 'public-domain');
+            INSERT INTO resources (module, book, chapter, verse, text)
+            VALUES ('MHC', 1, 1, 1, 'comment on verse 1');
+            "#,
+        )
+        .unwrap();
+        let at = resource_covering(&conn, "MHC", 1, 1, 2).unwrap().unwrap();
+        assert_eq!(at.verse, 1);
+        assert_eq!(at.text, "comment on verse 1");
+        assert!(resource_covering(&conn, "MHC", 1, 2, 1).unwrap().is_none());
     }
 }

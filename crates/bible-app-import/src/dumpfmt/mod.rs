@@ -2,10 +2,12 @@
 
 mod bible;
 mod header;
+mod resource;
 mod verse_id;
 
 pub use bible::{decode_verse_text, load_kjv, BookName, KjvModule, VerseRec};
 pub use header::ModuleHeader;
+pub use resource::{load_commentary, ResourceModule};
 pub use verse_id::hex_id_to_index;
 
 use std::io;

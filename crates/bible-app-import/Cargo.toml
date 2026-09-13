@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 bible-app-db = { path = "../bible-app-db" }
 clap.workspace = true
+encoding_rs.workspace = true
 memmap2.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true

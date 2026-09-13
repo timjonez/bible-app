@@ -1,4 +1,4 @@
-use crate::dumpfmt::{self, KjvModule};
+use crate::dumpfmt::{self, KjvModule, ResourceModule};
 use bible_app_db;
 use rusqlite::Connection;
 use std::path::Path;
@@ -54,6 +54,43 @@ pub fn import_kjv(conn: &mut Connection, module: &KjvModule) -> Result<usize, Wr
     bible_app_db::rebuild_verses_fts(&tx)?;
     tx.commit()?;
     Ok(module.index.len())
+}
+
+pub fn import_mhc(
+    conn: &mut Connection,
+    from: &Path,
+    kjv: &KjvModule,
+) -> Result<usize, WriteError> {
+    if !from.join("MHC.ct4").is_file() || !from.join("MHC.ct7").is_file() {
+        return Ok(0);
+    }
+    let module = dumpfmt::load_commentary(from, "MHC", &kjv.index, &kjv.books)?;
+    import_resource(conn, &module)
+}
+
+fn import_resource(conn: &mut Connection, module: &ResourceModule) -> Result<usize, WriteError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO modules (id, kind, title, license) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![module.id, "commentary", module.title, "public-domain"],
+    )?;
+    tx.execute(
+        "DELETE FROM resources WHERE module = ?1",
+        rusqlite::params![module.id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO resources (module, book, chapter, verse, text)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for e in &module.entries {
+            stmt.execute(rusqlite::params![
+                module.id, e.book, e.chapter, e.verse, e.text
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(module.entries.len())
 }
 
 pub fn create_db(path: &Path) -> Result<Connection, WriteError> {
