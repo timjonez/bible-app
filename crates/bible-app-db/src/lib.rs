@@ -383,8 +383,10 @@ pub struct DictModule {
 pub fn dictionary_modules(conn: &Connection) -> Result<Vec<DictModule>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, title FROM modules
-         WHERE kind = 'dictionary'
-         ORDER BY CASE id WHEN 'Easton' THEN 0 ELSE 1 END, title",
+         WHERE kind IN ('dictionary', 'topic')
+         ORDER BY CASE kind WHEN 'dictionary' THEN 0 ELSE 1 END,
+                  CASE id WHEN 'Easton' THEN 0 WHEN 'Nave' THEN 0 ELSE 1 END,
+                  title",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(DictModule {
@@ -610,5 +612,15 @@ mod tests {
         assert_eq!(head, "Aaron");
         assert!(text.contains("Amram"));
         assert_eq!(dictionary_modules(&conn).unwrap()[0].id, "Easton");
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license)
+            VALUES ('Nave', 'topic', 'Nave''s Topical Bible', 'public-domain');
+            "#,
+        )
+        .unwrap();
+        let mods = dictionary_modules(&conn).unwrap();
+        assert_eq!(mods[0].id, "Easton");
+        assert!(mods.iter().any(|m| m.id == "Nave"));
     }
 }

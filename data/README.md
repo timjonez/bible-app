@@ -13,9 +13,10 @@ The importer:
 - Copies **Treasury of Scripture Knowledge** notes and builds cross-references from TSK (not Power Bible’s xref database).
 - Copies **Strong’s** 1890 Hebrew/Greek definitions and maps them onto KJV words (`KJV.bt8`).
 - Copies **Easton**, **Smith**, **Hitchcock’s Names**, and the **American Tract Society** dictionaries as headword entries.
+- Copies allowlisted topical works (Nave, Torrey, Daily Light, Spurgeon, Josephus, and the rest of that list).
 - Skips every other Bible (this app is KJV-only).
 - Skips works that are not public domain.
-- Defers remaining allowlisted commentaries and topics until later phases.
+- Defers remaining allowlisted commentaries until later phases.
 
 Point the GUI at this file with `BIBLE_APP_DB` or the default XDG path.
 

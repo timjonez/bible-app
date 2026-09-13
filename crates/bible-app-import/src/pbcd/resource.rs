@@ -361,6 +361,15 @@ pub fn load_dictionary(
     load_headwords(dir, stem, "dt", kjv_index, books)
 }
 
+pub fn load_topic(
+    dir: &Path,
+    stem: &str,
+    kjv_index: &[VerseRec],
+    books: &[BookName],
+) -> Result<HeadwordModule, Error> {
+    load_headwords(dir, stem, "tt", kjv_index, books)
+}
+
 fn load_headwords(
     dir: &Path,
     stem: &str,

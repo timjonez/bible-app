@@ -18,16 +18,16 @@ pub struct DictWidgets {
 pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     let app = relm4::main_adw_application();
     let window = adw::ApplicationWindow::new(&app);
-    window.set_title(Some("Dictionary"));
+    window.set_title(Some("Library"));
     window.set_default_size(560, 740);
 
-    let title = adw::WindowTitle::new("Dictionary", "");
+    let title = adw::WindowTitle::new("Library", "");
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
     let dropdown = gtk::DropDown::from_strings(&[]);
     dropdown.set_valign(gtk::Align::Center);
-    dropdown.set_tooltip_text(Some("Choose a dictionary"));
+    dropdown.set_tooltip_text(Some("Choose a dictionary or topical work"));
     let send_mod = sender.clone();
     dropdown.connect_selected_notify(move |dd| {
         let _ = dd;
@@ -36,8 +36,8 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     header.pack_end(&dropdown);
 
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Headword"));
-    search.set_tooltip_text(Some("Search dictionary headwords"));
+    search.set_placeholder_text(Some("Headword or topic"));
+    search.set_tooltip_text(Some("Search headwords and topics"));
     search.set_hexpand(true);
     let send_q = sender.clone();
     search.connect_search_changed(move |entry| {
@@ -135,7 +135,7 @@ pub fn search(widgets: &mut DictWidgets, conn: &Connection) {
         refill_list(&widgets.list, &[]);
         widgets
             .buffer
-            .set_text("No dictionaries in this database. Re-run the importer.");
+            .set_text("No dictionaries or topics in this database. Re-run the importer.");
         return;
     };
     if let Some(m) = widgets.modules.iter().find(|m| m.id == module) {

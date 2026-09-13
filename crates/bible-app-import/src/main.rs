@@ -23,7 +23,7 @@ fn main() -> ExitCode {
         Ok(stats) => {
             stats.report.print();
             eprintln!(
-                "wrote {} KJV verses, {} comments, {} xrefs, {} word maps, {} Strong's entries, {} dictionary entries → {}",
+                "wrote {} KJV verses, {} comments, {} xrefs, {} word maps, {} Strong's entries, {} library entries → {}",
                 stats.verses,
                 stats.resources,
                 stats.xrefs,
