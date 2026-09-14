@@ -1,6 +1,8 @@
 mod app;
 mod config;
 mod dict;
+mod history;
+mod layout;
 mod mhc;
 mod nav;
 mod search;
