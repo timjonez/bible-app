@@ -1,16 +1,20 @@
 use crate::config;
 use crate::dict;
+use crate::history::History;
+use crate::layout::{self, ChapterLayout};
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::search;
 use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
-use bible_app_db::{self, Book, SearchHit, Verse};
+use bible_app_db::{self, Book, SearchHit};
 use gtk::glib;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 pub struct App {
@@ -18,7 +22,6 @@ pub struct App {
     books: Vec<Book>,
     at: Ref,
     title: String,
-    chapter_text: String,
     error: Option<String>,
     buffer: gtk::TextBuffer,
     book_list: gtk::ListBox,
@@ -32,14 +35,13 @@ pub struct App {
     mhc: Option<mhc::MhcWidgets>,
     tsk: Option<tsk::TskWidgets>,
     dict: Option<dict::DictWidgets>,
-    chapter_words: Vec<TaggedWord>,
     strongs_popover: gtk::Popover,
-}
-
-struct TaggedWord {
-    start: i32,
-    end: i32,
-    codes: Vec<String>,
+    history: History,
+    layout: ChapterLayout,
+    font_size: i32,
+    interlinear: bool,
+    font_provider: gtk::CssProvider,
+    xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
 }
 
 #[derive(Debug)]
@@ -63,6 +65,12 @@ pub enum Msg {
     DictSearch(String),
     DictModule,
     DictOpen(i32),
+    Back,
+    Forward,
+    CopyVerses,
+    FontSmaller,
+    FontLarger,
+    SetInterlinear(bool),
 }
 
 #[relm4::component(pub)]
@@ -102,6 +110,22 @@ impl SimpleComponent for App {
                         set_sensitive: !model.search_open,
                         connect_clicked => Msg::NextChapter,
                     },
+                    pack_start = &gtk::Button {
+                        set_label: "Back",
+                        set_tooltip_text: Some("Back in history"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_sensitive: model.history.can_back() && !model.search_open,
+                        connect_clicked => Msg::Back,
+                    },
+                    pack_start = &gtk::Button {
+                        set_label: "Forward",
+                        set_tooltip_text: Some("Forward in history"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_sensitive: model.history.can_forward() && !model.search_open,
+                        connect_clicked => Msg::Forward,
+                    },
                     pack_end = &gtk::ToggleButton {
                         set_label: "Dict",
                         set_tooltip_text: Some("Dictionaries and topics (opens a second window)"),
@@ -131,6 +155,38 @@ impl SimpleComponent for App {
                         #[watch]
                         set_sensitive: model.error.is_none(),
                         connect_clicked => Msg::ToggleMhc,
+                    },
+                    pack_end = &gtk::ToggleButton {
+                        set_label: "Interlinear",
+                        set_tooltip_text: Some("Show Strong's lemmas beside tagged words"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_active: model.interlinear,
+                        #[watch]
+                        set_sensitive: model.error.is_none() && !model.search_open,
+                        connect_toggled[sender] => move |btn| {
+                            sender.input(Msg::SetInterlinear(btn.is_active()));
+                        }
+                    },
+                    pack_end = &gtk::Button {
+                        set_icon_name: "edit-copy-symbolic",
+                        set_tooltip_text: Some("Copy current verse with citation"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_sensitive: model.error.is_none() && !model.search_open,
+                        connect_clicked => Msg::CopyVerses,
+                    },
+                    pack_end = &gtk::Button {
+                        set_icon_name: "zoom-out-symbolic",
+                        set_tooltip_text: Some("Smaller text (Ctrl+-)"),
+                        set_valign: gtk::Align::Center,
+                        connect_clicked => Msg::FontSmaller,
+                    },
+                    pack_end = &gtk::Button {
+                        set_icon_name: "zoom-in-symbolic",
+                        set_tooltip_text: Some("Larger text (Ctrl++)"),
+                        set_valign: gtk::Align::Center,
+                        connect_clicked => Msg::FontLarger,
                     },
                     pack_end = &gtk::ToggleButton {
                         set_icon_name: "edit-find-symbolic",
@@ -265,7 +321,8 @@ impl SimpleComponent for App {
                                 set_bottom_margin: 16,
                                 set_pixels_above_lines: 2,
                                 set_pixels_below_lines: 2,
-                                set_tooltip_text: Some("Click an underlined word for Strong's"),
+                                set_has_tooltip: true,
+                                add_css_class: "chapter-view",
                                 set_accessible_role: gtk::AccessibleRole::Document,
                             }
                         }
@@ -286,10 +343,35 @@ impl SimpleComponent for App {
         let chapter_view = gtk::TextView::new();
         let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
         buffer.tag_table().add(&strongs::make_tag());
+        let italic = gtk::TextTag::new(Some("italic"));
+        italic.set_style(gtk::pango::Style::Italic);
+        buffer.tag_table().add(&italic);
+        let xref = gtk::TextTag::new(Some("xref"));
+        xref.set_underline(gtk::pango::Underline::Single);
+        xref.set_foreground(Some("#1c71d8"));
+        buffer.tag_table().add(&xref);
+        let mhc_tag = gtk::TextTag::new(Some("mhc"));
+        mhc_tag.set_weight(700);
+        mhc_tag.set_foreground(Some("#1c71d8"));
+        buffer.tag_table().add(&mhc_tag);
+        let lemma = gtk::TextTag::new(Some("lemma"));
+        lemma.set_foreground(Some("#77767b"));
+        lemma.set_scale(0.85);
+        buffer.tag_table().add(&lemma);
         let strongs_popover = strongs::create(&chapter_view);
+        let font_provider = gtk::CssProvider::new();
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &font_provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
 
-        let (conn, books, at, error) = match load_library() {
-            Ok((conn, books, at)) => (Some(conn), books, at, None),
+        let (conn, books, at, font_size, interlinear, error) = match load_library() {
+            Ok((conn, books, at, font_size, interlinear)) => {
+                (Some(conn), books, at, font_size, interlinear, None)
+            }
             Err(e) => (
                 None,
                 Vec::new(),
@@ -298,16 +380,18 @@ impl SimpleComponent for App {
                     chapter: 1,
                     verse: 1,
                 },
+                layout::DEFAULT_FONT,
+                false,
                 Some(e),
             ),
         };
 
         let mut model = App {
+            history: History::new(at),
             conn,
             books,
             at,
             title: "bible-app".into(),
-            chapter_text: String::new(),
             error,
             buffer,
             book_list: book_list.clone(),
@@ -321,9 +405,14 @@ impl SimpleComponent for App {
             mhc: None,
             tsk: None,
             dict: None,
-            chapter_words: Vec::new(),
             strongs_popover,
+            layout: ChapterLayout::default(),
+            font_size,
+            interlinear,
+            font_provider,
+            xref_tips: Rc::new(RefCell::new(Vec::new())),
         };
+        model.apply_font();
         model.refresh_chapter(false);
 
         for book in &model.books {
@@ -370,9 +459,45 @@ impl SimpleComponent for App {
                 sender_keys.input(Msg::NextChapter);
                 return glib::Propagation::Stop;
             }
+            if ctrl
+                && (keyval == gtk::gdk::Key::plus
+                    || keyval == gtk::gdk::Key::equal
+                    || keyval == gtk::gdk::Key::KP_Add)
+            {
+                sender_keys.input(Msg::FontLarger);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && (keyval == gtk::gdk::Key::minus || keyval == gtk::gdk::Key::KP_Subtract) {
+                sender_keys.input(Msg::FontSmaller);
+                return glib::Propagation::Stop;
+            }
             glib::Propagation::Proceed
         });
         root.add_controller(key);
+
+        let tips = model.xref_tips.clone();
+        model
+            .chapter_view
+            .connect_query_tooltip(move |view, x, y, keyboard, tooltip| {
+                let offset = if keyboard {
+                    view.buffer().cursor_position()
+                } else {
+                    let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x, y);
+                    match view.iter_at_location(bx, by) {
+                        Some(iter) => iter.offset(),
+                        None => return false,
+                    }
+                };
+                let tips = tips.borrow();
+                if let Some((_, _, text)) =
+                    tips.iter().find(|(s, e, _)| offset >= *s && offset < *e)
+                {
+                    tooltip.set_text(Some(text));
+                    true
+                } else {
+                    false
+                }
+            });
 
         let down = gtk::EventControllerKey::new();
         let list = model.search_list.clone();
@@ -407,12 +532,14 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             Msg::SelectBook(id) => {
-                self.at = Ref {
-                    book: id,
-                    chapter: 1,
-                    verse: 1,
-                };
-                self.refresh_chapter(false);
+                self.go(
+                    Ref {
+                        book: id,
+                        chapter: 1,
+                        verse: 1,
+                    },
+                    false,
+                );
             }
             Msg::PrevChapter => {
                 if self.search_open {
@@ -420,9 +547,7 @@ impl SimpleComponent for App {
                 }
                 if let Some(conn) = &self.conn {
                     if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at) {
-                        self.at = at;
-                        self.refresh_chapter(false);
-                        self.sync_book_row();
+                        self.go(at, false);
                     }
                 }
             }
@@ -432,9 +557,7 @@ impl SimpleComponent for App {
                 }
                 if let Some(conn) = &self.conn {
                     if let Ok(at) = nav::next_chapter(conn, &self.books, self.at) {
-                        self.at = at;
-                        self.refresh_chapter(false);
-                        self.sync_book_row();
+                        self.go(at, false);
                     }
                 }
             }
@@ -443,10 +566,8 @@ impl SimpleComponent for App {
                     return;
                 }
                 if let Some(at) = nav::parse_ref(&text, &self.books, self.at) {
-                    self.at = at;
                     self.search_open = false;
-                    self.refresh_chapter(true);
-                    self.sync_book_row();
+                    self.go(at, true);
                 }
             }
             Msg::SetSearch(open) => {
@@ -515,13 +636,18 @@ impl SimpleComponent for App {
                 let Some(at) = tsk::xref_at(widgets, idx) else {
                     return;
                 };
-                self.at = at;
                 self.search_open = false;
-                self.refresh_chapter(true);
-                self.sync_book_row();
+                self.go(at, true);
             }
             Msg::ClickWord(offset) => {
-                self.open_strongs(offset);
+                if let Some(at) = self.xref_at(offset) {
+                    self.go(at, true);
+                } else if let Some(verse) = self.mhc_at(offset) {
+                    self.go(Ref { verse, ..self.at }, false);
+                    self.ensure_mhc(&sender);
+                } else {
+                    self.open_strongs(offset);
+                }
             }
             Msg::ToggleDict => {
                 if let Some(widgets) = self.dict.take() {
@@ -561,6 +687,49 @@ impl SimpleComponent for App {
                     dict::open_hit(widgets, conn, idx);
                 }
             }
+            Msg::Back => {
+                if self.search_open {
+                    return;
+                }
+                if let Some(at) = self.history.back() {
+                    self.at = at;
+                    self.refresh_chapter(true);
+                    self.sync_book_row();
+                }
+            }
+            Msg::Forward => {
+                if self.search_open {
+                    return;
+                }
+                if let Some(at) = self.history.forward() {
+                    self.at = at;
+                    self.refresh_chapter(true);
+                    self.sync_book_row();
+                }
+            }
+            Msg::CopyVerses => {
+                self.copy_current_verse();
+            }
+            Msg::FontSmaller => {
+                self.font_size = layout::smaller_font(self.font_size);
+                self.apply_font();
+                self.save_state();
+            }
+            Msg::FontLarger => {
+                self.font_size = layout::larger_font(self.font_size);
+                self.apply_font();
+                self.save_state();
+            }
+            Msg::SetInterlinear(on) => {
+                if self.interlinear == on {
+                    return;
+                }
+                self.interlinear = on;
+                self.save_state();
+                if !self.search_open {
+                    self.refresh_chapter(false);
+                }
+            }
         }
     }
 }
@@ -590,10 +759,9 @@ impl App {
         let Some(hit) = self.search_hits.get(idx) else {
             return;
         };
-        self.at = search::hit_ref(hit);
+        let at = search::hit_ref(hit);
         self.search_open = false;
-        self.refresh_chapter(true);
-        self.sync_book_row();
+        self.go(at, true);
     }
 
     fn focus_search(&self) {
@@ -603,32 +771,118 @@ impl App {
         });
     }
 
+    fn go(&mut self, at: Ref, highlight: bool) {
+        self.history.navigate(at);
+        self.at = at;
+        self.refresh_chapter(highlight);
+        self.sync_book_row();
+    }
+
+    fn save_state(&self) {
+        config::save_state(&config::State::from_ref(
+            self.at,
+            self.font_size,
+            self.interlinear,
+        ));
+    }
+
+    fn apply_font(&self) {
+        self.font_provider.load_from_string(&format!(
+            "textview.chapter-view {{ font-size: {}pt; }}",
+            self.font_size
+        ));
+    }
+
+    fn xref_at(&self, offset: i32) -> Option<Ref> {
+        self.layout
+            .xrefs
+            .iter()
+            .find(|l| l.span.contains(offset))
+            .map(|l| l.at)
+    }
+
+    fn mhc_at(&self, offset: i32) -> Option<u8> {
+        self.layout
+            .mhc
+            .iter()
+            .find(|m| m.span.contains(offset))
+            .map(|m| m.verse)
+    }
+
+    fn ensure_mhc(&mut self, sender: &ComponentSender<Self>) {
+        if self.mhc.is_none() && self.error.is_none() {
+            let widgets = mhc::open(sender.input_sender().clone(), self.at, &self.books);
+            self.mhc = Some(widgets);
+        }
+        self.refresh_mhc();
+    }
+
+    fn copy_current_verse(&self) {
+        let Some(conn) = &self.conn else { return };
+        let Ok(verse) = bible_app_db::get_verse(conn, self.at.book, self.at.chapter, self.at.verse)
+        else {
+            return;
+        };
+        let text = layout::copy_verses(&self.books, &[verse]);
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&text);
+        }
+    }
+
     fn refresh_chapter(&mut self, highlight: bool) {
-        let verses = {
-            let Some(conn) = &self.conn else {
-                self.title = "bible-app".into();
+        let Some(conn) = &self.conn else {
+            self.title = "bible-app".into();
+            return;
+        };
+        self.title = nav::format_chapter(&self.books, self.at.book, self.at.chapter);
+        let verses = match bible_app_db::chapter(conn, self.at.book, self.at.chapter) {
+            Ok(verses) if !verses.is_empty() => verses,
+            Ok(_) => {
+                self.layout = ChapterLayout {
+                    text: "No verses in this chapter.".into(),
+                    ..ChapterLayout::default()
+                };
+                self.buffer.set_text(&self.layout.text);
+                self.xref_tips.borrow_mut().clear();
+                self.save_state();
                 return;
-            };
-            self.title = nav::format_chapter(&self.books, self.at.book, self.at.chapter);
-            match bible_app_db::chapter(conn, self.at.book, self.at.chapter) {
-                Ok(verses) if !verses.is_empty() => {
-                    self.chapter_text = nav::format_chapter_text(&verses);
-                    verses
-                }
-                Ok(_) => {
-                    self.chapter_text = "No verses in this chapter.".into();
-                    Vec::new()
-                }
-                Err(e) => {
-                    self.chapter_text = e.to_string();
-                    Vec::new()
-                }
+            }
+            Err(e) => {
+                self.layout = ChapterLayout {
+                    text: e.to_string(),
+                    ..ChapterLayout::default()
+                };
+                self.buffer.set_text(&self.layout.text);
+                self.xref_tips.borrow_mut().clear();
+                self.save_state();
+                return;
             }
         };
+        let xrefs =
+            bible_app_db::chapter_xrefs(conn, self.at.book, self.at.chapter).unwrap_or_default();
+        let mhc_starts =
+            bible_app_db::chapter_resource_verses(conn, "MHC", self.at.book, self.at.chapter)
+                .unwrap_or_default();
+        let words =
+            bible_app_db::chapter_words(conn, self.at.book, self.at.chapter).unwrap_or_default();
+        let lemmas = if self.interlinear {
+            chapter_lemmas(conn, &words)
+        } else {
+            Vec::new()
+        };
+        self.layout = layout::layout_chapter(
+            &verses,
+            &self.books,
+            &xrefs,
+            &mhc_starts,
+            &words,
+            &lemmas,
+            self.interlinear,
+        );
         self.strongs_popover.popdown();
-        self.buffer.set_text(&self.chapter_text);
-        self.tag_strongs(&verses);
-        config::save_state(self.at);
+        self.apply_layout_tags();
+        self.fill_xref_tips(conn);
+        self.save_state();
         if highlight {
             self.highlight_verse(self.at.verse);
         } else {
@@ -636,6 +890,59 @@ impl App {
         }
         self.refresh_mhc();
         self.refresh_tsk();
+    }
+
+    fn apply_layout_tags(&self) {
+        self.buffer.set_text(&self.layout.text);
+        for span in &self.layout.italics {
+            self.apply_tag("italic", *span);
+        }
+        for link in &self.layout.xrefs {
+            self.apply_tag("xref", link.span);
+        }
+        for mark in &self.layout.mhc {
+            self.apply_tag("mhc", mark.span);
+        }
+        for word in &self.layout.words {
+            self.apply_tag("strongs", word.span);
+            if let Some(span) = word.lemma_span {
+                self.apply_tag("lemma", span);
+            }
+        }
+    }
+
+    fn apply_tag(&self, name: &str, span: layout::Span) {
+        let Some(tag) = self.buffer.tag_table().lookup(name) else {
+            return;
+        };
+        if span.end <= span.start {
+            return;
+        }
+        let s = self.buffer.iter_at_offset(span.start);
+        let e = self.buffer.iter_at_offset(span.end);
+        self.buffer.apply_tag(&tag, &s, &e);
+    }
+
+    fn fill_xref_tips(&self, conn: &Connection) {
+        let mut tips = Vec::new();
+        for link in &self.layout.xrefs {
+            let preview =
+                match bible_app_db::get_verse(conn, link.at.book, link.at.chapter, link.at.verse) {
+                    Ok(v) => {
+                        let (text, _) = layout::strip_supplied(&v.text);
+                        format!("{}\n{}", nav::format_ref(&self.books, link.at), text)
+                    }
+                    Err(_) => nav::format_ref(&self.books, link.at),
+                };
+            tips.push((link.span.start, link.span.end, preview));
+        }
+        for mark in &self.layout.mhc {
+            tips.push((mark.span.start, mark.span.end, "Open Matthew Henry".into()));
+        }
+        for word in &self.layout.words {
+            tips.push((word.span.start, word.span.end, "Click for Strong's".into()));
+        }
+        *self.xref_tips.borrow_mut() = tips;
     }
 
     fn refresh_mhc(&self) {
@@ -653,49 +960,10 @@ impl App {
         }
     }
 
-    fn tag_strongs(&mut self, verses: &[Verse]) {
-        self.chapter_words.clear();
-        let Some(tag) = self.buffer.tag_table().lookup("strongs") else {
-            return;
-        };
-        let start = self.buffer.start_iter();
-        let end = self.buffer.end_iter();
-        self.buffer.remove_tag(&tag, &start, &end);
-        let Some(conn) = &self.conn else { return };
-        let Ok(words) = bible_app_db::chapter_words(conn, self.at.book, self.at.chapter) else {
-            return;
-        };
-        let starts = nav::verse_body_offsets(verses);
-        for w in words {
-            let Some((_, body)) = starts.iter().find(|(v, _)| *v == w.verse) else {
-                continue;
-            };
-            let start = *body + w.start;
-            let end = *body + w.end;
-            if start < 0 || end <= start {
-                continue;
-            }
-            let s = self.buffer.iter_at_offset(start);
-            let e = self.buffer.iter_at_offset(end);
-            self.buffer.apply_tag(&tag, &s, &e);
-            self.chapter_words.push(TaggedWord {
-                start,
-                end,
-                codes: w
-                    .strongs
-                    .split_whitespace()
-                    .map(ToString::to_string)
-                    .collect(),
-            });
-        }
-    }
-
     fn open_strongs(&self, offset: i32) {
-        let Some(word) = self
-            .chapter_words
-            .iter()
-            .find(|w| offset >= w.start && offset < w.end)
-        else {
+        let Some(word) = self.layout.words.iter().find(|w| {
+            w.span.contains(offset) || w.lemma_span.map(|s| s.contains(offset)).unwrap_or(false)
+        }) else {
             self.strongs_popover.popdown();
             return;
         };
@@ -708,21 +976,23 @@ impl App {
         if defs.is_empty() {
             return;
         }
-        strongs::present(&self.strongs_popover, &self.chapter_view, word.start, &defs);
+        strongs::present(
+            &self.strongs_popover,
+            &self.chapter_view,
+            word.span.start,
+            &defs,
+        );
     }
 
     fn highlight_verse(&self, verse: u8) {
-        let needle = format!("{verse}  ");
-        let start = self.buffer.start_iter();
-        let Some((match_start, _)) =
-            start.forward_search(&needle, gtk::TextSearchFlags::TEXT_ONLY, None)
-        else {
+        let Some((_, offset)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
             return;
         };
+        let match_start = self.buffer.iter_at_offset(*offset);
         let mut match_end = match_start;
         match_end.forward_to_line_end();
         self.buffer.select_range(&match_start, &match_end);
-        let offset = match_start.offset();
+        let offset = *offset;
         let view = self.chapter_view.clone();
         let buffer = self.buffer.clone();
         glib::idle_add_local_once(move || {
@@ -753,7 +1023,7 @@ impl App {
     }
 }
 
-fn load_library() -> Result<(Connection, Vec<Book>, Ref), String> {
+fn load_library() -> Result<(Connection, Vec<Book>, Ref, i32, bool), String> {
     let path = config::find_database().ok_or_else(config::import_hint)?;
     let conn = bible_app_db::open(&path).map_err(|e| {
         format!(
@@ -766,7 +1036,10 @@ fn load_library() -> Result<(Connection, Vec<Book>, Ref), String> {
     if books.is_empty() {
         return Err("The database has no books. Re-run the importer.".into());
     }
-    let mut at = Ref::from(config::load_state());
+    let state = config::load_state();
+    let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
+    let interlinear = state.interlinear;
+    let mut at = Ref::from(state);
     if bible_app_db::chapter(&conn, at.book, at.chapter)
         .map(|v| v.is_empty())
         .unwrap_or(true)
@@ -777,5 +1050,20 @@ fn load_library() -> Result<(Connection, Vec<Book>, Ref), String> {
             verse: 1,
         };
     }
-    Ok((conn, books, at))
+    Ok((conn, books, at, font_size, interlinear))
+}
+
+fn chapter_lemmas(conn: &Connection, words: &[bible_app_db::VerseWord]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for w in words {
+        for code in w.strongs.split_whitespace() {
+            if out.iter().any(|(c, _)| c == code) {
+                continue;
+            }
+            if let Ok(Some(def)) = bible_app_db::lookup_strongs(conn, code) {
+                out.push((code.to_string(), def.lemma));
+            }
+        }
+    }
+    out
 }

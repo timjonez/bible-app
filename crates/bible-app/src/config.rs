@@ -1,3 +1,4 @@
+use crate::layout;
 use crate::nav::Ref;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -12,6 +13,14 @@ pub struct State {
     pub book: u8,
     pub chapter: u8,
     pub verse: u8,
+    #[serde(default = "default_font_size")]
+    pub font_size: i32,
+    #[serde(default)]
+    pub interlinear: bool,
+}
+
+fn default_font_size() -> i32 {
+    layout::DEFAULT_FONT
 }
 
 impl Default for State {
@@ -20,6 +29,8 @@ impl Default for State {
             book: 1,
             chapter: 1,
             verse: 1,
+            font_size: layout::DEFAULT_FONT,
+            interlinear: false,
         }
     }
 }
@@ -34,12 +45,14 @@ impl From<State> for Ref {
     }
 }
 
-impl From<Ref> for State {
-    fn from(r: Ref) -> Self {
+impl State {
+    pub fn from_ref(r: Ref, font_size: i32, interlinear: bool) -> Self {
         Self {
             book: r.book,
             chapter: r.chapter,
             verse: r.verse,
+            font_size,
+            interlinear,
         }
     }
 }
@@ -81,12 +94,12 @@ pub fn load_state() -> State {
     toml::from_str(&text).unwrap_or_default()
 }
 
-pub fn save_state(at: Ref) {
+pub fn save_state(state: &State) {
     let Some(path) = state_path() else { return };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let text = toml::to_string_pretty(&State::from(at)).unwrap_or_default();
+    let text = toml::to_string_pretty(state).unwrap_or_default();
     let _ = fs::write(path, text);
 }
 
