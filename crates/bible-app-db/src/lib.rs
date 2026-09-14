@@ -480,6 +480,43 @@ pub fn xrefs_from(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// `(from_verse, dest)` pairs for every TSK xref in a chapter, in display order.
+pub fn chapter_xrefs(conn: &Connection, book: u8, chapter: u8) -> Result<Vec<(u8, Xref)>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT from_verse, to_book, to_chapter, to_verse
+         FROM xrefs
+         WHERE from_book = ?1 AND from_chapter = ?2
+         ORDER BY from_verse, to_book, to_chapter, to_verse",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![book, chapter], |row| {
+        Ok((
+            row.get(0)?,
+            Xref {
+                book: row.get(1)?,
+                chapter: row.get(2)?,
+                verse: row.get(3)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Verse numbers in this chapter that have a resource row for `module`.
+pub fn chapter_resource_verses(
+    conn: &Connection,
+    module: &str,
+    book: u8,
+    chapter: u8,
+) -> Result<Vec<u8>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT verse FROM resources
+         WHERE module = ?1 AND book = ?2 AND chapter = ?3
+         ORDER BY verse",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![module, book, chapter], |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn book_by_id(conn: &Connection, id: u8) -> Result<Book, DbError> {
     let row = conn
         .query_row(
@@ -567,6 +604,43 @@ mod tests {
         assert_eq!(xs.len(), 1);
         assert_eq!((xs[0].book, xs[0].chapter, xs[0].verse), (2, 1, 1));
         assert!(xrefs_from(&conn, 1, 1, 2).unwrap().is_empty());
+        conn.execute_batch(
+            r#"
+            INSERT INTO xrefs (
+                from_book, from_chapter, from_verse,
+                to_book, to_chapter, to_verse
+            ) VALUES (1, 1, 2, 2, 1, 1);
+            "#,
+        )
+        .unwrap();
+        let chapter = chapter_xrefs(&conn, 1, 1).unwrap();
+        assert_eq!(chapter.len(), 2);
+        assert_eq!(chapter[0].0, 1);
+        assert_eq!(chapter[1].0, 2);
+        assert!(chapter_xrefs(&conn, 1, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chapter_resource_verses_lists_starts() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license)
+            VALUES ('MHC', 'commentary', 'Matthew Henry', 'public-domain');
+            INSERT INTO resources (module, book, chapter, verse, text) VALUES
+                ('MHC', 1, 1, 1, 'on 1'),
+                ('MHC', 1, 1, 2, 'on 2');
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            chapter_resource_verses(&conn, "MHC", 1, 1).unwrap(),
+            vec![1, 2]
+        );
+        assert!(chapter_resource_verses(&conn, "MHC", 1, 2)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
