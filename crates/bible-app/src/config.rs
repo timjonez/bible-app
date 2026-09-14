@@ -2,10 +2,12 @@ use crate::layout;
 use crate::nav::Ref;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 const APP_DIR: &str = "bible-app";
 const DB_NAME: &str = "bible-app.sqlite";
+const ARCHIVE_NAME: &str = "bible-app.sqlite.gz";
 const STATE_NAME: &str = "state.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,30 +59,106 @@ impl State {
     }
 }
 
-pub fn find_database() -> Option<PathBuf> {
+pub fn locate_database() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("BIBLE_APP_DB") {
         let p = PathBuf::from(p);
         if p.is_file() {
-            return Some(p);
-        }
-    }
-    if let Some(dir) = dirs::data_dir() {
-        let p = dir.join(APP_DIR).join(DB_NAME);
-        if p.is_file() {
-            return Some(p);
+            return Ok(p);
         }
     }
     let local = PathBuf::from("data").join(DB_NAME);
     if local.is_file() {
+        return Ok(local);
+    }
+    let gz = find_archive();
+    if let Some(dest) = xdg_db_path() {
+        if dest.is_file() && !archive_newer(gz.as_deref(), &dest) {
+            return Ok(dest);
+        }
+        if let Some(gz) = gz {
+            extract_gzip(&gz, &dest).map_err(|e| {
+                format!(
+                    "Could not unpack {} to {}:\n{e}",
+                    gz.display(),
+                    dest.display()
+                )
+            })?;
+            return Ok(dest);
+        }
+        if dest.is_file() {
+            return Ok(dest);
+        }
+    } else if gz.is_some() {
+        return Err(
+            "Found a shipped database archive but could not determine a writable data directory."
+                .into(),
+        );
+    }
+    Err(database_hint())
+}
+
+fn archive_newer(gz: Option<&Path>, dest: &Path) -> bool {
+    let Some(gz) = gz else {
+        return false;
+    };
+    let Ok(gz_time) = fs::metadata(gz).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let Ok(dest_time) = fs::metadata(dest).and_then(|m| m.modified()) else {
+        return true;
+    };
+    gz_time > dest_time
+}
+
+fn xdg_db_path() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join(APP_DIR).join(DB_NAME))
+}
+
+fn find_archive() -> Option<PathBuf> {
+    let local = PathBuf::from("data").join(ARCHIVE_NAME);
+    if local.is_file() {
         return Some(local);
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return None;
+    };
+    let mut dir = exe.parent().map(Path::to_path_buf);
+    for _ in 0..6 {
+        let Some(current) = dir else {
+            break;
+        };
+        let beside = current.join(ARCHIVE_NAME);
+        if beside.is_file() {
+            return Some(beside);
+        }
+        let nested = current.join("data").join(ARCHIVE_NAME);
+        if nested.is_file() {
+            return Some(nested);
+        }
+        dir = current.parent().map(Path::to_path_buf);
     }
     None
 }
 
-pub fn import_hint() -> String {
-    "cargo run -p bible-app-import -- --from /path/to/PowerBibleCD --out data/bible-app.sqlite\n\n\
-     Then either keep the file at data/bible-app.sqlite, copy it to ~/.local/share/bible-app/, \
-     or set BIBLE_APP_DB."
+fn extract_gzip(src: &Path, dest: &Path) -> io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("sqlite.partial");
+    {
+        let input = fs::File::open(src)?;
+        let mut decoder = flate2::read::GzDecoder::new(input);
+        let mut output = fs::File::create(&tmp)?;
+        io::copy(&mut decoder, &mut output)?;
+    }
+    fs::rename(tmp, dest)?;
+    Ok(())
+}
+
+pub fn database_hint() -> String {
+    "No bible-app.sqlite found.\n\n\
+     Expected data/bible-app.sqlite.gz in this checkout (unpacked on first run to \
+     ~/.local/share/bible-app/), data/bible-app.sqlite, or BIBLE_APP_DB."
         .into()
 }
 
@@ -114,4 +192,27 @@ pub fn database_missing_title() -> &'static str {
 #[allow(dead_code)]
 pub fn path_display(path: &Path) -> String {
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn extract_gzip_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("bible-app-gz-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("t.sqlite.gz");
+        let dest = dir.join("t.sqlite");
+        {
+            let file = fs::File::create(&src).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            enc.write_all(b"sqlite-payload").unwrap();
+            enc.finish().unwrap();
+        }
+        extract_gzip(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"sqlite-payload");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

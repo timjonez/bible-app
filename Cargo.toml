@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/bible-app",
     "crates/bible-app-db",
-    "crates/bible-app-import",
 ]
 
 [workspace.package]
@@ -15,10 +14,8 @@ publish = false
 [workspace.dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
-memmap2 = "0.9"
-encoding_rs = "0.8"
 relm4 = { version = "0.11", features = ["libadwaita", "gnome_47"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
+flate2 = "1"
