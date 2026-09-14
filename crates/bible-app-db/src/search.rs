@@ -171,12 +171,19 @@ mod tests {
 
     #[test]
     fn real_sqlite_only_begotten_includes_john_3_16() {
-        let path = std::path::Path::new("/home/tim/Projects/bible-app/data/bible-app.sqlite");
-        if !path.is_file() {
-            eprintln!("skipping: {} not found", path.display());
+        let path = std::env::var_os("BIBLE_APP_DB")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/bible-app.sqlite");
+                p.is_file().then_some(p)
+            });
+        let Some(path) = path else {
+            eprintln!("skipping: unpacked bible-app.sqlite not found");
             return;
-        }
-        let conn = crate::open(path).unwrap();
+        };
+        let conn = crate::open(&path).unwrap();
         let hits = search_verses(&conn, "only begotten", 50).unwrap();
         assert!(
             hits.iter()
