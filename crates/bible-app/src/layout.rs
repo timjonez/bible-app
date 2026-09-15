@@ -40,13 +40,32 @@ pub struct ChapterLayout {
     pub xrefs: Vec<XrefLink>,
     pub mhc: Vec<MhcMark>,
     pub words: Vec<WordSpan>,
+    pub verse_nums: Vec<Span>,
+    pub notes: Vec<Span>,
+    pub apparatus: Vec<Span>,
     pub verse_body: Vec<(u8, i32)>,
     pub verse_start: Vec<(u8, i32)>,
 }
 
-/// MHC covers this verse when a comment starts on or before it in the chapter.
-pub fn mhc_covers(starts: &[u8], verse: u8) -> bool {
-    starts.iter().any(|&s| s <= verse)
+/// Pull trailing `{...}` translator notes off a stored KJV verse.
+pub fn split_notes(text: &str) -> (String, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut rest = text.trim_end().to_string();
+    while let Some(open) = rest.rfind('{') {
+        if !rest[open..].ends_with('}') {
+            break;
+        }
+        let note = rest[open + 1..rest.len() - 1].trim();
+        if note.is_empty() {
+            break;
+        }
+        notes.push(note.to_string());
+        rest.truncate(open);
+        let keep = rest.trim_end().len();
+        rest.truncate(keep);
+    }
+    notes.reverse();
+    (rest, notes)
 }
 
 /// Drop `[` `]` around KJV supplied words; return display text and italic spans.
@@ -195,27 +214,33 @@ pub fn layout_chapter(
 ) -> ChapterLayout {
     let mut layout = ChapterLayout::default();
     for v in verses {
-        if v.para_break && !layout.text.is_empty() {
-            layout.text.push('\n');
-        }
         if !layout.text.is_empty() {
+            layout.text.push('\n');
             layout.text.push('\n');
         }
 
         let verse_start = char_len(&layout.text);
-        layout.text.push_str(&format!("{} ", v.verse));
+        let num = format!("{}", v.verse);
+        layout.text.push_str(&num);
+        layout.verse_nums.push(Span {
+            start: verse_start,
+            end: char_len(&layout.text),
+        });
+        layout.text.push(' ');
         if v.para_break {
             layout.text.push('¶');
             layout.text.push(' ');
         }
         let body_start = char_len(&layout.text);
 
+        let (stored_body, note_texts) = split_notes(&v.text);
         let verse_words: Vec<VerseWord> = words
             .iter()
             .filter(|w| w.verse == v.verse)
             .cloned()
             .collect();
-        let (body, italics, word_spans) = build_body(&v.text, &verse_words, lemmas, interlinear);
+        let (body, italics, word_spans) =
+            build_body(&stored_body, &verse_words, lemmas, interlinear);
         layout.text.push_str(&body);
 
         for ital in italics {
@@ -231,13 +256,23 @@ pub fn layout_chapter(
         layout.verse_start.push((v.verse, verse_start));
         layout.verse_body.push((v.verse, body_start));
 
+        if !note_texts.is_empty() {
+            layout.text.push('\n');
+            let s = char_len(&layout.text);
+            layout.text.push_str(&note_texts.join("  "));
+            layout.notes.push(Span {
+                start: s,
+                end: char_len(&layout.text),
+            });
+        }
+
         let dests: Vec<Xref> = xrefs
             .iter()
             .filter(|(from, _)| *from == v.verse)
             .map(|(_, x)| *x)
             .collect();
         let (xref_text, xref_links) = format_xref_line(&dests, books);
-        let has_mhc = mhc_covers(mhc_starts, v.verse);
+        let has_mhc = mhc_starts.contains(&v.verse);
         if xref_text.is_empty() && !has_mhc {
             continue;
         }
@@ -252,7 +287,7 @@ pub fn layout_chapter(
         }
         if has_mhc {
             if !xref_text.is_empty() {
-                layout.text.push_str("  ");
+                layout.text.push(' ');
             }
             let s = char_len(&layout.text);
             layout.text.push_str("MHC");
@@ -264,6 +299,10 @@ pub fn layout_chapter(
                 verse: v.verse,
             });
         }
+        layout.apparatus.push(Span {
+            start: line_start,
+            end: char_len(&layout.text),
+        });
     }
     layout
 }
@@ -384,7 +423,8 @@ pub fn copy_verses(books: &[Book], verses: &[Verse]) -> String {
     let body: Vec<String> = verses
         .iter()
         .map(|v| {
-            let (text, _) = strip_supplied(&v.text);
+            let (stored, _) = split_notes(&v.text);
+            let (text, _) = strip_supplied(&stored);
             if verses.len() == 1 {
                 text
             } else {
@@ -616,15 +656,11 @@ mod tests {
     }
 
     #[test]
-    fn mhc_covering_is_reported_only_when_present() {
-        assert!(!mhc_covers(&[], 1));
-        assert!(!mhc_covers(&[3], 2));
-        assert!(mhc_covers(&[3], 3));
-        assert!(mhc_covers(&[3], 5));
-
+    fn mhc_mark_only_on_comment_start() {
         let verses = vec![
             verse(1, "The LORD also spake", true),
             verse(2, "Speak to the children", false),
+            verse(3, "Appoint cities", false),
         ];
         let layout = layout_chapter(&verses, &books(), &[], &[2], &[], &[], false);
         assert!(
@@ -632,10 +668,55 @@ mod tests {
             "verse 1 is before the MHC start"
         );
         assert!(layout.mhc.iter().any(|m| m.verse == 2));
+        assert!(
+            !layout.mhc.iter().any(|m| m.verse == 3),
+            "inline MHC is only on the comment start: {}",
+            layout.text
+        );
         assert!(layout.text.contains("MHC"));
         let none = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
         assert!(none.mhc.is_empty());
         assert!(!none.text.contains("MHC"));
+    }
+
+    #[test]
+    fn translator_notes_leave_the_verse_body() {
+        let stored =
+            "And God divided the light from the darkness. {the light from...: Heb. between the light}";
+        let (body, notes) = split_notes(stored);
+        assert_eq!(body, "And God divided the light from the darkness.");
+        assert_eq!(notes, vec!["the light from...: Heb. between the light"]);
+
+        let multi = "Let fowl fly. {moving: or, creeping} {creature: Heb. soul}";
+        let (body, notes) = split_notes(multi);
+        assert_eq!(body, "Let fowl fly.");
+        assert_eq!(notes, vec!["moving: or, creeping", "creature: Heb. soul"]);
+
+        let verses = vec![verse(6, stored, true)];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        assert!(
+            !layout.text.contains('{'),
+            "braces must not appear in the reader: {}",
+            layout.text
+        );
+        assert!(layout
+            .text
+            .contains("And God divided the light from the darkness."));
+        assert!(layout
+            .text
+            .contains("the light from...: Heb. between the light"));
+        assert_eq!(layout.notes.len(), 1);
+        let shown: String = layout
+            .text
+            .chars()
+            .skip(layout.notes[0].start as usize)
+            .take((layout.notes[0].end - layout.notes[0].start) as usize)
+            .collect();
+        assert_eq!(shown, "the light from...: Heb. between the light");
+        assert!(
+            layout.notes[0].start > layout.verse_body[0].1,
+            "note sits under the verse"
+        );
     }
 
     #[test]
@@ -690,12 +771,14 @@ mod tests {
             book: 1,
             chapter: 1,
             verse: 1,
-            text: "In the [beginning] God created".into(),
+            text: "In the [beginning] God created. {beginning: Heb. head}".into(),
             para_break: true,
         }];
         let out = copy_verses(&books(), &verses);
         assert!(out.contains("In the beginning God created"), "{out}");
         assert!(!out.contains('['), "{out}");
+        assert!(!out.contains('{'), "{out}");
+        assert!(!out.contains("Heb. head"), "{out}");
         assert!(out.contains("Genesis 1:1"), "{out}");
         assert!(out.contains("KJV"), "{out}");
     }

@@ -65,7 +65,5 @@ pub fn present(popover: &gtk::Popover, view: &gtk::TextView, start: i32, defs: &
 }
 
 pub fn make_tag() -> gtk::TextTag {
-    let tag = gtk::TextTag::new(Some("strongs"));
-    tag.set_underline(gtk::pango::Underline::Single);
-    tag
+    gtk::TextTag::new(Some("strongs"))
 }

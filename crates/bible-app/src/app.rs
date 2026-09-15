@@ -164,7 +164,7 @@ impl SimpleComponent for App {
                         set_active: model.interlinear,
                         #[watch]
                         set_sensitive: model.error.is_none() && !model.search_open,
-                        connect_toggled[sender] => move |btn| {
+                        connect_clicked[sender] => move |btn| {
                             sender.input(Msg::SetInterlinear(btn.is_active()));
                         }
                     },
@@ -315,12 +315,12 @@ impl SimpleComponent for App {
                                 set_editable: false,
                                 set_cursor_visible: false,
                                 set_wrap_mode: gtk::WrapMode::WordChar,
-                                set_left_margin: 20,
-                                set_right_margin: 20,
-                                set_top_margin: 16,
-                                set_bottom_margin: 16,
-                                set_pixels_above_lines: 2,
-                                set_pixels_below_lines: 2,
+                                set_left_margin: 28,
+                                set_right_margin: 28,
+                                set_top_margin: 20,
+                                set_bottom_margin: 24,
+                                set_pixels_above_lines: 1,
+                                set_pixels_below_lines: 1,
                                 set_has_tooltip: true,
                                 add_css_class: "chapter-view",
                                 set_accessible_role: gtk::AccessibleRole::Document,
@@ -346,18 +346,44 @@ impl SimpleComponent for App {
         let italic = gtk::TextTag::new(Some("italic"));
         italic.set_style(gtk::pango::Style::Italic);
         buffer.tag_table().add(&italic);
+        let verse_num = gtk::TextTag::new(Some("verse-num"));
+        verse_num.set_weight(700);
+        verse_num.set_scale(0.9);
+        verse_num.set_foreground(Some("#9a9996"));
+        buffer.tag_table().add(&verse_num);
+        let note = gtk::TextTag::new(Some("note"));
+        note.set_style(gtk::pango::Style::Italic);
+        note.set_foreground(Some("#77767b"));
+        note.set_scale(0.85);
+        note.set_left_margin(44);
+        buffer.tag_table().add(&note);
+        let apparatus = gtk::TextTag::new(Some("apparatus"));
+        apparatus.set_foreground(Some("#9a9996"));
+        apparatus.set_scale(0.8);
+        apparatus.set_left_margin(44);
+        apparatus.set_pixels_above_lines(2);
+        buffer.tag_table().add(&apparatus);
         let xref = gtk::TextTag::new(Some("xref"));
         xref.set_underline(gtk::pango::Underline::Single);
         xref.set_foreground(Some("#1c71d8"));
+        xref.set_scale(0.8);
         buffer.tag_table().add(&xref);
         let mhc_tag = gtk::TextTag::new(Some("mhc"));
         mhc_tag.set_weight(700);
         mhc_tag.set_foreground(Some("#1c71d8"));
+        mhc_tag.set_scale(0.8);
         buffer.tag_table().add(&mhc_tag);
         let lemma = gtk::TextTag::new(Some("lemma"));
         lemma.set_foreground(Some("#77767b"));
         lemma.set_scale(0.85);
         buffer.tag_table().add(&lemma);
+        apparatus.set_priority(0);
+        note.set_priority(0);
+        verse_num.set_priority(1);
+        italic.set_priority(1);
+        lemma.set_priority(1);
+        xref.set_priority(2);
+        mhc_tag.set_priority(2);
         let strongs_popover = strongs::create(&chapter_view);
         let font_provider = gtk::CssProvider::new();
         if let Some(display) = gtk::gdk::Display::default() {
@@ -525,6 +551,32 @@ impl SimpleComponent for App {
             }
         });
         model.chapter_view.add_controller(click);
+
+        let motion = gtk::EventControllerMotion::new();
+        let view = model.chapter_view.clone();
+        let tips = model.xref_tips.clone();
+        motion.connect_motion(move |_, x, y| {
+            let (bx, by) =
+                view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            let over = view
+                .iter_at_location(bx, by)
+                .map(|iter| {
+                    let off = iter.offset();
+                    tips.borrow().iter().any(|(s, e, _)| off >= *s && off < *e)
+                })
+                .unwrap_or(false);
+            let cursor = if over {
+                gtk::gdk::Cursor::from_name("pointer", None)
+            } else {
+                None
+            };
+            view.set_cursor(cursor.as_ref());
+        });
+        let view = model.chapter_view.clone();
+        motion.connect_leave(move |_| {
+            view.set_cursor(None);
+        });
+        model.chapter_view.add_controller(motion);
 
         ComponentParts { model, widgets }
     }
@@ -894,6 +946,15 @@ impl App {
 
     fn apply_layout_tags(&self) {
         self.buffer.set_text(&self.layout.text);
+        for span in &self.layout.verse_nums {
+            self.apply_tag("verse-num", *span);
+        }
+        for span in &self.layout.notes {
+            self.apply_tag("note", *span);
+        }
+        for span in &self.layout.apparatus {
+            self.apply_tag("apparatus", *span);
+        }
         for span in &self.layout.italics {
             self.apply_tag("italic", *span);
         }
@@ -929,7 +990,8 @@ impl App {
             let preview =
                 match bible_app_db::get_verse(conn, link.at.book, link.at.chapter, link.at.verse) {
                     Ok(v) => {
-                        let (text, _) = layout::strip_supplied(&v.text);
+                        let (stored, _) = layout::split_notes(&v.text);
+                        let (text, _) = layout::strip_supplied(&stored);
                         format!("{}\n{}", nav::format_ref(&self.books, link.at), text)
                     }
                     Err(_) => nav::format_ref(&self.books, link.at),
