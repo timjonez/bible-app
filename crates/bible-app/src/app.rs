@@ -373,6 +373,11 @@ impl SimpleComponent for App {
         mhc_tag.set_foreground(Some("#1c71d8"));
         mhc_tag.set_scale(0.8);
         buffer.tag_table().add(&mhc_tag);
+        let tsk_more = gtk::TextTag::new(Some("tsk-more"));
+        tsk_more.set_weight(700);
+        tsk_more.set_foreground(Some("#1c71d8"));
+        tsk_more.set_scale(0.8);
+        buffer.tag_table().add(&tsk_more);
         let lemma = gtk::TextTag::new(Some("lemma"));
         lemma.set_foreground(Some("#77767b"));
         lemma.set_scale(0.85);
@@ -384,6 +389,7 @@ impl SimpleComponent for App {
         lemma.set_priority(1);
         xref.set_priority(2);
         mhc_tag.set_priority(2);
+        tsk_more.set_priority(2);
         let strongs_popover = strongs::create(&chapter_view);
         let font_provider = gtk::CssProvider::new();
         if let Some(display) = gtk::gdk::Display::default() {
@@ -694,6 +700,9 @@ impl SimpleComponent for App {
             Msg::ClickWord(offset) => {
                 if let Some(at) = self.xref_at(offset) {
                     self.go(at, true);
+                } else if let Some(verse) = self.tsk_more_at(offset) {
+                    self.go(Ref { verse, ..self.at }, false);
+                    self.ensure_tsk(&sender);
                 } else if let Some(verse) = self.mhc_at(offset) {
                     self.go(Ref { verse, ..self.at }, false);
                     self.ensure_mhc(&sender);
@@ -861,12 +870,28 @@ impl App {
             .map(|m| m.verse)
     }
 
+    fn tsk_more_at(&self, offset: i32) -> Option<u8> {
+        self.layout
+            .tsk_more
+            .iter()
+            .find(|m| m.span.contains(offset))
+            .map(|m| m.verse)
+    }
+
     fn ensure_mhc(&mut self, sender: &ComponentSender<Self>) {
         if self.mhc.is_none() && self.error.is_none() {
             let widgets = mhc::open(sender.input_sender().clone(), self.at, &self.books);
             self.mhc = Some(widgets);
         }
         self.refresh_mhc();
+    }
+
+    fn ensure_tsk(&mut self, sender: &ComponentSender<Self>) {
+        if self.tsk.is_none() && self.error.is_none() {
+            let widgets = tsk::open(sender.input_sender().clone(), self.at, &self.books);
+            self.tsk = Some(widgets);
+        }
+        self.refresh_tsk();
     }
 
     fn copy_current_verse(&self) {
@@ -964,6 +989,9 @@ impl App {
         for mark in &self.layout.mhc {
             self.apply_tag("mhc", mark.span);
         }
+        for mark in &self.layout.tsk_more {
+            self.apply_tag("tsk-more", mark.span);
+        }
         for word in &self.layout.words {
             self.apply_tag("strongs", word.span);
             if let Some(span) = word.lemma_span {
@@ -1000,6 +1028,13 @@ impl App {
         }
         for mark in &self.layout.mhc {
             tips.push((mark.span.start, mark.span.end, "Open Matthew Henry".into()));
+        }
+        for mark in &self.layout.tsk_more {
+            tips.push((
+                mark.span.start,
+                mark.span.end,
+                format!("Open TSK ({} more)", mark.hidden),
+            ));
         }
         for word in &self.layout.words {
             tips.push((word.span.start, word.span.end, "Click for Strong's".into()));
