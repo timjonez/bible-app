@@ -1024,17 +1024,12 @@ impl App {
 }
 
 fn load_library() -> Result<(Connection, Vec<Book>, Ref, i32, bool), String> {
-    let path = config::find_database().ok_or_else(config::import_hint)?;
-    let conn = bible_app_db::open(&path).map_err(|e| {
-        format!(
-            "Could not open {}:\n{e}\n\n{}",
-            path.display(),
-            config::import_hint()
-        )
-    })?;
+    let path = config::locate_database()?;
+    let conn = bible_app_db::open(&path)
+        .map_err(|e| format!("Could not open {}:\n{e}", path.display()))?;
     let books = bible_app_db::books(&conn).map_err(|e| e.to_string())?;
     if books.is_empty() {
-        return Err("The database has no books. Re-run the importer.".into());
+        return Err("The database has no books.".into());
     }
     let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);

@@ -135,7 +135,7 @@ pub fn search(widgets: &mut DictWidgets, conn: &Connection) {
         refill_list(&widgets.list, &[]);
         widgets
             .buffer
-            .set_text("No dictionaries or topics in this database. Re-run the importer.");
+            .set_text("No dictionaries or topics in this database.");
         return;
     };
     if let Some(m) = widgets.modules.iter().find(|m| m.id == module) {

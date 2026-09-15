@@ -135,11 +135,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
         );
         CREATE INDEX IF NOT EXISTS entries_headword ON entries(module, headword COLLATE NOCASE);
 
-        CREATE TABLE IF NOT EXISTS import_log (
-            stem   TEXT PRIMARY KEY,
-            action TEXT NOT NULL,
-            reason TEXT NOT NULL
-        );
+        DROP TABLE IF EXISTS import_log;
 
         CREATE VIRTUAL TABLE IF NOT EXISTS verses_fts USING fts5(
             text,
