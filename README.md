@@ -20,11 +20,12 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Ctrl+- / Ctrl++: smaller / larger text
 - Copy copies the current verse plus a `Book chapter:verse (KJV)` citation
 - Interlinear shows each tagged word’s Strong’s lemma beside the English
-- Cross-references under a verse jump on click and preview the destination on hover
-- MHC under a verse (when Matthew Henry covers it) opens Matthew Henry
+- Translator notes sit under the verse, not in the reading line
+- Cross-references under a verse jump on click and preview the destination on hover; long lists collapse to *N more*, which opens TSK
+- MHC under a verse (when a Matthew Henry comment starts there) opens Matthew Henry
 - MHC in the header opens Matthew Henry for the current verse in a second window
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
-- Click an underlined KJV word for its Strong’s number, lemma, and definition
+- Click a tagged KJV word for its Strong’s number, lemma, and definition
 - Dict opens Easton and the other dictionaries and topics; type a headword and click a result
 - Last position, font size, and interlinear are stored in `~/.config/bible-app/state.toml`
 
