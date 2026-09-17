@@ -38,6 +38,7 @@ pub struct App {
     tsk: Option<tsk::TskWidgets>,
     dict: Option<dict::DictWidgets>,
     strongs_popover: gtk::Popover,
+    strongs_at: i32,
     tsk_popover: gtk::Popover,
     history: History,
     layout: ChapterLayout,
@@ -65,6 +66,7 @@ pub enum Msg {
     TskClosed,
     OpenTskXref(i32),
     OpenTskDest(Ref),
+    OpenStrongsCode(String),
     ClickWord(i32),
     ToggleDict,
     DictClosed,
@@ -459,11 +461,9 @@ impl SimpleComponent for App {
         xref.set_foreground(Some("#1c71d8"));
         xref.set_scale(0.8);
         buffer.tag_table().add(&xref);
-        let mhc_tag = gtk::TextTag::new(Some("mhc-sup"));
+        let mhc_tag = gtk::TextTag::new(Some("mhc-num"));
         mhc_tag.set_weight(700);
         mhc_tag.set_foreground(Some("#1c71d8"));
-        mhc_tag.set_scale(0.7);
-        mhc_tag.set_rise(4 * gtk::pango::SCALE);
         buffer.tag_table().add(&mhc_tag);
         let tsk_sup = gtk::TextTag::new(Some("tsk-sup"));
         tsk_sup.set_foreground(Some("#1c71d8"));
@@ -475,8 +475,8 @@ impl SimpleComponent for App {
         lemma.set_scale(0.85);
         buffer.tag_table().add(&lemma);
         let current_verse = gtk::TextTag::new(Some("current-verse"));
-        current_verse.set_background(Some("#eceae6"));
-        current_verse.set_background_full_height(true);
+        current_verse.set_foreground(Some("#99c1f1"));
+        current_verse.set_weight(700);
         buffer.tag_table().add(&current_verse);
         current_verse.set_priority(0);
         apparatus.set_priority(0);
@@ -545,6 +545,7 @@ impl SimpleComponent for App {
             tsk: None,
             dict: None,
             strongs_popover,
+            strongs_at: 0,
             tsk_popover,
             layout: ChapterLayout::default(),
             font_size,
@@ -812,6 +813,9 @@ impl SimpleComponent for App {
                 self.search_open = false;
                 self.go(at, true);
             }
+            Msg::OpenStrongsCode(code) => {
+                self.open_strongs_code(&code, &sender);
+            }
             Msg::ClickWord(offset) => {
                 self.tsk_popover.popdown();
                 let tsk_hit = self
@@ -841,7 +845,7 @@ impl SimpleComponent for App {
                     if let Some(verse) = layout::verse_at_offset(&self.layout.verse_start, offset) {
                         self.select_verse(verse);
                     }
-                    self.open_strongs(offset);
+                    self.open_strongs(offset, &sender);
                 } else if let Some(verse) =
                     layout::verse_at_offset(&self.layout.verse_start, offset)
                 {
@@ -1126,7 +1130,7 @@ impl App {
             self.apply_tag("xref", link.span);
         }
         for mark in &self.layout.mhc {
-            self.apply_tag("mhc-sup", mark.span);
+            self.apply_tag("mhc-num", mark.span);
         }
         for mark in &self.layout.tsk {
             self.apply_tag("tsk-sup", mark.span);
@@ -1225,7 +1229,7 @@ impl App {
         self.apply_current_verse_tag(verse);
     }
 
-    fn open_strongs(&self, offset: i32) {
+    fn open_strongs(&mut self, offset: i32, sender: &ComponentSender<Self>) {
         let Some(word) = layout::word_at_offset(&self.layout.words, offset) else {
             return;
         };
@@ -1238,12 +1242,29 @@ impl App {
         if defs.is_empty() {
             return;
         }
+        self.strongs_at = word.span.start;
         self.tsk_popover.popdown();
         strongs::present(
             &self.strongs_popover,
             &self.chapter_view,
-            word.span.start,
+            self.strongs_at,
             &defs,
+            sender.input_sender().clone(),
+        );
+    }
+
+    fn open_strongs_code(&mut self, code: &str, sender: &ComponentSender<Self>) {
+        let Some(conn) = &self.conn else { return };
+        let Some(def) = bible_app_db::lookup_strongs(conn, code).ok().flatten() else {
+            return;
+        };
+        self.tsk_popover.popdown();
+        strongs::present(
+            &self.strongs_popover,
+            &self.chapter_view,
+            self.strongs_at,
+            &[def],
+            sender.input_sender().clone(),
         );
     }
 
@@ -1268,8 +1289,10 @@ impl App {
         let start = self.buffer.start_iter();
         let end = self.buffer.end_iter();
         self.buffer.remove_tag(&tag, &start, &end);
-        let text_end = end.offset();
-        let Some(span) = layout::verse_range(&self.layout.verse_start, verse, text_end) else {
+        let Some((_, vs)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
+            return;
+        };
+        let Some(span) = self.layout.verse_nums.iter().copied().find(|s| s.start == *vs) else {
             return;
         };
         self.apply_tag("current-verse", span);

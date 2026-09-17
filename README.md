@@ -25,7 +25,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Click a tagged KJV word for its Strong’s lemma, pronunciation, number, and definition. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
-- A small M at the end of a verse (when a Matthew Henry comment starts there) opens Matthew Henry
+- A verse number is a link when a Matthew Henry comment starts there; click it to open Matthew Henry
 - MHC in the header opens Matthew Henry for the current verse in a second window
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
 - Dict opens Easton and the other dictionaries and topics; type a headword and click a result
