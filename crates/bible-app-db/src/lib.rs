@@ -374,20 +374,27 @@ pub fn lookup_strongs(conn: &Connection, code: &str) -> Result<Option<StrongDef>
 pub struct DictModule {
     pub id: String,
     pub title: String,
+    pub kind: String,
 }
 
 pub fn dictionary_modules(conn: &Connection) -> Result<Vec<DictModule>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT id, title FROM modules
+        "SELECT id, title, kind FROM modules
          WHERE kind IN ('dictionary', 'topic')
          ORDER BY CASE kind WHEN 'dictionary' THEN 0 ELSE 1 END,
-                  CASE id WHEN 'Easton' THEN 0 WHEN 'Nave' THEN 0 ELSE 1 END,
+                  CASE id
+                    WHEN 'Webster' THEN 0
+                    WHEN 'Easton' THEN 1
+                    WHEN 'Nave' THEN 0
+                    ELSE 2
+                  END,
                   title",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(DictModule {
             id: row.get(0)?,
             title: row.get(1)?,
+            kind: row.get(2)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -740,12 +747,52 @@ mod tests {
         conn.execute_batch(
             r#"
             INSERT INTO modules (id, kind, title, license)
-            VALUES ('Nave', 'topic', 'Nave''s Topical Bible', 'public-domain');
+            VALUES ('Nave', 'topic', 'Nave''s Topical Bible', 'public-domain'),
+                   ('Webster', 'dictionary', 'Webster''s 1828 Dictionary', 'MIT');
             "#,
         )
         .unwrap();
         let mods = dictionary_modules(&conn).unwrap();
-        assert_eq!(mods[0].id, "Easton");
+        assert_eq!(mods[0].id, "Webster");
+        assert_eq!(mods[1].id, "Easton");
         assert!(mods.iter().any(|m| m.id == "Nave"));
+    }
+
+    fn shipped_sqlite() -> Option<std::path::PathBuf> {
+        std::env::var_os("BIBLE_APP_DB")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/bible-app.sqlite");
+                p.is_file().then_some(p)
+            })
+    }
+
+    #[test]
+    fn real_sqlite_webster_1828_senses() {
+        let Some(path) = shipped_sqlite() else {
+            eprintln!("skipping: unpacked bible-app.sqlite not found");
+            return;
+        };
+        let conn = open(&path).unwrap();
+        let mods = dictionary_modules(&conn).unwrap();
+        assert_eq!(mods[0].id, "Webster");
+        let hits = search_entries(&conn, "Webster", "prevent", 20).unwrap();
+        assert!(
+            hits.iter().any(|h| h.headword.eq_ignore_ascii_case("prevent")),
+            "prevent missing from {hits:?}"
+        );
+        let hit = hits
+            .iter()
+            .find(|h| h.headword.eq_ignore_ascii_case("prevent"))
+            .unwrap();
+        let (_, text) = get_entry(&conn, "Webster", hit.i).unwrap().unwrap();
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("go before") || lower.contains("precede"),
+            "1828 prevent sense missing: {text}"
+        );
+        assert!(!text.contains('<'), "HTML leaked into Webster text");
     }
 }
