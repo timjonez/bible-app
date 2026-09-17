@@ -861,6 +861,34 @@ fn char_len(s: &str) -> i32 {
     s.chars().count() as i32
 }
 
+/// Verse whose `[verse_start, next verse_start)` contains `offset`.
+pub fn verse_at_offset(verse_start: &[(u8, i32)], offset: i32) -> Option<u8> {
+    verse_start
+        .iter()
+        .rev()
+        .find(|(_, start)| offset >= *start)
+        .map(|(verse, _)| *verse)
+}
+
+/// Half-open highlight range `[verse_start, next verse_start)` for `verse`.
+/// `text_end` is the exclusive end of the last verse. Uses `verse_start` so
+/// this still works if verses later flow into paragraphs.
+pub fn verse_range(verse_start: &[(u8, i32)], verse: u8, text_end: i32) -> Option<Span> {
+    let i = verse_start.iter().position(|(v, _)| *v == verse)?;
+    let start = verse_start[i].1;
+    let end = verse_start
+        .get(i + 1)
+        .map(|(_, next)| *next)
+        .unwrap_or(text_end);
+    (end > start).then_some(Span { start, end })
+}
+
+pub fn word_at_offset(words: &[WordSpan], offset: i32) -> Option<&WordSpan> {
+    words
+        .iter()
+        .find(|w| w.span.contains(offset) || w.lemma_span.is_some_and(|s| s.contains(offset)))
+}
+
 /// Current-verse (or range) copy with a `Book chapter:verse` citation and `KJV`.
 pub fn copy_verses(books: &[Book], verses: &[Verse]) -> String {
     if verses.is_empty() {
@@ -1580,6 +1608,98 @@ God creates heaven and earth.
             layout.tsk[0].span.end <= lemma.start || layout.tsk[0].span.start >= lemma.end,
             "letter must not sit inside the lemma span: {}",
             layout.text
+        );
+    }
+
+    #[test]
+    fn offset_maps_to_verse_from_verse_start() {
+        let verses = vec![
+            verse(1, "First verse", true),
+            verse(2, "Second verse", false),
+            verse(3, "Third verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        assert_eq!(layout.verse_start[0], (1, 0));
+        assert_eq!(layout.verse_start[1].0, 2);
+        assert_eq!(layout.verse_start[2].0, 3);
+        let s1 = layout.verse_start[0].1;
+        let s2 = layout.verse_start[1].1;
+        let s3 = layout.verse_start[2].1;
+        assert!(s2 > s1);
+        assert!(s3 > s2);
+        assert_eq!(verse_at_offset(&layout.verse_start, s1), Some(1));
+        assert_eq!(verse_at_offset(&layout.verse_start, s2 - 1), Some(1));
+        assert_eq!(verse_at_offset(&layout.verse_start, s2), Some(2));
+        assert_eq!(verse_at_offset(&layout.verse_start, s3 - 1), Some(2));
+        assert_eq!(verse_at_offset(&layout.verse_start, s3), Some(3));
+        let b2 = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
+        assert_eq!(verse_at_offset(&layout.verse_start, b2), Some(2));
+        assert!(b2 >= s2 && b2 < s3);
+    }
+
+    #[test]
+    fn verse_highlight_range_stops_before_next_verse() {
+        let verses = vec![
+            verse(1, "First verse", true),
+            verse(2, "Second verse", false),
+            verse(3, "Third verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        let s2 = layout.verse_start[1].1;
+        let s3 = layout.verse_start[2].1;
+        let text_end = char_len(&layout.text);
+        let range = verse_range(&layout.verse_start, 2, text_end).unwrap();
+        assert_eq!(range.start, s2);
+        assert_eq!(range.end, s3);
+        assert!(range.contains(s2));
+        assert!(
+            !range.contains(s3),
+            "verse 2 must not include verse 3's start"
+        );
+        let last = verse_range(&layout.verse_start, 3, text_end).unwrap();
+        assert_eq!(last.start, s3);
+        assert_eq!(last.end, text_end);
+        assert!(!last.contains(text_end));
+    }
+
+    #[test]
+    fn word_offset_finds_tagged_span() {
+        let stored = "In the [beginning] God";
+        let w = word(1, 7, 18, "H7225");
+        assert_eq!(&stored[7..18], "[beginning]");
+        let verses = vec![verse(1, stored, true)];
+        let layout = layout_chapter(
+            &verses,
+            &books(),
+            &[],
+            &[],
+            &[w],
+            &[("H7225".into(), "re'shiyth".into())],
+            verse_opts(),
+        );
+        assert!(
+            !layout.text.contains("re'shiyth"),
+            "app layout must not insert lemmas: {}",
+            layout.text
+        );
+        assert_eq!(layout.words.len(), 1);
+        assert!(layout.words[0].lemma_span.is_none());
+        let span = layout.words[0].span;
+        let mid = (span.start + span.end) / 2;
+        let hit = word_at_offset(&layout.words, mid).unwrap();
+        assert_eq!(hit.codes, vec!["H7225".to_string()]);
+        let shown: String = layout
+            .text
+            .chars()
+            .skip(span.start as usize)
+            .take((span.end - span.start) as usize)
+            .collect();
+        assert_eq!(shown, "beginning");
+        assert!(word_at_offset(&layout.words, layout.verse_start[0].1).is_none());
+        assert_eq!(
+            verse_at_offset(&layout.verse_start, mid),
+            Some(1),
+            "word click still belongs to its verse"
         );
     }
 
