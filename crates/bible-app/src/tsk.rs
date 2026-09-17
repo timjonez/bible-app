@@ -133,6 +133,80 @@ pub fn xref_at(widgets: &TskWidgets, idx: i32) -> Option<Ref> {
     widgets.xrefs.get(usize::try_from(idx).ok()?).copied()
 }
 
+pub fn create_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
+    popover.set_autohide(true);
+    popover.set_position(gtk::PositionType::Bottom);
+    popover.set_accessible_role(gtk::AccessibleRole::Dialog);
+    popover
+}
+
+pub fn present_phrase(
+    popover: &gtk::Popover,
+    view: &gtk::TextView,
+    start: i32,
+    heading: &str,
+    dests: &[Ref],
+    books: &[Book],
+    sender: relm4::Sender<super::app::Msg>,
+) {
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    body.set_margin_top(10);
+    body.set_margin_bottom(10);
+    body.set_width_request(260);
+
+    let title = gtk::Label::new(Some(heading));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+    body.append(&title);
+
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    list.add_css_class("boxed-list");
+    list.set_accessible_role(gtk::AccessibleRole::List);
+    let dests_vec = dests.to_vec();
+    list.connect_row_activated(move |_, row| {
+        let Ok(idx) = usize::try_from(row.index()) else {
+            return;
+        };
+        if let Some(at) = dests_vec.get(idx).copied() {
+            sender.emit(super::app::Msg::OpenTskDest(at));
+        }
+    });
+    for at in dests {
+        let row = gtk::ListBoxRow::new();
+        let label = gtk::Label::new(Some(&nav::format_ref(books, *at)));
+        label.set_xalign(0.0);
+        label.set_margin_start(10);
+        label.set_margin_end(10);
+        label.set_margin_top(6);
+        label.set_margin_bottom(6);
+        row.set_child(Some(&label));
+        row.set_activatable(true);
+        list.append(&row);
+    }
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_height(80);
+    scroll.set_max_content_height(280);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_child(Some(&list));
+    body.append(&scroll);
+    popover.set_child(Some(&body));
+
+    let buffer = view.buffer();
+    let iter = buffer.iter_at_offset(start);
+    let loc = view.iter_location(&iter);
+    let (x, y) =
+        view.buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y() + loc.height());
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, loc.width().max(1), 1)));
+    popover.popup();
+}
+
 fn refill_xrefs(list: &gtk::ListBox, xrefs: &[Ref], books: &[Book]) {
     while let Some(child) = list.row_at_index(0) {
         list.remove(&child);

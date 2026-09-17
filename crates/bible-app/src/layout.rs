@@ -1,4 +1,5 @@
 use crate::nav::Ref;
+use crate::tsk_parse::{self, TskPhrase};
 use bible_app_db::{Book, Verse, VerseWord, Xref};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,10 +28,12 @@ pub struct MhcMark {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TskMore {
+pub struct TskMark {
     pub span: Span,
     pub verse: u8,
-    pub hidden: usize,
+    pub letter: String,
+    pub heading: String,
+    pub dests: Vec<Ref>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +49,7 @@ pub struct ChapterLayout {
     pub italics: Vec<Span>,
     pub xrefs: Vec<XrefLink>,
     pub mhc: Vec<MhcMark>,
-    pub tsk_more: Vec<TskMore>,
+    pub tsk: Vec<TskMark>,
     pub words: Vec<WordSpan>,
     pub verse_nums: Vec<Span>,
     pub notes: Vec<Span>,
@@ -239,7 +242,7 @@ fn book_abbrev(books: &[Book], id: u8) -> &str {
 pub fn layout_chapter(
     verses: &[Verse],
     books: &[Book],
-    xrefs: &[(u8, Xref)],
+    tsk_notes: &[(u8, &str)],
     mhc_starts: &[u8],
     words: &[VerseWord],
     lemmas: &[(String, String)],
@@ -274,6 +277,13 @@ pub fn layout_chapter(
             .collect();
         let (body, italics, word_spans) =
             build_body(&stored_body, &verse_words, lemmas, interlinear);
+        let phrases = tsk_notes
+            .iter()
+            .find(|(verse, _)| *verse == v.verse)
+            .map(|(_, text)| tsk_parse::parse_tsk_phrases(text, books))
+            .unwrap_or_default();
+        let (body, italics, word_spans, tsk_marks) =
+            apply_tsk_marks(body, italics, word_spans, &phrases, v.verse);
         layout.text.push_str(&body);
 
         for ital in italics {
@@ -285,6 +295,10 @@ pub fn layout_chapter(
                 *ls = shift_span(*ls, body_start);
             }
             layout.words.push(w);
+        }
+        for mut mark in tsk_marks {
+            mark.span = shift_span(mark.span, body_start);
+            layout.tsk.push(mark);
         }
         layout.verse_start.push((v.verse, verse_start));
         layout.verse_body.push((v.verse, body_start));
@@ -299,60 +313,163 @@ pub fn layout_chapter(
             });
         }
 
-        let dests: Vec<Xref> = xrefs
-            .iter()
-            .filter(|(from, _)| *from == v.verse)
-            .map(|(_, x)| *x)
-            .collect();
-        let (xref_text, xref_links, hidden) = format_xref_line(&dests, books);
-        let has_mhc = mhc_starts.contains(&v.verse);
-        if xref_text.is_empty() && hidden == 0 && !has_mhc {
+        if !mhc_starts.contains(&v.verse) {
             continue;
         }
         layout.text.push('\n');
         let line_start = char_len(&layout.text);
-        if !xref_text.is_empty() {
-            layout.text.push_str(&xref_text);
-            for mut link in xref_links {
-                link.span = shift_span(link.span, line_start);
-                layout.xrefs.push(link);
-            }
-        }
-        if hidden > 0 {
-            if !xref_text.is_empty() {
-                layout.text.push_str(" · ");
-            }
-            let s = char_len(&layout.text);
-            layout.text.push_str(&format!("{hidden} more"));
-            layout.tsk_more.push(TskMore {
-                span: Span {
-                    start: s,
-                    end: char_len(&layout.text),
-                },
-                verse: v.verse,
-                hidden,
-            });
-        }
-        if has_mhc {
-            if !xref_text.is_empty() || hidden > 0 {
-                layout.text.push(' ');
-            }
-            let s = char_len(&layout.text);
-            layout.text.push_str("MHC");
-            layout.mhc.push(MhcMark {
-                span: Span {
-                    start: s,
-                    end: char_len(&layout.text),
-                },
-                verse: v.verse,
-            });
-        }
+        layout.text.push_str("MHC");
+        layout.mhc.push(MhcMark {
+            span: Span {
+                start: line_start,
+                end: char_len(&layout.text),
+            },
+            verse: v.verse,
+        });
         layout.apparatus.push(Span {
             start: line_start,
             end: char_len(&layout.text),
         });
     }
     layout
+}
+
+fn apply_tsk_marks(
+    body: String,
+    italics: Vec<Span>,
+    words: Vec<WordSpan>,
+    phrases: &[TskPhrase],
+    verse: u8,
+) -> (String, Vec<Span>, Vec<WordSpan>, Vec<TskMark>) {
+    if phrases.is_empty() {
+        return (body, italics, words, Vec::new());
+    }
+    let forbidden: Vec<Span> = words.iter().filter_map(|w| w.lemma_span).collect();
+    let mut claimed = Vec::new();
+    let mut hits: Vec<(Span, String, &TskPhrase)> = Vec::new();
+    for phrase in phrases {
+        if let Some(span) = find_heading(&body, &phrase.heading, &claimed, &forbidden) {
+            claimed.push(span);
+            let letter = tsk_letter(hits.len());
+            hits.push((span, letter, phrase));
+        }
+    }
+    if hits.is_empty() {
+        return (body, italics, words, Vec::new());
+    }
+    hits.sort_by_key(|(span, _, _)| span.start);
+
+    let inserts: Vec<(i32, i32)> = hits
+        .iter()
+        .map(|(span, letter, _)| (span.end, char_len(letter)))
+        .collect();
+
+    let mut out = String::new();
+    let mut last = 0i32;
+    let mut marks = Vec::new();
+    for (span, letter, phrase) in &hits {
+        out.push_str(&slice_chars(&body, last, span.end));
+        let start = char_len(&out);
+        out.push_str(letter);
+        marks.push(TskMark {
+            span: Span {
+                start,
+                end: char_len(&out),
+            },
+            verse,
+            letter: letter.clone(),
+            heading: phrase.heading.clone(),
+            dests: phrase.dests.clone(),
+        });
+        last = span.end;
+    }
+    out.push_str(&slice_chars(&body, last, char_len(&body)));
+
+    let italics = italics
+        .into_iter()
+        .map(|span| shift_span_around_inserts(span, &inserts))
+        .filter(|span| span.end > span.start)
+        .collect();
+    let words = words
+        .into_iter()
+        .map(|mut w| {
+            w.span = shift_span_around_inserts(w.span, &inserts);
+            if let Some(ls) = w.lemma_span.as_mut() {
+                *ls = shift_span_around_inserts(*ls, &inserts);
+            }
+            w
+        })
+        .collect();
+    (out, italics, words, marks)
+}
+
+fn find_heading(body: &str, heading: &str, claimed: &[Span], forbidden: &[Span]) -> Option<Span> {
+    let needle: Vec<char> = heading.chars().collect();
+    if needle.len() < 3 {
+        return None;
+    }
+    let hay: Vec<char> = body.chars().collect();
+    let mut i = 0usize;
+    while i + needle.len() <= hay.len() {
+        if heading_at(&hay, i, &needle) {
+            let span = Span {
+                start: i as i32,
+                end: (i + needle.len()) as i32,
+            };
+            if !overlaps(span, claimed) && !overlaps(span, forbidden) {
+                return Some(span);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn heading_at(hay: &[char], i: usize, needle: &[char]) -> bool {
+    let before_ok = i == 0 || !hay[i - 1].is_alphanumeric();
+    let after_ok = i + needle.len() == hay.len() || !hay[i + needle.len()].is_alphanumeric();
+    if !before_ok || !after_ok {
+        return false;
+    }
+    hay[i..i + needle.len()]
+        .iter()
+        .zip(needle)
+        .all(|(c, n)| c.eq_ignore_ascii_case(n))
+}
+
+fn overlaps(span: Span, others: &[Span]) -> bool {
+    others
+        .iter()
+        .any(|o| span.start < o.end && o.start < span.end)
+}
+
+fn tsk_letter(idx: usize) -> String {
+    let mut n = idx;
+    let mut chars = Vec::new();
+    loop {
+        chars.push((b'a' + (n % 26) as u8) as char);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    chars.into_iter().rev().collect()
+}
+
+fn shift_span_around_inserts(span: Span, inserts: &[(i32, i32)]) -> Span {
+    let start = span.start
+        + inserts
+            .iter()
+            .filter(|(at, _)| *at <= span.start)
+            .map(|(_, n)| *n)
+            .sum::<i32>();
+    let end = span.end
+        + inserts
+            .iter()
+            .filter(|(at, _)| *at < span.end)
+            .map(|(_, n)| *n)
+            .sum::<i32>();
+    Span { start, end }
 }
 
 fn build_body(
@@ -518,28 +635,48 @@ mod tests {
     use super::*;
 
     fn books() -> Vec<Book> {
-        vec![
-            Book {
-                id: 1,
-                abbrev: "Ge".into(),
-                name: "Genesis".into(),
-            },
-            Book {
-                id: 2,
-                abbrev: "Ex".into(),
-                name: "Exodus".into(),
-            },
-            Book {
-                id: 4,
-                abbrev: "Nu".into(),
-                name: "Numbers".into(),
-            },
-            Book {
-                id: 6,
-                abbrev: "Jos".into(),
-                name: "Joshua".into(),
-            },
+        [
+            (1, "Ge", "Genesis"),
+            (2, "Ex", "Exodus"),
+            (4, "Nu", "Numbers"),
+            (5, "De", "Deuteronomy"),
+            (6, "Jos", "Joshua"),
+            (13, "1Ch", "1 Chronicles"),
+            (18, "Job", "Job"),
+            (19, "Ps", "Psalms"),
+            (20, "Pr", "Proverbs"),
+            (41, "Mr", "Mark"),
+            (43, "Joh", "John"),
+            (58, "Heb", "Hebrews"),
+            (62, "1Jo", "1 John"),
         ]
+        .into_iter()
+        .map(|(id, abbrev, name)| Book {
+            id,
+            abbrev: abbrev.into(),
+            name: name.into(),
+        })
+        .collect()
+    }
+
+    fn span_text(text: &str, span: Span) -> String {
+        text.chars()
+            .skip(span.start as usize)
+            .take((span.end - span.start) as usize)
+            .collect()
+    }
+
+    fn before(text: &str, at: i32, n: usize) -> String {
+        let chars: Vec<char> = text.chars().take(at as usize).collect();
+        chars
+            .iter()
+            .rev()
+            .take(n)
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     fn verse(n: u8, text: &str, para: bool) -> Verse {
@@ -633,122 +770,146 @@ mod tests {
     }
 
     #[test]
-    fn tsk_destinations_become_under_verse_links() {
-        let verses = vec![
-            verse(1, "The LORD also spake", true),
-            verse(2, "Speak to the children", false),
-        ];
-        let xrefs = vec![
-            (
-                2,
-                Xref {
-                    book: 2,
-                    chapter: 21,
-                    verse: 13,
-                },
-            ),
-            (
-                2,
-                Xref {
-                    book: 2,
-                    chapter: 21,
-                    verse: 14,
-                },
-            ),
-            (
-                2,
-                Xref {
-                    book: 4,
-                    chapter: 35,
-                    verse: 6,
-                },
-            ),
-            (
-                2,
-                Xref {
-                    book: 4,
-                    chapter: 35,
-                    verse: 7,
-                },
-            ),
-        ];
-        let layout = layout_chapter(&verses, &books(), &xrefs, &[], &[], &[], false);
-        let dests: Vec<Ref> = layout.xrefs.iter().map(|l| l.at).collect();
-        assert!(
-            dests.contains(&Ref {
-                book: 2,
-                chapter: 21,
-                verse: 13
-            }),
-            "{dests:?}"
-        );
-        assert!(
-            dests.contains(&Ref {
-                book: 4,
-                chapter: 35,
-                verse: 6
-            }),
-            "{dests:?}"
-        );
-        let v2_body = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
-        for link in &layout.xrefs {
-            assert!(
-                link.span.start > v2_body,
-                "xref {} should sit under verse 2",
-                link.label
-            );
-        }
-        assert!(layout.text.contains("Ex"));
-        assert!(layout.text.contains("Nu"));
-        assert!(layout.text.contains("21:13"));
-        assert!(layout.tsk_more.is_empty(), "{}", layout.text);
-        assert!(!layout.text.contains("more"), "{}", layout.text);
-    }
-
-    fn xref(book: u8, chapter: u8, verse: u8) -> (u8, Xref) {
-        (
+    fn tsk_genesis_1_1_superscripts_on_phrases() {
+        let verses = vec![verse(
             1,
-            Xref {
-                book,
-                chapter,
-                verse,
-            },
-        )
-    }
+            "In the beginning God created the heaven and the earth.",
+            true,
+        )];
+        let tsk = [(
+            1u8,
+            "\
+God creates heaven and earth.
 
-    #[test]
-    fn tsk_long_lists_collapse_to_more() {
-        let verses = vec![verse(1, "The LORD also spake", true)];
-        let xrefs: Vec<(u8, Xref)> = (21..=28).map(|ch| xref(2, ch, 1)).collect();
-        let layout = layout_chapter(&verses, &books(), &xrefs, &[], &[], &[], false);
-        assert!(layout.text.contains("more"), "{}", layout.text);
-        assert_eq!(layout.tsk_more.len(), 1);
-        assert_eq!(layout.tsk_more[0].verse, 1);
-        assert_eq!(layout.tsk_more[0].hidden, 3);
-        assert_eq!(layout.xrefs.len(), 5);
-        assert!(
-            !layout.xrefs.iter().any(|l| l.at.chapter == 28),
-            "truncated dests must not stay clickable: {:?}",
-            layout.xrefs
+* beginning. Proverbs 8:22–24 Proverbs 16:4 Mark 13:19 John 1:1–3 Hebrews 1:10 1 John 1:1
+* God. Exodus 20:11 Exodus 31:18 1 Chronicles 16:26",
+        )];
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        assert_eq!(layout.tsk.len(), 2, "{}", layout.text);
+        assert_eq!(layout.tsk[0].heading, "beginning");
+        assert_eq!(layout.tsk[1].heading, "God");
+        assert_eq!(span_text(&layout.text, layout.tsk[0].span), "a");
+        assert_eq!(span_text(&layout.text, layout.tsk[1].span), "b");
+        assert_eq!(
+            before(&layout.text, layout.tsk[0].span.start, 9),
+            "beginning"
         );
-        let shown: String = layout
-            .text
-            .chars()
-            .skip(layout.tsk_more[0].span.start as usize)
-            .take((layout.tsk_more[0].span.end - layout.tsk_more[0].span.start) as usize)
-            .collect();
-        assert_eq!(shown, "3 more");
+        assert_eq!(before(&layout.text, layout.tsk[1].span.start, 3), "God");
+        for mark in &layout.tsk {
+            for num in &layout.verse_nums {
+                assert!(
+                    !num.contains(mark.span.start),
+                    "TSK mark must not sit on the verse number: {}",
+                    layout.text
+                );
+            }
+        }
+        assert!(!layout.text.contains("Ex 20:11"), "{}", layout.text);
+        assert!(!layout.text.contains("Exodus 20:11"), "{}", layout.text);
+        assert!(!layout.text.contains("20:11"), "{}", layout.text);
+        assert!(!layout.text.contains(" more"), "{}", layout.text);
+        assert!(layout.xrefs.is_empty());
+        assert!(layout.tsk[1].dests.contains(&Ref {
+            book: 2,
+            chapter: 20,
+            verse: 11
+        }));
     }
 
     #[test]
-    fn tsk_small_overflow_stays_complete() {
-        let verses = vec![verse(1, "The LORD also spake", true)];
-        let xrefs: Vec<(u8, Xref)> = (21..=27).map(|ch| xref(2, ch, 1)).collect();
-        let layout = layout_chapter(&verses, &books(), &xrefs, &[], &[], &[], false);
-        assert!(layout.tsk_more.is_empty(), "{}", layout.text);
-        assert_eq!(layout.xrefs.len(), 7);
-        assert!(layout.text.contains("27:1"), "{}", layout.text);
-        assert!(!layout.text.contains("more"), "{}", layout.text);
+    fn tsk_heb_only_heading_gets_no_superscript() {
+        let verses = vec![verse(
+            6,
+            "And God said, Let there be a firmament in the midst of the waters",
+            true,
+        )];
+        let tsk = [(
+            6u8,
+            "* Let there. Genesis 1:14 Job 26:7\n* firmament. Heb. expansion.",
+        )];
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        assert_eq!(layout.tsk.len(), 1, "{}", layout.text);
+        assert_eq!(layout.tsk[0].heading, "Let there");
+        assert_eq!(
+            before(&layout.text, layout.tsk[0].span.start, 9),
+            "Let there"
+        );
+        assert!(
+            !layout
+                .tsk
+                .iter()
+                .any(|m| m.heading.eq_ignore_ascii_case("firmament")),
+            "{}",
+            layout.text
+        );
+    }
+
+    #[test]
+    fn tsk_marks_fruit_not_grass_when_grass_has_no_refs() {
+        let verses = vec![verse(
+            11,
+            "And God said, Let the earth bring forth grass, the herb yielding seed, and the fruit tree yielding fruit",
+            true,
+        )];
+        let tsk = [(
+            11u8,
+            "* grass. Heb. tender grass. fruit. Genesis 1:29 Genesis 2:9",
+        )];
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        assert_eq!(layout.tsk.len(), 1, "{}", layout.text);
+        assert_eq!(layout.tsk[0].heading, "fruit");
+        assert_eq!(before(&layout.text, layout.tsk[0].span.start, 5), "fruit");
+        assert!(
+            !layout.tsk.iter().any(|m| m.heading == "grass"),
+            "{}",
+            layout.text
+        );
+    }
+
+    #[test]
+    fn tsk_unmatched_heading_does_not_mark_verse_number() {
+        let verses = vec![verse(1, "In the beginning God created", true)];
+        let tsk = [(1u8, "* xyzzy. Genesis 1:1 Exodus 20:11")];
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        assert!(layout.tsk.is_empty(), "{}", layout.text);
+        assert_eq!(span_text(&layout.text, layout.verse_nums[0]), "1");
+        assert!(!layout.text.contains("20:11"), "{}", layout.text);
+        assert!(!layout.text.contains("xyzzy"), "{}", layout.text);
+    }
+
+    #[test]
+    fn tsk_tooltip_line_still_collapses_long_lists() {
+        let xrefs: Vec<Xref> = (21..=28)
+            .map(|ch| Xref {
+                book: 2,
+                chapter: ch,
+                verse: 1,
+            })
+            .collect();
+        let (text, links, hidden) = format_xref_line(&xrefs, &books());
+        assert!(text.contains("Ex"), "{text}");
+        assert_eq!(hidden, 3);
+        assert_eq!(links.len(), 5);
+        assert!(
+            !links.iter().any(|l| l.at.chapter == 28),
+            "truncated dests must not stay clickable: {links:?}"
+        );
+    }
+
+    #[test]
+    fn tsk_tooltip_line_keeps_small_overflow() {
+        let xrefs: Vec<Xref> = (21..=27)
+            .map(|ch| Xref {
+                book: 2,
+                chapter: ch,
+                verse: 1,
+            })
+            .collect();
+        let (text, links, hidden) = format_xref_line(&xrefs, &books());
+        assert_eq!(hidden, 0);
+        assert_eq!(links.len(), 7);
+        assert!(text.contains("27:1"), "{text}");
+        assert!(!text.contains("more"), "{text}");
     }
 
     #[test]
@@ -859,6 +1020,48 @@ mod tests {
             .take((layout.italics[0].end - layout.italics[0].start) as usize)
             .collect();
         assert_eq!(ital, "beginning");
+    }
+
+    #[test]
+    fn tsk_interlinear_keeps_strongs_spans() {
+        let stored = "In the [beginning] God created";
+        let w = word(1, 7, 18, "H7225");
+        assert_eq!(&stored[7..18], "[beginning]");
+        let verses = vec![verse(1, stored, true)];
+        let tsk = [(1u8, "* beginning. Proverbs 8:22\n* God. Exodus 20:11")];
+        let layout = layout_chapter(
+            &verses,
+            &books(),
+            &tsk,
+            &[],
+            &[w],
+            &[("H7225".into(), "re'shiyth".into())],
+            true,
+        );
+        assert!(
+            layout.text.contains("beginninga (re'shiyth)")
+                || layout.text.contains("beginninga(re'shiyth)"),
+            "{}",
+            layout.text
+        );
+        assert_eq!(layout.words.len(), 1);
+        assert_eq!(span_text(&layout.text, layout.words[0].span), "beginning");
+        let lemma = layout.words[0].lemma_span.unwrap();
+        assert!(
+            span_text(&layout.text, lemma).contains("re'shiyth"),
+            "{}",
+            layout.text
+        );
+        assert_eq!(layout.tsk[0].heading, "beginning");
+        assert_eq!(
+            before(&layout.text, layout.tsk[0].span.start, 9),
+            "beginning"
+        );
+        assert!(
+            layout.tsk[0].span.end <= lemma.start || layout.tsk[0].span.start >= lemma.end,
+            "letter must not sit inside the lemma span: {}",
+            layout.text
+        );
     }
 
     #[test]

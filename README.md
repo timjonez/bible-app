@@ -21,7 +21,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Copy copies the current verse plus a `Book chapter:verse (KJV)` citation
 - Interlinear shows each tagged word’s Strong’s lemma beside the English
 - Translator notes sit under the verse, not in the reading line
-- Cross-references under a verse jump on click and preview the destination on hover; long lists collapse to *N more*, which opens TSK
+- TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
 - MHC under a verse (when a Matthew Henry comment starts there) opens Matthew Henry
 - MHC in the header opens Matthew Henry for the current verse in a second window
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump

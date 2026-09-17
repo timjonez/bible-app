@@ -513,6 +513,31 @@ pub fn chapter_resource_verses(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Resource rows for `module` in this chapter, keyed by the row's own verse.
+pub fn chapter_resources(
+    conn: &Connection,
+    module: &str,
+    book: u8,
+    chapter: u8,
+) -> Result<Vec<Resource>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT module, book, chapter, verse, text
+         FROM resources
+         WHERE module = ?1 AND book = ?2 AND chapter = ?3
+         ORDER BY verse",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![module, book, chapter], |row| {
+        Ok(Resource {
+            module: row.get(0)?,
+            book: row.get(1)?,
+            chapter: row.get(2)?,
+            verse: row.get(3)?,
+            text: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn book_by_id(conn: &Connection, id: u8) -> Result<Book, DbError> {
     let row = conn
         .query_row(
@@ -637,6 +662,36 @@ mod tests {
         assert!(chapter_resource_verses(&conn, "MHC", 1, 2)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn chapter_resources_uses_each_rows_verse() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license) VALUES
+                ('TSK', 'commentary', 'Treasury of Scripture Knowledge', 'public-domain'),
+                ('MHC', 'commentary', 'Matthew Henry', 'public-domain');
+            INSERT INTO resources (module, book, chapter, verse, text) VALUES
+                ('TSK', 1, 1, 1, '* beginning. Proverbs 8:22'),
+                ('TSK', 1, 1, 2, '* without. Job 26:7'),
+                ('MHC', 1, 1, 1, 'comment covering later verses');
+            "#,
+        )
+        .unwrap();
+        let tsk = chapter_resources(&conn, "TSK", 1, 1).unwrap();
+        assert_eq!(tsk.len(), 2);
+        assert_eq!(tsk[0].verse, 1);
+        assert_eq!(tsk[0].text, "* beginning. Proverbs 8:22");
+        assert_eq!(tsk[1].verse, 2);
+        assert_eq!(tsk[1].text, "* without. Job 26:7");
+        assert!(chapter_resources(&conn, "TSK", 1, 2).unwrap().is_empty());
+        let covering = resource_covering(&conn, "MHC", 1, 1, 2).unwrap().unwrap();
+        assert_eq!(covering.verse, 1);
+        let mhc = chapter_resources(&conn, "MHC", 1, 1).unwrap();
+        assert_eq!(mhc.len(), 1);
+        assert_eq!(mhc[0].verse, 1);
     }
 
     #[test]
