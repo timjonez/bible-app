@@ -23,12 +23,8 @@ pub fn present(popover: &gtk::Popover, view: &gtk::TextView, start: i32, defs: &
         if i > 0 {
             body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
-        let title = gtk::Label::new(Some(&format!("{}{}", def.lang, def.num)));
-        title.add_css_class("heading");
-        title.set_xalign(0.0);
-        title.set_selectable(true);
-        body.append(&title);
 
+        // Lead with lemma + pronunciation. A concise English gloss belongs under the lemma later.
         if !def.lemma.is_empty() {
             let sub = if def.pronunciation.is_empty() {
                 def.lemma.clone()
@@ -36,12 +32,22 @@ pub fn present(popover: &gtk::Popover, view: &gtk::TextView, start: i32, defs: &
                 format!("{}  ({})", def.lemma, def.pronunciation)
             };
             let lemma = gtk::Label::new(Some(&sub));
-            lemma.add_css_class("dim-label");
+            lemma.add_css_class("heading");
             lemma.set_xalign(0.0);
             lemma.set_wrap(true);
             lemma.set_selectable(true);
             body.append(&lemma);
         }
+
+        let title = gtk::Label::new(Some(&format!("{}{}", def.lang, def.num)));
+        if def.lemma.is_empty() {
+            title.add_css_class("heading");
+        } else {
+            title.add_css_class("dim-label");
+        }
+        title.set_xalign(0.0);
+        title.set_selectable(true);
+        body.append(&title);
 
         if !def.definition.is_empty() {
             let text = gtk::Label::new(Some(&def.definition));

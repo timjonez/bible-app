@@ -404,6 +404,11 @@ impl SimpleComponent for App {
         lemma.set_foreground(Some("#77767b"));
         lemma.set_scale(0.85);
         buffer.tag_table().add(&lemma);
+        let current_verse = gtk::TextTag::new(Some("current-verse"));
+        current_verse.set_background(Some("#eceae6"));
+        current_verse.set_background_full_height(true);
+        buffer.tag_table().add(&current_verse);
+        current_verse.set_priority(0);
         apparatus.set_priority(0);
         note.set_priority(0);
         verse_num.set_priority(1);
@@ -760,8 +765,16 @@ impl SimpleComponent for App {
                     self.note_at(offset).map(|n| (n.span.start, n.text.clone()))
                 {
                     strongs::present_text(&self.strongs_popover, &self.chapter_view, start, &text);
-                } else {
+                } else if layout::word_at_offset(&self.layout.words, offset).is_some() {
+                    if let Some(verse) = layout::verse_at_offset(&self.layout.verse_start, offset) {
+                        self.select_verse(verse);
+                    }
                     self.open_strongs(offset);
+                } else if let Some(verse) =
+                    layout::verse_at_offset(&self.layout.verse_start, offset)
+                {
+                    self.strongs_popover.popdown();
+                    self.select_verse(verse);
                 }
             }
             Msg::ToggleDict => {
@@ -835,15 +848,8 @@ impl SimpleComponent for App {
                 self.apply_font();
                 self.save_state();
             }
-            Msg::SetInterlinear(on) => {
-                if self.interlinear == on {
-                    return;
-                }
-                self.interlinear = on;
-                self.save_state();
-                if !self.search_open {
-                    self.refresh_chapter(false);
-                }
+            Msg::SetInterlinear(_on) => {
+                // Header toggle stays; it must not paint lemmas into the chapter.
             }
             Msg::SetParagraphs(on) => {
                 if self.paragraphs == on {
@@ -907,7 +913,7 @@ impl App {
         config::save_state(&config::State::from_ref(
             self.at,
             self.font_size,
-            self.interlinear,
+            false,
             self.paragraphs,
         ));
     }
@@ -1003,20 +1009,15 @@ impl App {
                 .unwrap_or_default();
         let words =
             bible_app_db::chapter_words(conn, self.at.book, self.at.chapter).unwrap_or_default();
-        let lemmas = if self.interlinear {
-            chapter_lemmas(conn, &words)
-        } else {
-            Vec::new()
-        };
         self.layout = layout::layout_chapter(
             &verses,
             &self.books,
             &tsk_notes,
             &mhc_starts,
             &words,
-            &lemmas,
+            &[],
             layout::LayoutOpts {
-                interlinear: self.interlinear,
+                interlinear: false,
                 paragraphs: self.paragraphs,
             },
         );
@@ -1028,6 +1029,7 @@ impl App {
         if highlight {
             self.highlight_verse(self.at.verse);
         } else {
+            self.apply_current_verse_tag(self.at.verse);
             self.scroll_to_top();
         }
         self.refresh_mhc();
@@ -1141,11 +1143,18 @@ impl App {
         }
     }
 
+    fn select_verse(&mut self, verse: u8) {
+        if self.at.verse != verse {
+            self.at.verse = verse;
+            self.save_state();
+            self.refresh_mhc();
+            self.refresh_tsk();
+        }
+        self.apply_current_verse_tag(verse);
+    }
+
     fn open_strongs(&self, offset: i32) {
-        let Some(word) = self.layout.words.iter().find(|w| {
-            w.span.contains(offset) || w.lemma_span.map(|s| s.contains(offset)).unwrap_or(false)
-        }) else {
-            self.strongs_popover.popdown();
+        let Some(word) = layout::word_at_offset(&self.layout.words, offset) else {
             return;
         };
         let Some(conn) = &self.conn else { return };
@@ -1167,26 +1176,31 @@ impl App {
     }
 
     fn highlight_verse(&self, verse: u8) {
-        let Some((_, start)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
+        self.apply_current_verse_tag(verse);
+        let Some((_, offset)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
             return;
         };
-        let end = self
-            .layout
-            .verse_end
-            .iter()
-            .find(|(v, _)| *v == verse)
-            .map(|(_, e)| *e)
-            .unwrap_or(*start);
-        let match_start = self.buffer.iter_at_offset(*start);
-        let match_end = self.buffer.iter_at_offset(end);
-        self.buffer.select_range(&match_start, &match_end);
-        let offset = *start;
+        let offset = *offset;
         let view = self.chapter_view.clone();
         let buffer = self.buffer.clone();
         glib::idle_add_local_once(move || {
             let mut iter = buffer.iter_at_offset(offset);
             view.scroll_to_iter(&mut iter, 0.15, true, 0.0, 0.2);
         });
+    }
+
+    fn apply_current_verse_tag(&self, verse: u8) {
+        let Some(tag) = self.buffer.tag_table().lookup("current-verse") else {
+            return;
+        };
+        let start = self.buffer.start_iter();
+        let end = self.buffer.end_iter();
+        self.buffer.remove_tag(&tag, &start, &end);
+        let text_end = end.offset();
+        let Some(span) = layout::verse_range(&self.layout.verse_start, verse, text_end) else {
+            return;
+        };
+        self.apply_tag("current-verse", span);
     }
 
     fn scroll_to_top(&self) {
@@ -1223,7 +1237,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
     }
     let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
-    let interlinear = state.interlinear;
+    let interlinear = false;
     let paragraphs = state.paragraphs;
     let mut at = Ref::from(state);
     if bible_app_db::chapter(&conn, at.book, at.chapter)
@@ -1237,19 +1251,4 @@ fn load_library() -> Result<LoadedLibrary, String> {
         };
     }
     Ok((conn, books, at, font_size, interlinear, paragraphs))
-}
-
-fn chapter_lemmas(conn: &Connection, words: &[bible_app_db::VerseWord]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for w in words {
-        for code in w.strongs.split_whitespace() {
-            if out.iter().any(|(c, _)| c == code) {
-                continue;
-            }
-            if let Ok(Some(def)) = bible_app_db::lookup_strongs(conn, code) {
-                out.push((code.to_string(), def.lemma));
-            }
-        }
-    }
-    out
 }
