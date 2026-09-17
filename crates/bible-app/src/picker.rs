@@ -50,10 +50,19 @@ pub fn install_css() {
               font-weight: 600;
             }
             dropdown.passage-picker popover contents,
-            dropdown.chapter-picker popover contents {
+            dropdown.chapter-picker popover contents,
+            popover.menu contents,
+            popover.goto-popover contents {
               background-color: var(--popover-bg-color);
               color: var(--popover-fg-color);
+            }
+            dropdown.passage-picker popover contents,
+            dropdown.chapter-picker popover contents {
               padding: 6px;
+              border-radius: 9px;
+            }
+            popover.goto-popover contents {
+              padding: 8px;
               border-radius: 9px;
             }
             "#,

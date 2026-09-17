@@ -13,22 +13,20 @@ cargo run -p bible-app
 
 Override the database path with `BIBLE_APP_DB` if you already have an unpacked copy.
 
-- Paragraphs (default) flows consecutive verses as prose; toggle off for one verse per block. Alt+Left / Alt+Right still change chapter.
+- Paragraphs (default) flows consecutive verses as prose; turn it off from the menu for one verse per block. Alt+Left / Alt+Right still change chapter.
 - Header book and chapter dropdowns jump to a passage; type in the popup to search
 - Alt+Left / Alt+Right: previous / next chapter
-- Back / Forward: jump through navigation history
+- History back / forward (header icons, Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward)
 - Ctrl+L then type `John 3:16` and Enter
 - Ctrl+F searches the KJV without leaving the chapter; Enter on a result jumps to that verse
-- Ctrl+- / Ctrl++: smaller / larger text
-- Click a verse (number or body) to select it; copy, MHC, and TSK follow that verse
-- Copy copies the current verse plus a `Book chapter:verse (KJV)` citation
+- Ctrl+- / Ctrl++: smaller / larger text (also in the menu)
+- Click a verse (number or body) to select it; MHC and TSK follow that verse
 - Click a tagged KJV word for its Strong’s lemma, pronunciation, number, and definition. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
 - A verse number is a link when a Matthew Henry comment starts there; click it to open Matthew Henry
-- MHC in the header opens Matthew Henry for the current verse in a second window
-- TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
-- Dict opens Easton and the other dictionaries and topics; type a headword and click a result
+- Menu → Commentary opens Matthew Henry or the Treasury of Scripture Knowledge for the current verse in a second window
+- Menu → Dictionary opens Easton and the other dictionaries and topics; type a headword and click a result
 - Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
 
 The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, the public-domain dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set).
@@ -42,4 +40,4 @@ See `data/README.md`.
 - [x] Phase 2: search
 - [x] Phase 3: Strong’s, TSK cross-references, Matthew Henry
 - [x] Phase 4: public-domain dictionaries and topics
-- [x] Chapter reader: inline TSK/MHC, KJV italics, history, copy, font size, verse highlight
+- [x] Chapter reader: inline TSK/MHC, KJV italics, history, font size, verse highlight

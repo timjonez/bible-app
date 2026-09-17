@@ -864,44 +864,6 @@ pub fn word_at_offset(words: &[WordSpan], offset: i32) -> Option<&WordSpan> {
         .find(|w| w.span.contains(offset) || w.lemma_span.is_some_and(|s| s.contains(offset)))
 }
 
-/// Current-verse (or range) copy with a `Book chapter:verse` citation and `KJV`.
-pub fn copy_verses(books: &[Book], verses: &[Verse]) -> String {
-    if verses.is_empty() {
-        return String::new();
-    }
-    let body: Vec<String> = verses
-        .iter()
-        .map(|v| {
-            let (stored, _) = split_notes(&v.text);
-            let (text, _) = strip_supplied(&stored);
-            if verses.len() == 1 {
-                text
-            } else {
-                format!("{} {text}", v.verse)
-            }
-        })
-        .collect();
-    let first = &verses[0];
-    let last = verses.last().unwrap();
-    let name = books
-        .iter()
-        .find(|b| b.id == first.book)
-        .map(|b| b.name.as_str())
-        .unwrap_or("Book");
-    let cite =
-        if first.book == last.book && first.chapter == last.chapter && first.verse == last.verse {
-            format!("{name} {}:{}", first.chapter, first.verse)
-        } else if first.book == last.book && first.chapter == last.chapter {
-            format!("{name} {}:{}–{}", first.chapter, first.verse, last.verse)
-        } else {
-            format!(
-                "{name} {}:{}–{}:{}",
-                first.chapter, first.verse, last.chapter, last.verse
-            )
-        };
-    format!("{}\n\n{cite} (KJV)", body.join("\n\n"))
-}
-
 pub fn smaller_font(pt: i32) -> i32 {
     (pt - 1).clamp(MIN_FONT, MAX_FONT)
 }
@@ -1668,24 +1630,6 @@ God creates heaven and earth.
             Some(1),
             "word click still belongs to its verse"
         );
-    }
-
-    #[test]
-    fn copy_verses_includes_text_citation_and_kjv() {
-        let verses = vec![Verse {
-            book: 1,
-            chapter: 1,
-            verse: 1,
-            text: "In the [beginning] God created. {beginning: Heb. head}".into(),
-            para_break: true,
-        }];
-        let out = copy_verses(&books(), &verses);
-        assert!(out.contains("In the beginning God created"), "{out}");
-        assert!(!out.contains('['), "{out}");
-        assert!(!out.contains('{'), "{out}");
-        assert!(!out.contains("Heb. head"), "{out}");
-        assert!(out.contains("Genesis 1:1"), "{out}");
-        assert!(out.contains("KJV"), "{out}");
     }
 
     #[test]
