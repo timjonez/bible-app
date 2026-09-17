@@ -21,15 +21,16 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Ctrl+F searches the KJV without leaving the chapter; Enter on a result jumps to that verse
 - Ctrl+- / Ctrl++: smaller / larger text (also in the menu)
 - Click a verse (number or body) to select it; MHC and TSK follow that verse
-- Click a tagged KJV word for its Strong’s lemma, pronunciation, number, and definition. Lemmas are not inserted beside words in the chapter.
+- Click a tagged KJV word for Strong’s plus a tab per matching dictionary (Easton, Smith, Webster, …). Each tab can open that word in the library window. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
 - A verse number is a link when a Matthew Henry comment starts there; click it to open Matthew Henry
 - Menu → Commentary opens Matthew Henry or the Treasury of Scripture Knowledge for the current verse in a second window
-- Menu → Dictionary opens Easton and the other dictionaries and topics; type a headword and click a result
+- Menu → Dictionary → Webster’s 1828, Easton, or another dictionary; type a headword in the search bar
+- Menu → Topics → Nave, Torrey, and the other topical works
 - Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
 
-The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, the public-domain dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set).
+The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, **Webster’s 1828**, the public-domain Bible dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set).
 
 See `data/README.md`.
 

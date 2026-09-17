@@ -3,16 +3,21 @@ use bible_app_db::{self, DictHit, DictModule};
 use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
+use std::cell::Cell;
+use std::rc::Rc;
 
 pub struct DictWidgets {
     pub window: adw::ApplicationWindow,
     pub title: adw::WindowTitle,
+    pub search: gtk::SearchEntry,
+    pub popover: gtk::Popover,
     pub list: gtk::ListBox,
     pub buffer: gtk::TextBuffer,
-    pub dropdown: gtk::DropDown,
     pub modules: Vec<DictModule>,
+    pub module_id: Option<String>,
     pub hits: Vec<DictHit>,
     pub query: String,
+    syncing: Rc<Cell<bool>>,
 }
 
 pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
@@ -25,44 +30,73 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
-    let dropdown = gtk::DropDown::from_strings(&[]);
-    dropdown.set_valign(gtk::Align::Center);
-    dropdown.set_tooltip_text(Some("Choose a dictionary or topical work"));
-    let send_mod = sender.clone();
-    dropdown.connect_selected_notify(move |dd| {
-        let _ = dd;
-        send_mod.emit(super::app::Msg::DictModule);
-    });
-    header.pack_end(&dropdown);
-
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Headword or topic"));
-    search.set_tooltip_text(Some("Search headwords and topics"));
+    search.set_placeholder_text(Some("Search a headword"));
     search.set_hexpand(true);
-    let send_q = sender.clone();
-    search.connect_search_changed(move |entry| {
-        send_q.emit(super::app::Msg::DictSearch(entry.text().to_string()));
-    });
+    search.update_property(&[gtk::accessible::Property::Label("Search a headword")]);
 
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
     list.add_css_class("boxed-list");
     list.set_accessible_role(gtk::AccessibleRole::List);
+    let list_scroll = gtk::ScrolledWindow::new();
+    list_scroll.set_min_content_height(80);
+    list_scroll.set_max_content_height(280);
+    list_scroll.set_propagate_natural_height(true);
+    list_scroll.set_child(Some(&list));
+
+    let popover = gtk::Popover::new();
+    popover.set_autohide(true);
+    popover.set_has_arrow(false);
+    popover.set_position(gtk::PositionType::Bottom);
+    popover.set_offset(0, 4);
+    popover.add_css_class("dict-search-popover");
+    popover.set_child(Some(&list_scroll));
+    popover.set_parent(&search);
+
+    let syncing = Rc::new(Cell::new(false));
+    let send_q = sender.clone();
+    let sync_search = syncing.clone();
+    search.connect_search_changed(move |entry| {
+        if sync_search.get() {
+            return;
+        }
+        send_q.emit(super::app::Msg::DictSearch(entry.text().to_string()));
+    });
+    let send_activate = sender.clone();
+    search.connect_activate(move |_| {
+        send_activate.emit(super::app::Msg::DictOpen(0));
+    });
     let send_row = sender.clone();
     list.connect_row_activated(move |_, row| {
         send_row.emit(super::app::Msg::DictOpen(row.index()));
     });
-    let send_sel = sender.clone();
-    list.connect_row_selected(move |_, row| {
-        if let Some(row) = row {
-            send_sel.emit(super::app::Msg::DictOpen(row.index()));
+
+    let keys = gtk::EventControllerKey::new();
+    let list_keys = list.clone();
+    keys.connect_key_pressed(move |_, keyval, _, _| {
+        if keyval == gtk::gdk::Key::Down {
+            if let Some(row) = list_keys.selected_row().or_else(|| list_keys.row_at_index(0))
+            {
+                let next = list_keys.row_at_index(row.index() + 1).unwrap_or(row);
+                list_keys.select_row(Some(&next));
+                next.grab_focus();
+            }
+            return glib::Propagation::Stop;
         }
+        if keyval == gtk::gdk::Key::Up {
+            if let Some(row) = list_keys.selected_row() {
+                let prev = list_keys
+                    .row_at_index((row.index() - 1).max(0))
+                    .unwrap_or(row);
+                list_keys.select_row(Some(&prev));
+                prev.grab_focus();
+            }
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
     });
-    let list_scroll = gtk::ScrolledWindow::new();
-    list_scroll.set_min_content_height(160);
-    list_scroll.set_max_content_height(260);
-    list_scroll.set_propagate_natural_height(true);
-    list_scroll.set_child(Some(&list));
+    search.add_controller(keys);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let view = gtk::TextView::new();
@@ -86,7 +120,6 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     body.set_margin_top(8);
     body.set_margin_bottom(8);
     body.append(&search);
-    body.append(&list_scroll);
     body.append(&text_scroll);
 
     let toolbar = adw::ToolbarView::new();
@@ -94,6 +127,12 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     toolbar.set_content(Some(&body));
     window.set_content(Some(&toolbar));
 
+    install_css();
+
+    let popover_destroy = popover.clone();
+    window.connect_destroy(move |_| {
+        popover_destroy.unparent();
+    });
     window.connect_close_request(move |_| {
         sender.emit(super::app::Msg::DictClosed);
         glib::Propagation::Proceed
@@ -103,55 +142,114 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     DictWidgets {
         window,
         title,
+        search,
+        popover,
         list,
         buffer,
-        dropdown,
         modules: Vec::new(),
+        module_id: None,
         hits: Vec::new(),
         query: String::new(),
+        syncing,
     }
 }
 
 pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
-    widgets.modules = bible_app_db::dictionary_modules(conn).unwrap_or_default();
-    let titles: Vec<String> = widgets.modules.iter().map(|m| m.title.clone()).collect();
-    let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
-    let model = gtk::StringList::new(&refs);
-    widgets.dropdown.set_model(Some(&model));
-    if !widgets.modules.is_empty() {
-        widgets.dropdown.set_selected(0);
-        widgets.title.set_subtitle(&widgets.modules[0].title);
+    let mut modules = bible_app_db::dictionary_modules(conn).unwrap_or_default();
+    if !modules.iter().any(|m| m.id == bible_app_db::STRONGS_MODULE) {
+        modules.insert(
+            0,
+            bible_app_db::DictModule {
+                id: bible_app_db::STRONGS_MODULE.into(),
+                title: "Strong's".into(),
+                kind: "dictionary".into(),
+            },
+        );
     }
+    widgets.modules = modules;
+}
+
+pub fn select_module(widgets: &mut DictWidgets, id: &str) {
+    widgets.module_id = Some(id.to_string());
+    if let Some(m) = widgets.modules.iter().find(|m| m.id == id) {
+        widgets.title.set_title(&m.title);
+        widgets.title.set_subtitle("");
+        widgets.window.set_title(Some(&m.title));
+    }
+    widgets.syncing.set(true);
+    widgets.search.set_text("");
+    widgets.syncing.set(false);
+    widgets.query.clear();
+    widgets.hits.clear();
+    refill_list(&widgets.list, &[]);
+    widgets.popover.popdown();
+    widgets
+        .buffer
+        .set_text("Search a headword to open its entry.");
 }
 
 pub fn current_module(widgets: &DictWidgets) -> Option<&str> {
-    let i = widgets.dropdown.selected() as usize;
-    widgets.modules.get(i).map(|m| m.id.as_str())
+    widgets.module_id.as_deref()
+}
+
+pub fn open_headword(widgets: &mut DictWidgets, conn: &Connection, module: &str, headword: &str) {
+    select_module(widgets, module);
+    widgets.query = headword.to_string();
+    widgets.syncing.set(true);
+    widgets.search.set_text(headword);
+    widgets.syncing.set(false);
+    search_hits(widgets, conn, false);
+    let idx = widgets
+        .hits
+        .iter()
+        .position(|h| h.headword.eq_ignore_ascii_case(headword))
+        .unwrap_or(0);
+    if !widgets.hits.is_empty() {
+        open_hit(widgets, conn, idx as i32);
+    }
 }
 
 pub fn search(widgets: &mut DictWidgets, conn: &Connection) {
+    search_hits(widgets, conn, true);
+}
+
+fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool) {
     let Some(module) = current_module(widgets).map(str::to_string) else {
         widgets.hits.clear();
         refill_list(&widgets.list, &[]);
+        widgets.popover.popdown();
         widgets
             .buffer
             .set_text("No dictionaries or topics in this database.");
         return;
     };
-    if let Some(m) = widgets.modules.iter().find(|m| m.id == module) {
-        widgets.title.set_subtitle(&m.title);
+    let q = widgets.query.trim();
+    if q.is_empty() {
+        widgets.hits.clear();
+        refill_list(&widgets.list, &[]);
+        widgets.popover.popdown();
+        return;
     }
-    widgets.hits =
-        bible_app_db::search_entries(conn, &module, &widgets.query, bible_app_db::ENTRY_LIMIT)
-            .unwrap_or_default();
+    widgets.hits = if module == bible_app_db::STRONGS_MODULE {
+        bible_app_db::search_strongs(conn, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default()
+    } else {
+        bible_app_db::search_entries(conn, &module, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default()
+    };
     refill_list(&widgets.list, &widgets.hits);
     if widgets.hits.is_empty() {
-        widgets.buffer.set_text(&format!(
-            "No headword starting with {:?} in {}.",
-            widgets.query.trim(),
-            module
-        ));
+        widgets.popover.popdown();
+        return;
     }
+    widgets.list.select_row(widgets.list.row_at_index(0).as_ref());
+    if !show_popover {
+        widgets.popover.popdown();
+        return;
+    }
+    let width = widgets.search.width();
+    if width > 0 {
+        widgets.popover.set_size_request(width, -1);
+    }
+    widgets.popover.popup();
 }
 
 pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
@@ -164,9 +262,18 @@ pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
     let Some(module) = current_module(widgets) else {
         return;
     };
-    match bible_app_db::get_entry(conn, module, hit.i) {
+    let loaded = if module == bible_app_db::STRONGS_MODULE {
+        bible_app_db::get_strongs_entry(conn, hit.i)
+    } else {
+        bible_app_db::get_entry(conn, module, hit.i)
+    };
+    match loaded {
         Ok(Some((head, text))) => {
+            widgets.syncing.set(true);
+            widgets.search.set_text(&head);
+            widgets.syncing.set(false);
             widgets.buffer.set_text(&format!("{head}\n\n{text}"));
+            widgets.popover.popdown();
         }
         Ok(None) => widgets.buffer.set_text("Entry missing."),
         Err(e) => widgets.buffer.set_text(&e.to_string()),
@@ -189,4 +296,29 @@ fn refill_list(list: &gtk::ListBox, hits: &[DictHit]) {
         row.set_activatable(true);
         list.append(&row);
     }
+}
+
+fn install_css() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(
+            r#"
+            popover.dict-search-popover contents {
+              background-color: var(--popover-bg-color);
+              color: var(--popover-fg-color);
+              padding: 4px;
+              border-radius: 9px;
+            }
+            "#,
+        );
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
 }

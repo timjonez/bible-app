@@ -9,7 +9,7 @@ use crate::search;
 use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
-use bible_app_db::{self, Book, SearchHit};
+use bible_app_db::{self, Book, DictModule, SearchHit};
 use gtk::gio;
 use gtk::glib;
 use relm4::actions::{RelmAction, RelmActionGroup};
@@ -39,6 +39,7 @@ pub struct App {
     mhc: Option<mhc::MhcWidgets>,
     tsk: Option<tsk::TskWidgets>,
     dict: Option<dict::DictWidgets>,
+    dict_modules: Vec<DictModule>,
     strongs_popover: gtk::Popover,
     strongs_at: i32,
     tsk_popover: gtk::Popover,
@@ -52,7 +53,6 @@ pub struct App {
     xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
     mhc_action: gio::SimpleAction,
     tsk_action: gio::SimpleAction,
-    dict_action: gio::SimpleAction,
 }
 
 #[derive(Debug)]
@@ -74,10 +74,10 @@ pub enum Msg {
     OpenTskDest(Ref),
     OpenStrongsCode(String),
     ClickWord(i32),
-    ToggleDict,
+    OpenDict(String),
+    OpenDictWord { module: String, headword: String },
     DictClosed,
     DictSearch(String),
-    DictModule,
     DictOpen(i32),
     Back,
     Forward,
@@ -183,7 +183,7 @@ impl SimpleComponent for App {
                         set_primary: true,
                         set_valign: gtk::Align::Center,
                         add_css_class: "primary-menu",
-                        set_menu_model: Some(&build_app_menu()),
+                        set_menu_model: Some(&build_app_menu(&model.dict_modules)),
                     },
                     pack_end = &gtk::ToggleButton {
                         set_icon_name: "edit-find-symbolic",
@@ -464,20 +464,28 @@ impl SimpleComponent for App {
                 sender.input(Msg::ToggleTsk);
             })
         };
-        let dict_action: RelmAction<DictAction> = {
-            let sender = sender.clone();
-            RelmAction::new_stateful(&false, move |_, _state: &mut bool| {
-                sender.input(Msg::ToggleDict);
-            })
-        };
         let mhc_gio = mhc_action.gio_action().clone();
         let tsk_gio = tsk_action.gio_action().clone();
-        let dict_gio = dict_action.gio_action().clone();
         if error.is_some() {
             mhc_gio.set_enabled(false);
             tsk_gio.set_enabled(false);
-            dict_gio.set_enabled(false);
         }
+
+        let dict_modules = conn
+            .as_ref()
+            .and_then(|c| bible_app_db::dictionary_modules(c).ok())
+            .unwrap_or_default();
+        let dict_action = gio::SimpleAction::new(
+            "open-dict",
+            Some(glib::VariantTy::STRING),
+        );
+        dict_action.set_enabled(error.is_none() && !dict_modules.is_empty());
+        let dict_sender = sender.clone();
+        dict_action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                dict_sender.input(Msg::OpenDict(id));
+            }
+        });
 
         let mut group = RelmActionGroup::<WindowActionGroup>::new();
         group.add_action(paragraphs_action);
@@ -485,7 +493,6 @@ impl SimpleComponent for App {
         group.add_action(font_smaller);
         group.add_action(mhc_action);
         group.add_action(tsk_action);
-        group.add_action(dict_action);
 
         let mut model = App {
             history: History::new(at),
@@ -507,6 +514,7 @@ impl SimpleComponent for App {
             mhc: None,
             tsk: None,
             dict: None,
+            dict_modules,
             strongs_popover,
             strongs_at: 0,
             tsk_popover,
@@ -519,7 +527,6 @@ impl SimpleComponent for App {
             xref_tips: Rc::new(RefCell::new(Vec::new())),
             mhc_action: mhc_gio,
             tsk_action: tsk_gio,
-            dict_action: dict_gio,
         };
         model.apply_font();
         picker::install_css();
@@ -528,7 +535,9 @@ impl SimpleComponent for App {
         model.refresh_chapter(false);
 
         let widgets = view_output!();
-        root.insert_action_group("win", Some(&group.into_action_group()));
+        let group = group.into_action_group();
+        group.add_action(&dict_action);
+        root.insert_action_group("win", Some(&group));
         model.goto_popover.set_parent(&widgets.title_box);
         let goto_on_destroy = model.goto_popover.clone();
         root.connect_destroy(move |_| {
@@ -898,17 +907,12 @@ impl SimpleComponent for App {
                     self.select_verse(verse);
                 }
             }
-            Msg::ToggleDict => {
-                if let Some(widgets) = self.dict.take() {
-                    widgets.window.close();
-                } else if self.error.is_none() {
-                    let mut widgets = dict::open(sender.input_sender().clone());
-                    if let Some(conn) = &self.conn {
-                        dict::load_modules(&mut widgets, conn);
-                        dict::search(&mut widgets, conn);
-                    }
-                    self.dict = Some(widgets);
-                }
+            Msg::OpenDict(id) => {
+                self.open_library(&id, None, &sender);
+            }
+            Msg::OpenDictWord { module, headword } => {
+                self.strongs_popover.popdown();
+                self.open_library(&module, Some(&headword), &sender);
             }
             Msg::DictClosed => {
                 self.dict = None;
@@ -918,14 +922,6 @@ impl SimpleComponent for App {
                     return;
                 };
                 widgets.query = query;
-                if let Some(conn) = &self.conn {
-                    dict::search(widgets, conn);
-                }
-            }
-            Msg::DictModule => {
-                let Some(widgets) = &mut self.dict else {
-                    return;
-                };
                 if let Some(conn) = &self.conn {
                     dict::search(widgets, conn);
                 }
@@ -1038,8 +1034,6 @@ impl App {
             .set_state(&self.mhc.is_some().to_variant());
         self.tsk_action
             .set_state(&self.tsk.is_some().to_variant());
-        self.dict_action
-            .set_state(&self.dict.is_some().to_variant());
     }
 
     fn apply_font(&self) {
@@ -1233,7 +1227,11 @@ impl App {
             tips.push((mark.span.start, mark.span.end, mark.text.clone()));
         }
         for word in &self.layout.words {
-            tips.push((word.span.start, word.span.end, "Click for Strong's".into()));
+            tips.push((
+                word.span.start,
+                word.span.end,
+                "Click for Strong's and dictionaries".into(),
+            ));
         }
         *self.xref_tips.borrow_mut() = tips;
     }
@@ -1273,7 +1271,12 @@ impl App {
             .iter()
             .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
             .collect();
-        if defs.is_empty() {
+        let mut surface = layout::token_at(&self.layout.text, offset);
+        if surface.is_empty() {
+            surface = layout::word_surface(&self.layout.text, word.span);
+        }
+        let dict = bible_app_db::lookup_clicked_word(conn, &surface).unwrap_or_default();
+        if defs.is_empty() && dict.is_empty() {
             return;
         }
         self.strongs_at = word.span.start;
@@ -1283,6 +1286,7 @@ impl App {
             &self.chapter_view,
             self.strongs_at,
             &defs,
+            &dict,
             sender.input_sender().clone(),
         );
     }
@@ -1298,8 +1302,35 @@ impl App {
             &self.chapter_view,
             self.strongs_at,
             &[def],
+            &bible_app_db::ClickedDict::default(),
             sender.input_sender().clone(),
         );
+    }
+
+    fn open_library(
+        &mut self,
+        module: &str,
+        headword: Option<&str>,
+        sender: &ComponentSender<Self>,
+    ) {
+        if self.error.is_some() {
+            return;
+        }
+        if self.dict.is_none() {
+            let mut widgets = dict::open(sender.input_sender().clone());
+            if let Some(conn) = &self.conn {
+                dict::load_modules(&mut widgets, conn);
+            }
+            self.dict = Some(widgets);
+        }
+        if let Some(widgets) = &mut self.dict {
+            if let (Some(conn), Some(head)) = (&self.conn, headword) {
+                dict::open_headword(widgets, conn, module, head);
+            } else {
+                dict::select_module(widgets, module);
+            }
+            widgets.window.present();
+        }
     }
 
     fn highlight_verse(&self, verse: u8) {
@@ -1383,7 +1414,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
     Ok((conn, books, at, font_size, paragraphs))
 }
 
-fn build_app_menu() -> gio::Menu {
+fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some("Paragraphs"), Some("win.paragraphs"));
 
@@ -1398,9 +1429,27 @@ fn build_app_menu() -> gio::Menu {
         Some("Treasury of Scripture Knowledge"),
         Some("win.tsk"),
     );
+    let dictionaries = gio::Menu::new();
+    let topics = gio::Menu::new();
+    for module in modules {
+        let action = format!(
+            "win.open-dict('{}')",
+            module.id.replace('\\', "\\\\").replace('\'', "\\'")
+        );
+        if module.kind == "dictionary" {
+            dictionaries.append(Some(module.title.as_str()), Some(action.as_str()));
+        } else {
+            topics.append(Some(module.title.as_str()), Some(action.as_str()));
+        }
+    }
     let study = gio::Menu::new();
     study.append_submenu(Some("Commentary"), &commentary);
-    study.append(Some("Dictionary"), Some("win.dict"));
+    if dictionaries.n_items() > 0 {
+        study.append_submenu(Some("Dictionary"), &dictionaries);
+    }
+    if topics.n_items() > 0 {
+        study.append_submenu(Some("Topics"), &topics);
+    }
     menu.append_section(None, &study);
     menu
 }
@@ -1411,4 +1460,3 @@ relm4::new_stateless_action!(FontLargerAction, WindowActionGroup, "font-larger")
 relm4::new_stateless_action!(FontSmallerAction, WindowActionGroup, "font-smaller");
 relm4::new_stateful_action!(MhcAction, WindowActionGroup, "mhc", (), bool);
 relm4::new_stateful_action!(TskAction, WindowActionGroup, "tsk", (), bool);
-relm4::new_stateful_action!(DictAction, WindowActionGroup, "dict", (), bool);

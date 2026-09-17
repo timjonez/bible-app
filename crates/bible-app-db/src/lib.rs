@@ -339,6 +339,71 @@ pub fn parse_strongs_code(code: &str) -> Option<(i32, String)> {
     Some((num, lang))
 }
 
+pub const STRONGS_MODULE: &str = "Strongs";
+
+pub fn search_strongs(
+    conn: &Connection,
+    query: &str,
+    limit: i32,
+) -> Result<Vec<DictHit>, DbError> {
+    let pattern = like_prefix(query);
+    let mut stmt = conn.prepare(
+        "SELECT num, lang, lemma FROM strongs
+         WHERE (lang || num) LIKE ?1 ESCAPE '\\'
+            OR lemma LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+         ORDER BY lang, num, lemma
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| {
+        let num: i32 = row.get(0)?;
+        let lang: String = row.get(1)?;
+        Ok(DictHit {
+            i: strongs_row_i(&lang, num),
+            headword: format!("{lang}{num}"),
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn get_strongs_entry(
+    conn: &Connection,
+    i: i32,
+) -> Result<Option<(String, String)>, DbError> {
+    let Some((num, lang)) = strongs_row_parts(i) else {
+        return Ok(None);
+    };
+    let Some(def) = lookup_strongs(conn, &format!("{lang}{num}"))? else {
+        return Ok(None);
+    };
+    let mut head = format!("{}{}", def.lang, def.num);
+    if !def.lemma.is_empty() {
+        head = if def.pronunciation.is_empty() {
+            format!("{head}  {}", def.lemma)
+        } else {
+            format!("{head}  {}  ({})", def.lemma, def.pronunciation)
+        };
+    }
+    Ok(Some((head, def.definition)))
+}
+
+fn strongs_row_i(lang: &str, num: i32) -> i32 {
+    if lang.eq_ignore_ascii_case("G") {
+        num + 10_000
+    } else {
+        num
+    }
+}
+
+fn strongs_row_parts(i: i32) -> Option<(i32, String)> {
+    if i >= 10_000 {
+        Some((i - 10_000, "G".into()))
+    } else if i > 0 {
+        Some((i, "H".into()))
+    } else {
+        None
+    }
+}
+
 pub fn lookup_strongs(conn: &Connection, code: &str) -> Result<Option<StrongDef>, DbError> {
     let Some((num, lang)) = parse_strongs_code(code) else {
         return Ok(None);
@@ -374,20 +439,27 @@ pub fn lookup_strongs(conn: &Connection, code: &str) -> Result<Option<StrongDef>
 pub struct DictModule {
     pub id: String,
     pub title: String,
+    pub kind: String,
 }
 
 pub fn dictionary_modules(conn: &Connection) -> Result<Vec<DictModule>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT id, title FROM modules
+        "SELECT id, title, kind FROM modules
          WHERE kind IN ('dictionary', 'topic')
          ORDER BY CASE kind WHEN 'dictionary' THEN 0 ELSE 1 END,
-                  CASE id WHEN 'Easton' THEN 0 WHEN 'Nave' THEN 0 ELSE 1 END,
+                  CASE id
+                    WHEN 'Webster' THEN 0
+                    WHEN 'Easton' THEN 1
+                    WHEN 'Nave' THEN 0
+                    ELSE 2
+                  END,
                   title",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(DictModule {
             id: row.get(0)?,
             title: row.get(1)?,
+            kind: row.get(2)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -437,6 +509,102 @@ fn like_prefix(query: &str) -> String {
     }
     out.push('%');
     out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictEntry {
+    pub module: String,
+    pub title: String,
+    pub headword: String,
+    pub text: String,
+}
+
+/// Keys to try for a clicked KJV token: exact, then possessive, then a trailing apostrophe.
+pub fn dict_lookup_keys(word: &str) -> Vec<String> {
+    let w = word.trim();
+    if w.is_empty() {
+        return Vec::new();
+    }
+    let mut keys = vec![w.to_string()];
+    let lower = w.to_ascii_lowercase();
+    if let Some(base) = lower
+        .strip_suffix("'s")
+        .or_else(|| lower.strip_suffix("’s"))
+    {
+        if !base.is_empty() && !keys.iter().any(|k| k.eq_ignore_ascii_case(base)) {
+            keys.push(base.to_string());
+        }
+    }
+    keys
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClickedDict {
+    pub bible: Vec<DictEntry>,
+    pub english: Option<DictEntry>,
+}
+
+impl ClickedDict {
+    pub fn is_empty(&self) -> bool {
+        self.bible.is_empty() && self.english.is_none()
+    }
+}
+
+/// Every matching Bible dictionary, plus Webster 1828.
+pub fn lookup_clicked_word(conn: &Connection, word: &str) -> Result<ClickedDict, DbError> {
+    let mut bible = Vec::new();
+    for module in dictionary_modules(conn)? {
+        if module.kind != "dictionary" || module.id == "Webster" {
+            continue;
+        }
+        if let Some(entry) = lookup_in_module(conn, &module.id, word)? {
+            bible.push(entry);
+        }
+    }
+    Ok(ClickedDict {
+        bible,
+        english: lookup_in_module(conn, "Webster", word)?,
+    })
+}
+
+fn lookup_in_module(
+    conn: &Connection,
+    module: &str,
+    word: &str,
+) -> Result<Option<DictEntry>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT e.module, m.title, e.headword, e.text
+         FROM entries e
+         JOIN modules m ON m.id = e.module
+         WHERE e.module = ?1 AND e.headword = ?2 COLLATE NOCASE
+         ORDER BY e.i
+         LIMIT 1",
+    )?;
+    for key in dict_lookup_keys(word) {
+        let hit = stmt
+            .query_row(rusqlite::params![module, &key], row_dict_entry)
+            .optional()?;
+        if hit.is_some() {
+            return Ok(hit);
+        }
+        let tick = format!("{key}'");
+        let hit = stmt
+            .query_row(rusqlite::params![module, tick], row_dict_entry)
+            .optional()?;
+        if hit.is_some() {
+            return Ok(hit);
+        }
+    }
+    Ok(None)
+}
+
+fn row_dict_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<DictEntry> {
+    Ok(DictEntry {
+        module: row.get(0)?,
+        title: row.get(1)?,
+        headword: row.get(2)?,
+        text: row.get(3)?,
+    })
 }
 
 pub fn get_entry(
@@ -713,6 +881,12 @@ mod tests {
         let def = lookup_strongs(&conn, "H7225").unwrap().unwrap();
         assert_eq!(def.lemma, "re'shiyth");
         assert_eq!(parse_strongs_code("G2316"), Some((2316, "G".into())));
+        let hits = search_strongs(&conn, "H7225", 10).unwrap();
+        assert_eq!(hits[0].headword, "H7225");
+        let (head, text) = get_strongs_entry(&conn, hits[0].i).unwrap().unwrap();
+        assert!(head.contains("H7225"));
+        assert!(head.contains("re'shiyth"));
+        assert!(text.contains("the first"));
     }
 
     #[test]
@@ -740,12 +914,127 @@ mod tests {
         conn.execute_batch(
             r#"
             INSERT INTO modules (id, kind, title, license)
-            VALUES ('Nave', 'topic', 'Nave''s Topical Bible', 'public-domain');
+            VALUES ('Nave', 'topic', 'Nave''s Topical Bible', 'public-domain'),
+                   ('Webster', 'dictionary', 'Webster''s 1828 Dictionary', 'MIT');
             "#,
         )
         .unwrap();
         let mods = dictionary_modules(&conn).unwrap();
-        assert_eq!(mods[0].id, "Easton");
+        assert_eq!(mods[0].id, "Webster");
+        assert_eq!(mods[1].id, "Easton");
         assert!(mods.iter().any(|m| m.id == "Nave"));
+    }
+
+    fn shipped_sqlite() -> Option<std::path::PathBuf> {
+        std::env::var_os("BIBLE_APP_DB")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/bible-app.sqlite");
+                p.is_file().then_some(p)
+            })
+    }
+
+    #[test]
+    fn real_sqlite_webster_1828_senses() {
+        let Some(path) = shipped_sqlite() else {
+            eprintln!("skipping: unpacked bible-app.sqlite not found");
+            return;
+        };
+        let conn = open(&path).unwrap();
+        let mods = dictionary_modules(&conn).unwrap();
+        assert_eq!(mods[0].id, "Webster");
+        let hits = search_entries(&conn, "Webster", "prevent", 20).unwrap();
+        assert!(
+            hits.iter().any(|h| h.headword.eq_ignore_ascii_case("prevent")),
+            "prevent missing from {hits:?}"
+        );
+        let hit = hits
+            .iter()
+            .find(|h| h.headword.eq_ignore_ascii_case("prevent"))
+            .unwrap();
+        let (_, text) = get_entry(&conn, "Webster", hit.i).unwrap().unwrap();
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("go before") || lower.contains("precede"),
+            "1828 prevent sense missing: {text}"
+        );
+        assert!(!text.contains('<'), "HTML leaked into Webster text");
+        let god = lookup_clicked_word(&conn, "God").unwrap();
+        let bible_ids: Vec<&str> = god.bible.iter().map(|e| e.module.as_str()).collect();
+        assert!(bible_ids.contains(&"Easton"), "{bible_ids:?}");
+        assert!(bible_ids.contains(&"Smith"), "{bible_ids:?}");
+        assert_eq!(
+            god.english.as_ref().map(|e| e.module.as_str()),
+            Some("Webster")
+        );
+        let latin = lookup_clicked_word(&conn, "A-posteriori").unwrap();
+        assert!(latin.bible.is_empty());
+        assert_eq!(
+            latin.english.as_ref().map(|e| e.module.as_str()),
+            Some("Webster")
+        );
+    }
+
+    #[test]
+    fn dict_keys_keep_exact_and_drop_possessive() {
+        assert_eq!(dict_lookup_keys("God"), vec!["God".to_string()]);
+        assert_eq!(
+            dict_lookup_keys("God's"),
+            vec!["God's".to_string(), "god".to_string()]
+        );
+        assert!(dict_lookup_keys("  ").is_empty());
+    }
+
+    #[test]
+    fn lookup_returns_bible_and_english() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license) VALUES
+                ('Webster', 'dictionary', 'Webster''s 1828 Dictionary', 'MIT'),
+                ('Easton', 'dictionary', 'Easton''s Bible Dictionary', 'public-domain'),
+                ('Smith', 'dictionary', 'Smith''s Bible Dictionary', 'public-domain');
+            INSERT INTO entries (module, i, headword, text) VALUES
+                ('Webster', 0, 'God', 'english sense'),
+                ('Easton', 0, 'God', 'easton sense'),
+                ('Smith', 0, 'God', 'smith sense'),
+                ('Webster', 1, 'PREVENT''', 'go before');
+            "#,
+        )
+        .unwrap();
+        let god = lookup_clicked_word(&conn, "God").unwrap();
+        assert_eq!(
+            god.bible
+                .iter()
+                .map(|e| (e.module.as_str(), e.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("Easton", "easton sense"), ("Smith", "smith sense")]
+        );
+        assert_eq!(
+            god.english.as_ref().map(|e| e.text.as_str()),
+            Some("english sense")
+        );
+        let possessive = lookup_clicked_word(&conn, "God's").unwrap();
+        assert_eq!(
+            possessive
+                .bible
+                .iter()
+                .map(|e| e.module.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Easton", "Smith"]
+        );
+        let prevent = lookup_clicked_word(&conn, "prevent").unwrap();
+        assert!(prevent.bible.is_empty());
+        assert_eq!(
+            prevent.english.as_ref().map(|e| e.module.as_str()),
+            Some("Webster")
+        );
+        assert!(prevent
+            .english
+            .as_ref()
+            .is_some_and(|e| e.text.contains("go before")));
     }
 }

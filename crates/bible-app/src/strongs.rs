@@ -1,5 +1,5 @@
 use adw::prelude::*;
-use bible_app_db::StrongDef;
+use bible_app_db::{ClickedDict, DictEntry, StrongDef};
 use gtk::glib;
 use relm4::{adw, gtk};
 
@@ -17,21 +17,108 @@ pub fn present(
     view: &gtk::TextView,
     start: i32,
     defs: &[StrongDef],
+    dict: &ClickedDict,
     sender: relm4::Sender<super::app::Msg>,
 ) {
+    let stack = gtk::Stack::new();
+    stack.set_hhomogeneous(true);
+    stack.set_vhomogeneous(false);
+    let mut pages = 0u32;
+    if !defs.is_empty() {
+        stack.add_titled(
+            &strongs_page(defs, sender.clone()),
+            Some("strongs"),
+            "Strong's",
+        );
+        pages += 1;
+    }
+    for entry in &dict.bible {
+        let name = dict_tab_label(entry);
+        stack.add_titled(
+            &dict_page(entry, sender.clone()),
+            Some(&entry.module),
+            &name,
+        );
+        pages += 1;
+    }
+    if let Some(entry) = &dict.english {
+        let name = dict_tab_label(entry);
+        stack.add_titled(
+            &dict_page(entry, sender.clone()),
+            Some(&entry.module),
+            &name,
+        );
+        pages += 1;
+    }
+    if pages == 0 {
+        return;
+    }
+    let child: gtk::Widget = if pages == 1 {
+        stack.upcast()
+    } else {
+        let switcher = gtk::StackSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        switcher.set_halign(gtk::Align::Center);
+        let wrap = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        wrap.set_margin_top(8);
+        wrap.append(&switcher);
+        wrap.append(&stack);
+        wrap.upcast()
+    };
+    popover.set_child(Some(&child));
+    point_at_word(popover, view, start);
+    popover.popup();
+}
+
+fn dict_tab_label(entry: &DictEntry) -> String {
+    match entry.module.as_str() {
+        "Webster" => "Webster's".into(),
+        "Easton" => "Easton's".into(),
+        "Smith" => "Smith's".into(),
+        "Names" => "Hitchcock's".into(),
+        "ATSD" => "ATS".into(),
+        _ => entry
+            .title
+            .split_whitespace()
+            .next()
+            .unwrap_or("Dictionary")
+            .to_string(),
+    }
+}
+
+fn library_button(
+    sender: relm4::Sender<super::app::Msg>,
+    module: &str,
+    headword: &str,
+) -> gtk::Button {
+    let btn = gtk::Button::with_label("Open in library");
+    btn.set_halign(gtk::Align::Start);
+    btn.add_css_class("pill");
+    btn.set_tooltip_text(Some("Open this word in the library window"));
+    let module = module.to_string();
+    let headword = headword.to_string();
+    btn.connect_clicked(move |_| {
+        sender.emit(super::app::Msg::OpenDictWord {
+            module: module.clone(),
+            headword: headword.clone(),
+        });
+    });
+    btn
+}
+
+fn strongs_page(defs: &[StrongDef], sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_start(14);
     body.set_margin_end(14);
     body.set_margin_top(12);
     body.set_margin_bottom(12);
-    body.set_width_request(280);
+    body.set_width_request(300);
 
     for (i, def) in defs.iter().enumerate() {
         if i > 0 {
             body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
 
-        // Lead with lemma + pronunciation. A concise English gloss belongs under the lemma later.
         if !def.lemma.is_empty() {
             let sub = if def.pronunciation.is_empty() {
                 def.lemma.clone()
@@ -78,16 +165,70 @@ pub fn present(
             body.append(&link);
         }
     }
+    if let Some(def) = defs.first() {
+        let code = format!("{}{}", def.lang, def.num);
+        body.append(&library_button(
+            sender,
+            bible_app_db::STRONGS_MODULE,
+            &code,
+        ));
+    }
+    body
+}
 
-    popover.set_child(Some(&body));
+fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_width_request(300);
 
+    append_dict_entry(&body, entry);
+    body.append(&library_button(sender, &entry.module, &entry.headword));
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(80);
+    scroll.set_max_content_height(320);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_child(Some(&body));
+
+    let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    wrap.append(&scroll);
+    wrap
+}
+
+fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
+    let source = gtk::Label::new(Some(&entry.title));
+    source.add_css_class("dim-label");
+    source.add_css_class("caption");
+    source.set_xalign(0.0);
+    source.set_wrap(true);
+    body.append(&source);
+
+    let head = gtk::Label::new(Some(&entry.headword));
+    head.add_css_class("heading");
+    head.set_xalign(0.0);
+    head.set_wrap(true);
+    head.set_selectable(true);
+    body.append(&head);
+
+    let text = gtk::Label::new(Some(&entry.text));
+    text.set_wrap(true);
+    text.set_max_width_chars(44);
+    text.set_xalign(0.0);
+    text.set_selectable(true);
+    body.append(&text);
+}
+
+fn point_at_word(popover: &gtk::Popover, view: &gtk::TextView, start: i32) {
     let buffer = view.buffer();
     let iter = buffer.iter_at_offset(start);
     let loc = view.iter_location(&iter);
     let (x, y) =
         view.buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y() + loc.height());
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, loc.width().max(1), 1)));
-    popover.popup();
 }
 
 pub fn present_text(popover: &gtk::Popover, view: &gtk::TextView, start: i32, text: &str) {
@@ -101,13 +242,7 @@ pub fn present_text(popover: &gtk::Popover, view: &gtk::TextView, start: i32, te
     label.set_margin_top(12);
     label.set_margin_bottom(12);
     popover.set_child(Some(&label));
-
-    let buffer = view.buffer();
-    let iter = buffer.iter_at_offset(start);
-    let loc = view.iter_location(&iter);
-    let (x, y) =
-        view.buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y() + loc.height());
-    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, loc.width().max(1), 1)));
+    point_at_word(popover, view, start);
     popover.popup();
 }
 
