@@ -20,9 +20,9 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Ctrl+- / Ctrl++: smaller / larger text
 - Copy copies the current verse plus a `Book chapter:verse (KJV)` citation
 - Interlinear shows each tagged word’s Strong’s lemma beside the English
-- Translator notes sit under the verse, not in the reading line
+- Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
-- MHC under a verse (when a Matthew Henry comment starts there) opens Matthew Henry
+- A small M at the end of a verse (when a Matthew Henry comment starts there) opens Matthew Henry
 - MHC in the header opens Matthew Henry for the current verse in a second window
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
 - Click a tagged KJV word for its Strong’s number, lemma, and definition
