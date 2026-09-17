@@ -10,7 +10,9 @@ use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
 use bible_app_db::{self, Book, SearchHit};
+use gtk::gio;
 use gtk::glib;
+use relm4::actions::{RelmAction, RelmActionGroup};
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
@@ -40,13 +42,17 @@ pub struct App {
     strongs_popover: gtk::Popover,
     strongs_at: i32,
     tsk_popover: gtk::Popover,
+    goto_entry: gtk::Entry,
+    goto_popover: gtk::Popover,
     history: History,
     layout: ChapterLayout,
     font_size: i32,
-    interlinear: bool,
     paragraphs: bool,
     font_provider: gtk::CssProvider,
     xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
+    mhc_action: gio::SimpleAction,
+    tsk_action: gio::SimpleAction,
+    dict_action: gio::SimpleAction,
 }
 
 #[derive(Debug)]
@@ -75,10 +81,8 @@ pub enum Msg {
     DictOpen(i32),
     Back,
     Forward,
-    CopyVerses,
     FontSmaller,
     FontLarger,
-    SetInterlinear(bool),
     SetParagraphs(bool),
 }
 
@@ -98,153 +102,88 @@ impl SimpleComponent for App {
             set_content = &adw::ToolbarView {
                 add_top_bar = &adw::HeaderBar {
                     #[wrap(Some)]
+                    #[name(title_box)]
                     set_title_widget = &gtk::Box {
-                        set_orientation: gtk::Orientation::Vertical,
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 6,
                         set_valign: gtk::Align::Center,
                         set_halign: gtk::Align::Center,
                         add_css_class: "passage-title",
 
-                        gtk::Box {
-                            set_orientation: gtk::Orientation::Horizontal,
-                            set_spacing: 6,
-                            set_halign: gtk::Align::Center,
+                        #[local_ref]
+                        book_dropdown -> gtk::DropDown {
+                            set_enable_search: true,
+                            set_search_match_mode: gtk::StringFilterMatchMode::Substring,
+                            set_tooltip_text: Some("Book"),
                             set_valign: gtk::Align::Center,
-
-                            #[local_ref]
-                            book_dropdown -> gtk::DropDown {
-                                set_enable_search: true,
-                                set_search_match_mode: gtk::StringFilterMatchMode::Substring,
-                                set_tooltip_text: Some("Book"),
-                                set_valign: gtk::Align::Center,
-                                add_css_class: "passage-picker",
-                                #[watch]
-                                set_sensitive: model.error.is_none() && !model.search_open,
-                            },
-
-                            #[local_ref]
-                            chapter_dropdown -> gtk::DropDown {
-                                set_enable_search: true,
-                                set_search_match_mode: gtk::StringFilterMatchMode::Prefix,
-                                set_tooltip_text: Some("Chapter"),
-                                set_valign: gtk::Align::Center,
-                                add_css_class: "chapter-picker",
-                                #[watch]
-                                set_sensitive: model.error.is_none() && !model.search_open,
-                            },
+                            add_css_class: "passage-picker",
+                            #[watch]
+                            set_sensitive: model.error.is_none() && !model.search_open,
                         },
 
-                        gtk::Label {
-                            set_label: "King James Version",
-                            set_halign: gtk::Align::Center,
-                            add_css_class: "dim-label",
-                            add_css_class: "caption",
-                        }
+                        #[local_ref]
+                        chapter_dropdown -> gtk::DropDown {
+                            set_enable_search: true,
+                            set_search_match_mode: gtk::StringFilterMatchMode::Prefix,
+                            set_tooltip_text: Some("Chapter"),
+                            set_valign: gtk::Align::Center,
+                            add_css_class: "chapter-picker",
+                            #[watch]
+                            set_sensitive: model.error.is_none() && !model.search_open,
+                        },
                     },
-                    pack_start = &gtk::Button {
-                        set_icon_name: "go-previous-symbolic",
-                        set_tooltip_text: Some("Previous chapter (Alt+Left)"),
+                    pack_start = &gtk::Box {
+                        set_spacing: 6,
                         set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_sensitive: !model.search_open,
-                        connect_clicked => Msg::PrevChapter,
+
+                        gtk::Box {
+                            add_css_class: "linked",
+
+                            gtk::Button {
+                                set_icon_name: "go-previous-symbolic",
+                                set_tooltip_text: Some("Previous chapter (Alt+Left)"),
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_sensitive: !model.search_open,
+                                connect_clicked => Msg::PrevChapter,
+                            },
+                            gtk::Button {
+                                set_icon_name: "go-next-symbolic",
+                                set_tooltip_text: Some("Next chapter (Alt+Right)"),
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_sensitive: !model.search_open,
+                                connect_clicked => Msg::NextChapter,
+                            },
+                        },
+                        gtk::Box {
+                            add_css_class: "linked",
+
+                            gtk::Button {
+                                set_icon_name: "edit-undo-symbolic",
+                                set_tooltip_text: Some("Back in history (Alt+Shift+Left)"),
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_sensitive: model.history.can_back() && !model.search_open,
+                                connect_clicked => Msg::Back,
+                            },
+                            gtk::Button {
+                                set_icon_name: "edit-redo-symbolic",
+                                set_tooltip_text: Some("Forward in history (Alt+Shift+Right)"),
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_sensitive: model.history.can_forward() && !model.search_open,
+                                connect_clicked => Msg::Forward,
+                            },
+                        },
                     },
-                    pack_start = &gtk::Button {
-                        set_icon_name: "go-next-symbolic",
-                        set_tooltip_text: Some("Next chapter (Alt+Right)"),
+                    pack_end = &gtk::MenuButton {
+                        set_icon_name: "open-menu-symbolic",
+                        set_tooltip_text: Some("Menu"),
+                        set_primary: true,
                         set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_sensitive: !model.search_open,
-                        connect_clicked => Msg::NextChapter,
-                    },
-                    pack_start = &gtk::Button {
-                        set_label: "Back",
-                        set_tooltip_text: Some("Back in history"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_sensitive: model.history.can_back() && !model.search_open,
-                        connect_clicked => Msg::Back,
-                    },
-                    pack_start = &gtk::Button {
-                        set_label: "Forward",
-                        set_tooltip_text: Some("Forward in history"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_sensitive: model.history.can_forward() && !model.search_open,
-                        connect_clicked => Msg::Forward,
-                    },
-                    pack_end = &gtk::ToggleButton {
-                        set_label: "Dict",
-                        set_tooltip_text: Some("Dictionaries and topics (opens a second window)"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_active: model.dict.is_some(),
-                        #[watch]
-                        set_sensitive: model.error.is_none(),
-                        connect_clicked => Msg::ToggleDict,
-                    },
-                    pack_end = &gtk::ToggleButton {
-                        set_label: "TSK",
-                        set_tooltip_text: Some("Treasury of Scripture Knowledge (opens a second window)"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_active: model.tsk.is_some(),
-                        #[watch]
-                        set_sensitive: model.error.is_none(),
-                        connect_clicked => Msg::ToggleTsk,
-                    },
-                    pack_end = &gtk::ToggleButton {
-                        set_label: "MHC",
-                        set_tooltip_text: Some("Matthew Henry (opens a second window)"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_active: model.mhc.is_some(),
-                        #[watch]
-                        set_sensitive: model.error.is_none(),
-                        connect_clicked => Msg::ToggleMhc,
-                    },
-                    pack_end = &gtk::ToggleButton {
-                        set_label: "Interlinear",
-                        set_tooltip_text: Some("Show Strong's lemmas beside tagged words"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_active: model.interlinear,
-                        #[watch]
-                        set_sensitive: model.error.is_none() && !model.search_open,
-                        connect_clicked[sender] => move |btn| {
-                            sender.input(Msg::SetInterlinear(btn.is_active()));
-                        }
-                    },
-                    pack_end = &gtk::ToggleButton {
-                        set_label: "Paragraphs",
-                        set_tooltip_text: Some("Flow consecutive verses as prose"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_active: model.paragraphs,
-                        #[watch]
-                        set_sensitive: model.error.is_none() && !model.search_open,
-                        connect_clicked[sender] => move |btn| {
-                            sender.input(Msg::SetParagraphs(btn.is_active()));
-                        }
-                    },
-                    pack_end = &gtk::Button {
-                        set_icon_name: "edit-copy-symbolic",
-                        set_tooltip_text: Some("Copy current verse with citation"),
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_sensitive: model.error.is_none() && !model.search_open,
-                        connect_clicked => Msg::CopyVerses,
-                    },
-                    pack_end = &gtk::Button {
-                        set_icon_name: "zoom-out-symbolic",
-                        set_tooltip_text: Some("Smaller text (Ctrl+-)"),
-                        set_valign: gtk::Align::Center,
-                        connect_clicked => Msg::FontSmaller,
-                    },
-                    pack_end = &gtk::Button {
-                        set_icon_name: "zoom-in-symbolic",
-                        set_tooltip_text: Some("Larger text (Ctrl++)"),
-                        set_valign: gtk::Align::Center,
-                        connect_clicked => Msg::FontLarger,
+                        add_css_class: "primary-menu",
+                        set_menu_model: Some(&build_app_menu()),
                     },
                     pack_end = &gtk::ToggleButton {
                         set_icon_name: "edit-find-symbolic",
@@ -254,18 +193,6 @@ impl SimpleComponent for App {
                         set_active: model.search_open,
                         connect_toggled[sender] => move |btn| {
                             sender.input(Msg::SetSearch(btn.is_active()));
-                        }
-                    },
-                    #[name(goto_entry)]
-                    pack_end = &gtk::Entry {
-                        set_placeholder_text: Some("John 3:16"),
-                        set_tooltip_text: Some("Go to a reference, then press Enter (Ctrl+L)"),
-                        set_width_chars: 18,
-                        set_valign: gtk::Align::Center,
-                        #[watch]
-                        set_sensitive: !model.search_open,
-                        connect_activate[sender] => move |entry| {
-                            sender.input(Msg::GoTo(entry.text().to_string()));
                         }
                     },
                 },
@@ -478,16 +405,10 @@ impl SimpleComponent for App {
             );
         }
 
-        let (conn, books, at, font_size, interlinear, paragraphs, error) = match load_library() {
-            Ok((conn, books, at, font_size, interlinear, paragraphs)) => (
-                Some(conn),
-                books,
-                at,
-                font_size,
-                interlinear,
-                paragraphs,
-                None,
-            ),
+        let (conn, books, at, font_size, paragraphs, error) = match load_library() {
+            Ok((conn, books, at, font_size, paragraphs)) => {
+                (Some(conn), books, at, font_size, paragraphs, None)
+            }
             Err(e) => (
                 None,
                 Vec::new(),
@@ -497,11 +418,74 @@ impl SimpleComponent for App {
                     verse: 1,
                 },
                 layout::DEFAULT_FONT,
-                false,
                 true,
                 Some(e),
             ),
         };
+
+        let goto_entry = gtk::Entry::new();
+        goto_entry.set_placeholder_text(Some("John 3:16"));
+        goto_entry.set_tooltip_text(Some("Go to a reference, then press Enter (Ctrl+L)"));
+        goto_entry.set_width_chars(18);
+        goto_entry.update_property(&[gtk::accessible::Property::Label("Go to reference")]);
+        let goto_popover = gtk::Popover::new();
+        goto_popover.set_autohide(true);
+        goto_popover.add_css_class("goto-popover");
+        goto_popover.set_child(Some(&goto_entry));
+        let goto_sender = sender.clone();
+        goto_entry.connect_activate(move |entry| {
+            goto_sender.input(Msg::GoTo(entry.text().to_string()));
+        });
+
+        let paragraphs_action: RelmAction<ParagraphsAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateful(&paragraphs, move |_, state: &mut bool| {
+                *state = !*state;
+                sender.input(Msg::SetParagraphs(*state));
+            })
+        };
+        let font_larger: RelmAction<FontLargerAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::FontLarger))
+        };
+        let font_smaller: RelmAction<FontSmallerAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::FontSmaller))
+        };
+        let mhc_action: RelmAction<MhcAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateful(&false, move |_, _state: &mut bool| {
+                sender.input(Msg::ToggleMhc);
+            })
+        };
+        let tsk_action: RelmAction<TskAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateful(&false, move |_, _state: &mut bool| {
+                sender.input(Msg::ToggleTsk);
+            })
+        };
+        let dict_action: RelmAction<DictAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateful(&false, move |_, _state: &mut bool| {
+                sender.input(Msg::ToggleDict);
+            })
+        };
+        let mhc_gio = mhc_action.gio_action().clone();
+        let tsk_gio = tsk_action.gio_action().clone();
+        let dict_gio = dict_action.gio_action().clone();
+        if error.is_some() {
+            mhc_gio.set_enabled(false);
+            tsk_gio.set_enabled(false);
+            dict_gio.set_enabled(false);
+        }
+
+        let mut group = RelmActionGroup::<WindowActionGroup>::new();
+        group.add_action(paragraphs_action);
+        group.add_action(font_larger);
+        group.add_action(font_smaller);
+        group.add_action(mhc_action);
+        group.add_action(tsk_action);
+        group.add_action(dict_action);
 
         let mut model = App {
             history: History::new(at),
@@ -526,12 +510,16 @@ impl SimpleComponent for App {
             strongs_popover,
             strongs_at: 0,
             tsk_popover,
+            goto_entry: goto_entry.clone(),
+            goto_popover: goto_popover.clone(),
             layout: ChapterLayout::default(),
             font_size,
-            interlinear,
             paragraphs,
             font_provider,
             xref_tips: Rc::new(RefCell::new(Vec::new())),
+            mhc_action: mhc_gio,
+            tsk_action: tsk_gio,
+            dict_action: dict_gio,
         };
         model.apply_font();
         picker::install_css();
@@ -540,23 +528,45 @@ impl SimpleComponent for App {
         model.refresh_chapter(false);
 
         let widgets = view_output!();
+        root.insert_action_group("win", Some(&group.into_action_group()));
+        model.goto_popover.set_parent(&widgets.title_box);
+        let goto_on_destroy = model.goto_popover.clone();
+        root.connect_destroy(move |_| {
+            goto_on_destroy.unparent();
+        });
 
         let key = gtk::EventControllerKey::new();
-        let goto = widgets.goto_entry.clone();
+        let goto_entry_keys = model.goto_entry.clone();
+        let goto_popover_keys = model.goto_popover.clone();
         let sender_keys = sender.clone();
         key.connect_key_pressed(move |_, keyval, _, mods| {
             let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             if ctrl && (keyval == gtk::gdk::Key::f || keyval == gtk::gdk::Key::F) {
                 sender_keys.input(Msg::SetSearch(true));
                 return glib::Propagation::Stop;
             }
             if keyval == gtk::gdk::Key::Escape {
+                if goto_popover_keys.is_visible() {
+                    goto_popover_keys.popdown();
+                    return glib::Propagation::Stop;
+                }
                 sender_keys.input(Msg::SetSearch(false));
                 return glib::Propagation::Stop;
             }
             if ctrl && (keyval == gtk::gdk::Key::l || keyval == gtk::gdk::Key::L) {
-                goto.grab_focus();
+                goto_popover_keys.popup();
+                goto_entry_keys.grab_focus();
+                goto_entry_keys.select_region(0, -1);
+                return glib::Propagation::Stop;
+            }
+            if alt && shift && keyval == gtk::gdk::Key::Left {
+                sender_keys.input(Msg::Back);
+                return glib::Propagation::Stop;
+            }
+            if alt && shift && keyval == gtk::gdk::Key::Right {
+                sender_keys.input(Msg::Forward);
                 return glib::Propagation::Stop;
             }
             if alt && keyval == gtk::gdk::Key::Left {
@@ -565,6 +575,14 @@ impl SimpleComponent for App {
             }
             if alt && keyval == gtk::gdk::Key::Right {
                 sender_keys.input(Msg::NextChapter);
+                return glib::Propagation::Stop;
+            }
+            if keyval == gtk::gdk::Key::Back {
+                sender_keys.input(Msg::Back);
+                return glib::Propagation::Stop;
+            }
+            if keyval == gtk::gdk::Key::Forward {
+                sender_keys.input(Msg::Forward);
                 return glib::Propagation::Stop;
             }
             if ctrl
@@ -582,6 +600,21 @@ impl SimpleComponent for App {
             glib::Propagation::Proceed
         });
         root.add_controller(key);
+
+        let mouse_back = gtk::GestureClick::new();
+        mouse_back.set_button(8);
+        let back_sender = sender.clone();
+        mouse_back.connect_pressed(move |_, _, _, _| {
+            back_sender.input(Msg::Back);
+        });
+        root.add_controller(mouse_back);
+        let mouse_forward = gtk::GestureClick::new();
+        mouse_forward.set_button(9);
+        let forward_sender = sender.clone();
+        mouse_forward.connect_pressed(move |_, _, _, _| {
+            forward_sender.input(Msg::Forward);
+        });
+        root.add_controller(mouse_forward);
 
         let tips = model.xref_tips.clone();
         model
@@ -743,12 +776,15 @@ impl SimpleComponent for App {
                 }
             }
             Msg::GoTo(text) => {
+                let text = text.trim();
                 if text.is_empty() {
+                    self.goto_popover.popdown();
                     return;
                 }
-                if let Some(at) = nav::parse_ref(&text, &self.books, self.at) {
+                if let Some(at) = nav::parse_ref(text, &self.books, self.at) {
                     self.search_open = false;
                     self.go(at, true);
+                    self.goto_popover.popdown();
                 }
             }
             Msg::SetSearch(open) => {
@@ -920,9 +956,6 @@ impl SimpleComponent for App {
                     self.sync_pickers();
                 }
             }
-            Msg::CopyVerses => {
-                self.copy_current_verse();
-            }
             Msg::FontSmaller => {
                 self.font_size = layout::smaller_font(self.font_size);
                 self.apply_font();
@@ -932,9 +965,6 @@ impl SimpleComponent for App {
                 self.font_size = layout::larger_font(self.font_size);
                 self.apply_font();
                 self.save_state();
-            }
-            Msg::SetInterlinear(_on) => {
-                // Header toggle stays; it must not paint lemmas into the chapter.
             }
             Msg::SetParagraphs(on) => {
                 if self.paragraphs == on {
@@ -947,6 +977,7 @@ impl SimpleComponent for App {
                 }
             }
         }
+        self.sync_study_actions();
     }
 }
 
@@ -998,9 +1029,17 @@ impl App {
         config::save_state(&config::State::from_ref(
             self.at,
             self.font_size,
-            false,
             self.paragraphs,
         ));
+    }
+
+    fn sync_study_actions(&self) {
+        self.mhc_action
+            .set_state(&self.mhc.is_some().to_variant());
+        self.tsk_action
+            .set_state(&self.tsk.is_some().to_variant());
+        self.dict_action
+            .set_state(&self.dict.is_some().to_variant());
     }
 
     fn apply_font(&self) {
@@ -1040,18 +1079,6 @@ impl App {
             self.mhc = Some(widgets);
         }
         self.refresh_mhc();
-    }
-
-    fn copy_current_verse(&self) {
-        let Some(conn) = &self.conn else { return };
-        let Ok(verse) = bible_app_db::get_verse(conn, self.at.book, self.at.chapter, self.at.verse)
-        else {
-            return;
-        };
-        let text = layout::copy_verses(&self.books, &[verse]);
-        if let Some(display) = gtk::gdk::Display::default() {
-            display.clipboard().set_text(&text);
-        }
     }
 
     fn refresh_chapter(&mut self, highlight: bool) {
@@ -1329,7 +1356,7 @@ impl App {
     }
 }
 
-type LoadedLibrary = (Connection, Vec<Book>, Ref, i32, bool, bool);
+type LoadedLibrary = (Connection, Vec<Book>, Ref, i32, bool);
 
 fn load_library() -> Result<LoadedLibrary, String> {
     let path = config::locate_database()?;
@@ -1341,7 +1368,6 @@ fn load_library() -> Result<LoadedLibrary, String> {
     }
     let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
-    let interlinear = false;
     let paragraphs = state.paragraphs;
     let mut at = Ref::from(state);
     if bible_app_db::chapter(&conn, at.book, at.chapter)
@@ -1354,5 +1380,35 @@ fn load_library() -> Result<LoadedLibrary, String> {
             verse: 1,
         };
     }
-    Ok((conn, books, at, font_size, interlinear, paragraphs))
+    Ok((conn, books, at, font_size, paragraphs))
 }
+
+fn build_app_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Paragraphs"), Some("win.paragraphs"));
+
+    let text = gio::Menu::new();
+    text.append(Some("Larger text"), Some("win.font-larger"));
+    text.append(Some("Smaller text"), Some("win.font-smaller"));
+    menu.append_section(None, &text);
+
+    let commentary = gio::Menu::new();
+    commentary.append(Some("Matthew Henry"), Some("win.mhc"));
+    commentary.append(
+        Some("Treasury of Scripture Knowledge"),
+        Some("win.tsk"),
+    );
+    let study = gio::Menu::new();
+    study.append_submenu(Some("Commentary"), &commentary);
+    study.append(Some("Dictionary"), Some("win.dict"));
+    menu.append_section(None, &study);
+    menu
+}
+
+relm4::new_action_group!(WindowActionGroup, "win");
+relm4::new_stateful_action!(ParagraphsAction, WindowActionGroup, "paragraphs", (), bool);
+relm4::new_stateless_action!(FontLargerAction, WindowActionGroup, "font-larger");
+relm4::new_stateless_action!(FontSmallerAction, WindowActionGroup, "font-smaller");
+relm4::new_stateful_action!(MhcAction, WindowActionGroup, "mhc", (), bool);
+relm4::new_stateful_action!(TskAction, WindowActionGroup, "tsk", (), bool);
+relm4::new_stateful_action!(DictAction, WindowActionGroup, "dict", (), bool);
