@@ -8,6 +8,7 @@ mod nav;
 mod search;
 mod strongs;
 mod tsk;
+mod tsk_parse;
 
 fn main() {
     let app = relm4::RelmApp::new("io.github.timjonez.bible-app");
