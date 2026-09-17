@@ -14,7 +14,7 @@ cargo run -p bible-app
 Override the database path with `BIBLE_APP_DB` if you already have an unpacked copy.
 
 - Paragraphs (default) flows consecutive verses as prose; toggle off for one verse per block. Alt+Left / Alt+Right still change chapter.
-- Sidebar lists Old and New Testament books and a chapter grid for the selected book
+- Header book and chapter dropdowns jump to a passage; type in the popup to search
 - Alt+Left / Alt+Right: previous / next chapter
 - Back / Forward: jump through navigation history
 - Ctrl+L then type `John 3:16` and Enter

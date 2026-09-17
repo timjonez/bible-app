@@ -4,8 +4,8 @@ use crate::history::History;
 use crate::layout::{self, ChapterLayout};
 use crate::mhc;
 use crate::nav::{self, Ref};
+use crate::picker;
 use crate::search;
-use crate::sidebar;
 use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
@@ -14,7 +14,7 @@ use gtk::glib;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -22,11 +22,11 @@ pub struct App {
     conn: Option<Connection>,
     books: Vec<Book>,
     at: Ref,
-    title: String,
     error: Option<String>,
     buffer: gtk::TextBuffer,
-    book_list: gtk::ListBox,
-    chapter_grid: gtk::FlowBox,
+    book_dropdown: gtk::DropDown,
+    chapter_dropdown: gtk::DropDown,
+    picker_syncing: Rc<Cell<bool>>,
     chapter_view: gtk::TextView,
     search_open: bool,
     search_query: String,
@@ -51,8 +51,8 @@ pub struct App {
 
 #[derive(Debug)]
 pub enum Msg {
-    SelectBook(u8),
-    SelectChapter(u8),
+    SelectBookIndex(u32),
+    SelectChapterIndex(u32),
     PrevChapter,
     NextChapter,
     GoTo(String),
@@ -98,10 +98,47 @@ impl SimpleComponent for App {
             set_content = &adw::ToolbarView {
                 add_top_bar = &adw::HeaderBar {
                     #[wrap(Some)]
-                    set_title_widget = &adw::WindowTitle {
-                        #[watch]
-                        set_title: &model.title,
-                        set_subtitle: "King James Version",
+                    set_title_widget = &gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_valign: gtk::Align::Center,
+                        set_halign: gtk::Align::Center,
+                        add_css_class: "passage-title",
+
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Horizontal,
+                            set_spacing: 6,
+                            set_halign: gtk::Align::Center,
+                            set_valign: gtk::Align::Center,
+
+                            #[local_ref]
+                            book_dropdown -> gtk::DropDown {
+                                set_enable_search: true,
+                                set_search_match_mode: gtk::StringFilterMatchMode::Substring,
+                                set_tooltip_text: Some("Book"),
+                                set_valign: gtk::Align::Center,
+                                add_css_class: "passage-picker",
+                                #[watch]
+                                set_sensitive: model.error.is_none() && !model.search_open,
+                            },
+
+                            #[local_ref]
+                            chapter_dropdown -> gtk::DropDown {
+                                set_enable_search: true,
+                                set_search_match_mode: gtk::StringFilterMatchMode::Prefix,
+                                set_tooltip_text: Some("Chapter"),
+                                set_valign: gtk::Align::Center,
+                                add_css_class: "chapter-picker",
+                                #[watch]
+                                set_sensitive: model.error.is_none() && !model.search_open,
+                            },
+                        },
+
+                        gtk::Label {
+                            set_label: "King James Version",
+                            set_halign: gtk::Align::Center,
+                            add_css_class: "dim-label",
+                            add_css_class: "caption",
+                        }
                     },
                     pack_start = &gtk::Button {
                         set_icon_name: "go-previous-symbolic",
@@ -329,88 +366,26 @@ impl SimpleComponent for App {
                             }
                         },
 
-                        gtk::Box {
-                            set_orientation: gtk::Orientation::Horizontal,
+                        gtk::ScrolledWindow {
+                            set_hexpand: true,
+                            set_vexpand: true,
+                            set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
 
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_width_request: 200,
-                                add_css_class: "sidebar",
-
-                                gtk::ScrolledWindow {
-                                    set_vexpand: true,
-                                    set_hscrollbar_policy: gtk::PolicyType::Never,
-                                    set_vscrollbar_policy: gtk::PolicyType::Automatic,
-
-                                    #[local_ref]
-                                    book_list -> gtk::ListBox {
-                                        set_selection_mode: gtk::SelectionMode::Single,
-                                        add_css_class: "navigation-sidebar",
-                                        set_accessible_role: gtk::AccessibleRole::List,
-                                        connect_row_activated[sender] => move |_, row| {
-                                            if let Some(id) = sidebar::book_id_from_row(row) {
-                                                sender.input(Msg::SelectBook(id));
-                                            }
-                                        }
-                                    },
-                                },
-
-                                gtk::Separator {
-                                    set_orientation: gtk::Orientation::Horizontal,
-                                },
-
-                                gtk::ScrolledWindow {
-                                    set_propagate_natural_height: true,
-                                    set_max_content_height: 220,
-                                    set_hscrollbar_policy: gtk::PolicyType::Never,
-                                    set_vscrollbar_policy: gtk::PolicyType::Automatic,
-
-                                    #[local_ref]
-                                    chapter_grid -> gtk::FlowBox {
-                                        set_selection_mode: gtk::SelectionMode::Single,
-                                        set_min_children_per_line: 5,
-                                        set_max_children_per_line: 6,
-                                        set_column_spacing: 2,
-                                        set_row_spacing: 2,
-                                        set_homogeneous: false,
-                                        set_halign: gtk::Align::Fill,
-                                        set_valign: gtk::Align::Start,
-                                        set_activate_on_single_click: true,
-                                        add_css_class: "chapter-grid",
-                                        connect_child_activated[sender] => move |_, child| {
-                                            if let Some(ch) = sidebar::chapter_from_child(child) {
-                                                sender.input(Msg::SelectChapter(ch));
-                                            }
-                                        }
-                                    },
-                                },
-                            },
-
-                            gtk::Separator {
-                                set_orientation: gtk::Orientation::Vertical,
-                            },
-
-                            gtk::ScrolledWindow {
-                                set_hexpand: true,
-                                set_vexpand: true,
-                                set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
-
-                                #[local_ref]
-                                chapter_view -> gtk::TextView {
-                                    set_buffer: Some(&model.buffer),
-                                    set_editable: false,
-                                    set_cursor_visible: false,
-                                    set_wrap_mode: gtk::WrapMode::WordChar,
-                                    set_left_margin: 28,
-                                    set_right_margin: 28,
-                                    set_top_margin: 20,
-                                    set_bottom_margin: 24,
-                                    set_pixels_above_lines: 1,
-                                    set_pixels_below_lines: 1,
-                                    set_has_tooltip: true,
-                                    add_css_class: "chapter-view",
-                                    set_accessible_role: gtk::AccessibleRole::Document,
-                                }
+                            #[local_ref]
+                            chapter_view -> gtk::TextView {
+                                set_buffer: Some(&model.buffer),
+                                set_editable: false,
+                                set_cursor_visible: false,
+                                set_wrap_mode: gtk::WrapMode::WordChar,
+                                set_left_margin: 28,
+                                set_right_margin: 28,
+                                set_top_margin: 20,
+                                set_bottom_margin: 24,
+                                set_pixels_above_lines: 1,
+                                set_pixels_below_lines: 1,
+                                set_has_tooltip: true,
+                                add_css_class: "chapter-view",
+                                set_accessible_role: gtk::AccessibleRole::Document,
                             }
                         }
                     }
@@ -424,8 +399,12 @@ impl SimpleComponent for App {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let book_list = gtk::ListBox::new();
-        let chapter_grid = gtk::FlowBox::new();
+        let book_dropdown = gtk::DropDown::from_strings(&[]);
+        let chapter_dropdown = gtk::DropDown::from_strings(&[]);
+        picker::prepare(&book_dropdown, gtk::StringFilterMatchMode::Substring);
+        picker::prepare(&chapter_dropdown, gtk::StringFilterMatchMode::Prefix);
+        book_dropdown.update_property(&[gtk::accessible::Property::Label("Book")]);
+        chapter_dropdown.update_property(&[gtk::accessible::Property::Label("Chapter")]);
         let search_list = gtk::ListBox::new();
         let search_entry = gtk::SearchEntry::new();
         let chapter_view = gtk::TextView::new();
@@ -529,11 +508,11 @@ impl SimpleComponent for App {
             conn,
             books,
             at,
-            title: "bible-app".into(),
             error,
             buffer,
-            book_list: book_list.clone(),
-            chapter_grid: chapter_grid.clone(),
+            book_dropdown: book_dropdown.clone(),
+            chapter_dropdown: chapter_dropdown.clone(),
+            picker_syncing: Rc::new(Cell::new(false)),
             chapter_view: chapter_view.clone(),
             search_open: false,
             search_query: String::new(),
@@ -555,17 +534,10 @@ impl SimpleComponent for App {
             xref_tips: Rc::new(RefCell::new(Vec::new())),
         };
         model.apply_font();
+        picker::install_css();
+        picker::fill_books(&model.book_dropdown, &model.books);
+        model.sync_pickers();
         model.refresh_chapter(false);
-
-        sidebar::install_css();
-        sidebar::fill_books(&model.book_list, &model.books);
-        sidebar::select_book(&model.book_list, model.at.book);
-        let n = model
-            .conn
-            .as_ref()
-            .and_then(|c| bible_app_db::max_chapter(c, model.at.book).ok())
-            .unwrap_or(1);
-        sidebar::sync_chapters(&model.chapter_grid, model.at.book, n, model.at.chapter);
 
         let widgets = view_output!();
 
@@ -688,12 +660,43 @@ impl SimpleComponent for App {
         });
         model.chapter_view.add_controller(motion);
 
+        let book_sender = sender.clone();
+        let book_syncing = model.picker_syncing.clone();
+        model.book_dropdown.connect_selected_notify(move |dd| {
+            if book_syncing.get() {
+                return;
+            }
+            let pos = dd.selected();
+            if pos == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            book_sender.input(Msg::SelectBookIndex(pos));
+        });
+        let chapter_sender = sender.clone();
+        let chapter_syncing = model.picker_syncing.clone();
+        model.chapter_dropdown.connect_selected_notify(move |dd| {
+            if chapter_syncing.get() {
+                return;
+            }
+            let pos = dd.selected();
+            if pos == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            chapter_sender.input(Msg::SelectChapterIndex(pos));
+        });
+
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
-            Msg::SelectBook(id) => {
+            Msg::SelectBookIndex(idx) => {
+                let Some(id) = picker::book_id_at(&self.books, idx) else {
+                    return;
+                };
+                if self.at.book == id {
+                    return;
+                }
                 self.go(
                     Ref {
                         book: id,
@@ -703,7 +706,13 @@ impl SimpleComponent for App {
                     false,
                 );
             }
-            Msg::SelectChapter(chapter) => {
+            Msg::SelectChapterIndex(idx) => {
+                let Some(chapter) = picker::chapter_from_index(idx) else {
+                    return;
+                };
+                if self.at.chapter == chapter {
+                    return;
+                }
                 self.go(
                     Ref {
                         book: self.at.book,
@@ -898,7 +907,7 @@ impl SimpleComponent for App {
                 if let Some(at) = self.history.back() {
                     self.at = at;
                     self.refresh_chapter(true);
-                    self.sync_book_row();
+                    self.sync_pickers();
                 }
             }
             Msg::Forward => {
@@ -908,7 +917,7 @@ impl SimpleComponent for App {
                 if let Some(at) = self.history.forward() {
                     self.at = at;
                     self.refresh_chapter(true);
-                    self.sync_book_row();
+                    self.sync_pickers();
                 }
             }
             Msg::CopyVerses => {
@@ -982,7 +991,7 @@ impl App {
         self.history.navigate(at);
         self.at = at;
         self.refresh_chapter(highlight);
-        self.sync_book_row();
+        self.sync_pickers();
     }
 
     fn save_state(&self) {
@@ -1047,10 +1056,8 @@ impl App {
 
     fn refresh_chapter(&mut self, highlight: bool) {
         let Some(conn) = &self.conn else {
-            self.title = "bible-app".into();
             return;
         };
-        self.title = nav::format_chapter(&self.books, self.at.book, self.at.chapter);
         let verses = match bible_app_db::chapter(conn, self.at.book, self.at.chapter) {
             Ok(verses) if !verses.is_empty() => verses,
             Ok(_) => {
@@ -1309,20 +1316,16 @@ impl App {
         });
     }
 
-    fn sync_book_row(&self) {
-        let list = self.book_list.clone();
-        let grid = self.chapter_grid.clone();
-        let book = self.at.book;
-        let chapter = self.at.chapter;
+    fn sync_pickers(&self) {
+        self.picker_syncing.set(true);
+        picker::select_book(&self.book_dropdown, &self.books, self.at.book);
         let n = self
             .conn
             .as_ref()
-            .and_then(|c| bible_app_db::max_chapter(c, book).ok())
+            .and_then(|c| bible_app_db::max_chapter(c, self.at.book).ok())
             .unwrap_or(1);
-        glib::idle_add_local_once(move || {
-            sidebar::select_book(&list, book);
-            sidebar::sync_chapters(&grid, book, n, chapter);
-        });
+        picker::sync_chapters(&self.chapter_dropdown, n, self.at.chapter);
+        self.picker_syncing.set(false);
     }
 }
 
