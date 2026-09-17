@@ -64,6 +64,27 @@ pub fn present(popover: &gtk::Popover, view: &gtk::TextView, start: i32, defs: &
     popover.popup();
 }
 
+pub fn present_text(popover: &gtk::Popover, view: &gtk::TextView, start: i32, text: &str) {
+    let label = gtk::Label::new(Some(text));
+    label.set_wrap(true);
+    label.set_max_width_chars(44);
+    label.set_xalign(0.0);
+    label.set_selectable(true);
+    label.set_margin_start(14);
+    label.set_margin_end(14);
+    label.set_margin_top(12);
+    label.set_margin_bottom(12);
+    popover.set_child(Some(&label));
+
+    let buffer = view.buffer();
+    let iter = buffer.iter_at_offset(start);
+    let loc = view.iter_location(&iter);
+    let (x, y) =
+        view.buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y() + loc.height());
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, loc.width().max(1), 1)));
+    popover.popup();
+}
+
 pub fn make_tag() -> gtk::TextTag {
     gtk::TextTag::new(Some("strongs"))
 }
