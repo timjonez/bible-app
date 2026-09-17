@@ -19,16 +19,16 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Ctrl+L then type `John 3:16` and Enter
 - Ctrl+F to search the KJV; Enter on a result jumps to that verse
 - Ctrl+- / Ctrl++: smaller / larger text
+- Click a verse (number or body) to select it; copy, MHC, and TSK follow that verse
 - Copy copies the current verse plus a `Book chapter:verse (KJV)` citation
-- Interlinear shows each tagged word’s Strong’s lemma beside the English
+- Click a tagged KJV word for its Strong’s lemma, pronunciation, number, and definition. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
 - A small M at the end of a verse (when a Matthew Henry comment starts there) opens Matthew Henry
 - MHC in the header opens Matthew Henry for the current verse in a second window
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
-- Click a tagged KJV word for its Strong’s number, lemma, and definition
 - Dict opens Easton and the other dictionaries and topics; type a headword and click a result
-- Last position, font size, interlinear, and paragraphs are stored in `~/.config/bible-app/state.toml`
+- Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
 
 The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, the public-domain dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set).
 
@@ -41,4 +41,4 @@ See `data/README.md`.
 - [x] Phase 2: search
 - [x] Phase 3: Strong’s, TSK cross-references, Matthew Henry
 - [x] Phase 4: public-domain dictionaries and topics
-- [x] Chapter reader: inline TSK/MHC, KJV italics, history, copy, font size, interlinear
+- [x] Chapter reader: inline TSK/MHC, KJV italics, history, copy, font size, verse highlight
