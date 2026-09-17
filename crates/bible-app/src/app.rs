@@ -5,6 +5,7 @@ use crate::layout::{self, ChapterLayout};
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::search;
+use crate::sidebar;
 use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
@@ -25,6 +26,7 @@ pub struct App {
     error: Option<String>,
     buffer: gtk::TextBuffer,
     book_list: gtk::ListBox,
+    chapter_grid: gtk::FlowBox,
     chapter_view: gtk::TextView,
     search_open: bool,
     search_query: String,
@@ -49,6 +51,7 @@ pub struct App {
 #[derive(Debug)]
 pub enum Msg {
     SelectBook(u8),
+    SelectChapter(u8),
     PrevChapter,
     NextChapter,
     GoTo(String),
@@ -327,20 +330,57 @@ impl SimpleComponent for App {
                         gtk::Box {
                             set_orientation: gtk::Orientation::Horizontal,
 
-                            gtk::ScrolledWindow {
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
                                 set_width_request: 200,
-                                set_propagate_natural_width: true,
                                 add_css_class: "sidebar",
 
-                                #[local_ref]
-                                book_list -> gtk::ListBox {
-                                    set_selection_mode: gtk::SelectionMode::Single,
-                                    add_css_class: "navigation-sidebar",
-                                    set_accessible_role: gtk::AccessibleRole::List,
-                                    connect_row_activated[sender] => move |_, row| {
-                                        let id = u8::try_from(row.index() + 1).unwrap_or(1);
-                                        sender.input(Msg::SelectBook(id));
-                                    }
+                                gtk::ScrolledWindow {
+                                    set_vexpand: true,
+                                    set_hscrollbar_policy: gtk::PolicyType::Never,
+                                    set_vscrollbar_policy: gtk::PolicyType::Automatic,
+
+                                    #[local_ref]
+                                    book_list -> gtk::ListBox {
+                                        set_selection_mode: gtk::SelectionMode::Single,
+                                        add_css_class: "navigation-sidebar",
+                                        set_accessible_role: gtk::AccessibleRole::List,
+                                        connect_row_activated[sender] => move |_, row| {
+                                            if let Some(id) = sidebar::book_id_from_row(row) {
+                                                sender.input(Msg::SelectBook(id));
+                                            }
+                                        }
+                                    },
+                                },
+
+                                gtk::Separator {
+                                    set_orientation: gtk::Orientation::Horizontal,
+                                },
+
+                                gtk::ScrolledWindow {
+                                    set_propagate_natural_height: true,
+                                    set_max_content_height: 220,
+                                    set_hscrollbar_policy: gtk::PolicyType::Never,
+                                    set_vscrollbar_policy: gtk::PolicyType::Automatic,
+
+                                    #[local_ref]
+                                    chapter_grid -> gtk::FlowBox {
+                                        set_selection_mode: gtk::SelectionMode::Single,
+                                        set_min_children_per_line: 5,
+                                        set_max_children_per_line: 6,
+                                        set_column_spacing: 2,
+                                        set_row_spacing: 2,
+                                        set_homogeneous: false,
+                                        set_halign: gtk::Align::Fill,
+                                        set_valign: gtk::Align::Start,
+                                        set_activate_on_single_click: true,
+                                        add_css_class: "chapter-grid",
+                                        connect_child_activated[sender] => move |_, child| {
+                                            if let Some(ch) = sidebar::chapter_from_child(child) {
+                                                sender.input(Msg::SelectChapter(ch));
+                                            }
+                                        }
+                                    },
                                 },
                             },
 
@@ -383,6 +423,7 @@ impl SimpleComponent for App {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let book_list = gtk::ListBox::new();
+        let chapter_grid = gtk::FlowBox::new();
         let search_list = gtk::ListBox::new();
         let search_entry = gtk::SearchEntry::new();
         let chapter_view = gtk::TextView::new();
@@ -492,6 +533,7 @@ impl SimpleComponent for App {
             error,
             buffer,
             book_list: book_list.clone(),
+            chapter_grid: chapter_grid.clone(),
             chapter_view: chapter_view.clone(),
             search_open: false,
             search_query: String::new(),
@@ -514,21 +556,15 @@ impl SimpleComponent for App {
         model.apply_font();
         model.refresh_chapter(false);
 
-        for book in &model.books {
-            let label = gtk::Label::new(Some(&book.name));
-            label.set_xalign(0.0);
-            label.set_margin_start(8);
-            label.set_margin_end(8);
-            label.set_margin_top(4);
-            label.set_margin_bottom(4);
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&label));
-            row.set_tooltip_text(Some(&book.name));
-            model.book_list.append(&row);
-        }
-        if let Some(row) = model.book_list.row_at_index(i32::from(model.at.book) - 1) {
-            model.book_list.select_row(Some(&row));
-        }
+        sidebar::install_css();
+        sidebar::fill_books(&model.book_list, &model.books);
+        sidebar::select_book(&model.book_list, model.at.book);
+        let n = model
+            .conn
+            .as_ref()
+            .and_then(|c| bible_app_db::max_chapter(c, model.at.book).ok())
+            .unwrap_or(1);
+        sidebar::sync_chapters(&model.chapter_grid, model.at.book, n, model.at.chapter);
 
         let widgets = view_output!();
 
@@ -661,6 +697,16 @@ impl SimpleComponent for App {
                     Ref {
                         book: id,
                         chapter: 1,
+                        verse: 1,
+                    },
+                    false,
+                );
+            }
+            Msg::SelectChapter(chapter) => {
+                self.go(
+                    Ref {
+                        book: self.at.book,
+                        chapter,
                         verse: 1,
                     },
                     false,
@@ -1242,11 +1288,17 @@ impl App {
 
     fn sync_book_row(&self) {
         let list = self.book_list.clone();
-        let idx = i32::from(self.at.book) - 1;
+        let grid = self.chapter_grid.clone();
+        let book = self.at.book;
+        let chapter = self.at.chapter;
+        let n = self
+            .conn
+            .as_ref()
+            .and_then(|c| bible_app_db::max_chapter(c, book).ok())
+            .unwrap_or(1);
         glib::idle_add_local_once(move || {
-            if let Some(row) = list.row_at_index(idx) {
-                list.select_row(Some(&row));
-            }
+            sidebar::select_book(&list, book);
+            sidebar::sync_chapters(&grid, book, n, chapter);
         });
     }
 }

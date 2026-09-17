@@ -6,6 +6,7 @@ mod layout;
 mod mhc;
 mod nav;
 mod search;
+mod sidebar;
 mod strongs;
 mod tsk;
 mod tsk_parse;
