@@ -87,4 +87,17 @@ mod tests {
         assert_eq!(status("foo", 3, 200), "3 verses");
         assert_eq!(status("foo", 200, 200), "First 200 verses");
     }
+
+    #[test]
+    fn empty_description_prompt_only_for_blank_query() {
+        assert_eq!(
+            empty_description(""),
+            Some("Try a short phrase, for example only begotten.")
+        );
+        assert_eq!(
+            empty_description("  "),
+            Some("Try a short phrase, for example only begotten.")
+        );
+        assert_eq!(empty_description("foo"), None);
+    }
 }

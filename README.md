@@ -17,7 +17,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Alt+Left / Alt+Right: previous / next chapter
 - Back / Forward: jump through navigation history
 - Ctrl+L then type `John 3:16` and Enter
-- Ctrl+F to search the KJV; Enter on a result jumps to that verse
+- Ctrl+F searches the KJV without leaving the chapter; Enter on a result jumps to that verse
 - Ctrl+- / Ctrl++: smaller / larger text
 - Click a verse (number or body) to select it; copy, MHC, and TSK follow that verse
 - Copy copies the current verse plus a `Book chapter:verse (KJV)` citation

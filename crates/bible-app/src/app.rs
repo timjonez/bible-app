@@ -236,110 +236,139 @@ impl SimpleComponent for App {
                         #[watch]
                         set_description: model.error.as_deref(),
                     }
-                } else if model.search_open {
-                    gtk::Box {
-                        set_orientation: gtk::Orientation::Vertical,
-                        set_spacing: 12,
-                        set_margin_start: 16,
-                        set_margin_end: 16,
-                        set_margin_top: 12,
-                        set_margin_bottom: 12,
-
-                        #[local_ref]
-                        search_entry -> gtk::SearchEntry {
-                            set_placeholder_text: Some("Search the KJV"),
-                            set_tooltip_text: Some("Search the King James Version"),
-                            set_hexpand: true,
-                            connect_search_changed[sender] => move |entry| {
-                                sender.input(Msg::Search(entry.text().to_string()));
-                            },
-                            connect_activate => Msg::SearchActivate,
-                        },
-
-                        gtk::Label {
+                } else {
+                    gtk::Overlay {
+                        add_overlay = &gtk::Revealer {
                             #[watch]
-                            set_label: &model.search_status,
-                            set_xalign: 0.0,
-                            add_css_class: "dim-label",
-                        },
+                            set_reveal_child: model.search_open,
+                            set_transition_type: gtk::RevealerTransitionType::SlideDown,
+                            set_halign: gtk::Align::Fill,
+                            set_valign: gtk::Align::Start,
+                            set_hexpand: true,
 
-                        if model.search_hits.is_empty() {
-                            adw::StatusPage {
-                                set_icon_name: Some("edit-find-symbolic"),
-                                #[watch]
-                                set_title: &model.search_status,
-                                #[watch]
-                                set_description: search::empty_description(&model.search_query),
-                                set_vexpand: true,
-                            }
-                        } else {
-                            gtk::ScrolledWindow {
-                                set_hexpand: true,
-                                set_vexpand: true,
-                                set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                add_css_class: "background",
 
                                 adw::Clamp {
                                     set_maximum_size: 720,
                                     set_tightening_threshold: 480,
 
-                                    #[local_ref]
-                                    search_list -> gtk::ListBox {
-                                        set_selection_mode: gtk::SelectionMode::Single,
-                                        add_css_class: "boxed-list",
-                                        set_accessible_role: gtk::AccessibleRole::List,
-                                        connect_row_activated[sender] => move |_, row| {
-                                            sender.input(Msg::OpenHit(row.index()));
+                                    gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 8,
+                                        set_margin_start: 16,
+                                        set_margin_end: 16,
+                                        set_margin_top: 12,
+                                        set_margin_bottom: 12,
+
+                                        #[local_ref]
+                                        search_entry -> gtk::SearchEntry {
+                                            set_placeholder_text: Some("Search the KJV"),
+                                            set_tooltip_text: Some("Search the King James Version"),
+                                            set_hexpand: true,
+                                            connect_search_changed[sender] => move |entry| {
+                                                sender.input(Msg::Search(entry.text().to_string()));
+                                            },
+                                            connect_activate => Msg::SearchActivate,
+                                            connect_stop_search => Msg::SetSearch(false),
+                                        },
+
+                                        gtk::Label {
+                                            #[watch]
+                                            set_label: &model.search_status,
+                                            set_xalign: 0.0,
+                                            set_wrap: true,
+                                            add_css_class: "dim-label",
+                                        },
+
+                                        gtk::Label {
+                                            #[watch]
+                                            set_label: search::empty_description(&model.search_query)
+                                                .unwrap_or(""),
+                                            #[watch]
+                                            set_visible: search::empty_description(&model.search_query)
+                                                .is_some(),
+                                            set_xalign: 0.0,
+                                            set_wrap: true,
+                                            add_css_class: "dim-label",
+                                        },
+
+                                        gtk::ScrolledWindow {
+                                            #[watch]
+                                            set_visible: !model.search_hits.is_empty(),
+                                            set_hexpand: true,
+                                            set_propagate_natural_height: true,
+                                            set_max_content_height: 360,
+                                            set_policy: (
+                                                gtk::PolicyType::Never,
+                                                gtk::PolicyType::Automatic,
+                                            ),
+
+                                            #[local_ref]
+                                            search_list -> gtk::ListBox {
+                                                set_selection_mode: gtk::SelectionMode::Single,
+                                                add_css_class: "boxed-list",
+                                                set_accessible_role: gtk::AccessibleRole::List,
+                                                connect_row_activated[sender] => move |_, row| {
+                                                    sender.input(Msg::OpenHit(row.index()));
+                                                }
+                                            }
                                         }
                                     }
+                                },
+
+                                gtk::Separator {
+                                    set_orientation: gtk::Orientation::Horizontal,
                                 }
                             }
-                        }
-                    }
-                } else {
-                    gtk::Box {
-                        set_orientation: gtk::Orientation::Horizontal,
+                        },
 
-                        gtk::ScrolledWindow {
-                            set_width_request: 200,
-                            set_propagate_natural_width: true,
-                            add_css_class: "sidebar",
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Horizontal,
 
-                            #[local_ref]
-                            book_list -> gtk::ListBox {
-                                set_selection_mode: gtk::SelectionMode::Single,
-                                add_css_class: "navigation-sidebar",
-                                set_accessible_role: gtk::AccessibleRole::List,
-                                connect_row_activated[sender] => move |_, row| {
-                                    let id = u8::try_from(row.index() + 1).unwrap_or(1);
-                                    sender.input(Msg::SelectBook(id));
-                                }
+                            gtk::ScrolledWindow {
+                                set_width_request: 200,
+                                set_propagate_natural_width: true,
+                                add_css_class: "sidebar",
+
+                                #[local_ref]
+                                book_list -> gtk::ListBox {
+                                    set_selection_mode: gtk::SelectionMode::Single,
+                                    add_css_class: "navigation-sidebar",
+                                    set_accessible_role: gtk::AccessibleRole::List,
+                                    connect_row_activated[sender] => move |_, row| {
+                                        let id = u8::try_from(row.index() + 1).unwrap_or(1);
+                                        sender.input(Msg::SelectBook(id));
+                                    }
+                                },
                             },
-                        },
 
-                        gtk::Separator {
-                            set_orientation: gtk::Orientation::Vertical,
-                        },
+                            gtk::Separator {
+                                set_orientation: gtk::Orientation::Vertical,
+                            },
 
-                        gtk::ScrolledWindow {
-                            set_hexpand: true,
-                            set_vexpand: true,
-                            set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+                            gtk::ScrolledWindow {
+                                set_hexpand: true,
+                                set_vexpand: true,
+                                set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
 
-                            #[local_ref]
-                            chapter_view -> gtk::TextView {
-                                set_buffer: Some(&model.buffer),
-                                set_editable: false,
-                                set_cursor_visible: false,
-                                set_wrap_mode: gtk::WrapMode::WordChar,
-                                set_left_margin: 28,
-                                set_right_margin: 28,
-                                set_top_margin: 20,
-                                set_bottom_margin: 24,
-                                set_pixels_above_lines: 1,
-                                set_pixels_below_lines: 1,
-                                set_has_tooltip: true,
-                                add_css_class: "chapter-view",
-                                set_accessible_role: gtk::AccessibleRole::Document,
+                                #[local_ref]
+                                chapter_view -> gtk::TextView {
+                                    set_buffer: Some(&model.buffer),
+                                    set_editable: false,
+                                    set_cursor_visible: false,
+                                    set_wrap_mode: gtk::WrapMode::WordChar,
+                                    set_left_margin: 28,
+                                    set_right_margin: 28,
+                                    set_top_margin: 20,
+                                    set_bottom_margin: 24,
+                                    set_pixels_above_lines: 1,
+                                    set_pixels_below_lines: 1,
+                                    set_has_tooltip: true,
+                                    add_css_class: "chapter-view",
+                                    set_accessible_role: gtk::AccessibleRole::Document,
+                                }
                             }
                         }
                     }
@@ -678,10 +707,7 @@ impl SimpleComponent for App {
                 }
                 self.search_open = open;
                 if open {
-                    self.title = "Search".into();
                     self.focus_search();
-                } else {
-                    self.refresh_chapter(false);
                 }
             }
             Msg::Search(query) => {
