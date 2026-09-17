@@ -55,13 +55,13 @@ impl From<State> for Ref {
 }
 
 impl State {
-    pub fn from_ref(r: Ref, font_size: i32, interlinear: bool, paragraphs: bool) -> Self {
+    pub fn from_ref(r: Ref, font_size: i32, paragraphs: bool) -> Self {
         Self {
             book: r.book,
             chapter: r.chapter,
             verse: r.verse,
             font_size,
-            interlinear,
+            interlinear: false,
             paragraphs,
         }
     }
