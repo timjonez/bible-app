@@ -62,6 +62,14 @@ pub struct ChapterLayout {
     pub apparatus: Vec<Span>,
     pub verse_body: Vec<(u8, i32)>,
     pub verse_start: Vec<(u8, i32)>,
+    /// Exclusive end of each verse (start of the next, or end of body/apparatus).
+    pub verse_end: Vec<(u8, i32)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayoutOpts {
+    pub interlinear: bool,
+    pub paragraphs: bool,
 }
 
 const NOTE_DAGGER: &str = "†";
@@ -255,13 +263,25 @@ pub fn layout_chapter(
     mhc_starts: &[u8],
     words: &[VerseWord],
     lemmas: &[(String, String)],
-    interlinear: bool,
+    opts: LayoutOpts,
 ) -> ChapterLayout {
     let mut layout = ChapterLayout::default();
+    let mut prev_had_extra = false;
     for v in verses {
         if !layout.text.is_empty() {
-            layout.text.push('\n');
-            layout.text.push('\n');
+            if opts.paragraphs {
+                if v.para_break {
+                    layout.text.push('\n');
+                    layout.text.push('\n');
+                } else if prev_had_extra {
+                    layout.text.push('\n');
+                } else {
+                    layout.text.push(' ');
+                }
+            } else {
+                layout.text.push('\n');
+                layout.text.push('\n');
+            }
         }
 
         let verse_start = char_len(&layout.text);
@@ -272,7 +292,7 @@ pub fn layout_chapter(
             end: char_len(&layout.text),
         });
         layout.text.push(' ');
-        if v.para_break {
+        if !opts.paragraphs && v.para_break {
             layout.text.push('¶');
             layout.text.push(' ');
         }
@@ -285,7 +305,7 @@ pub fn layout_chapter(
             .cloned()
             .collect();
         let (body, italics, word_spans, lemma_inserts) =
-            build_body(&stored_body, &verse_words, lemmas, interlinear);
+            build_body(&stored_body, &verse_words, lemmas, opts.interlinear);
         let phrases = tsk_notes
             .iter()
             .find(|(verse, _)| *verse == v.verse)
@@ -346,6 +366,8 @@ pub fn layout_chapter(
         }
         layout.verse_start.push((v.verse, verse_start));
         layout.verse_body.push((v.verse, body_start));
+        layout.verse_end.push((v.verse, char_len(&layout.text)));
+        prev_had_extra = false;
     }
     layout
 }
@@ -960,6 +982,24 @@ mod tests {
         }
     }
 
+    fn verse_opts() -> LayoutOpts {
+        LayoutOpts::default()
+    }
+
+    fn para_opts() -> LayoutOpts {
+        LayoutOpts {
+            paragraphs: true,
+            ..LayoutOpts::default()
+        }
+    }
+
+    fn inter_opts() -> LayoutOpts {
+        LayoutOpts {
+            interlinear: true,
+            ..LayoutOpts::default()
+        }
+    }
+
     fn slice(text: &str, span: Span) -> String {
         text.chars()
             .skip(span.start as usize)
@@ -978,7 +1018,7 @@ mod tests {
             verse(2, "Speak to the children", false),
             verse(7, "And they appointed Kedesh", true),
         ];
-        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert!(
             layout.text.contains("1 ¶ The LORD also spake"),
             "{}",
@@ -999,6 +1039,95 @@ mod tests {
             "non-para verse must not show a pilcrow: {}",
             layout.text
         );
+    }
+
+
+    #[test]
+    fn paragraphs_join_non_break_verses_with_a_space() {
+        let verses = vec![
+            verse(1, "The LORD also spake", false),
+            verse(2, "Speak to the children", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], para_opts());
+        assert!(
+            layout
+                .text
+                .contains("1 The LORD also spake 2 Speak to the children"),
+            "{}",
+            layout.text
+        );
+        assert!(
+            !layout.text.contains("spake\n\n2"),
+            "non-break verses must not use a blank line: {}",
+            layout.text
+        );
+        assert!(!layout.text.contains("\n\n"), "{}", layout.text);
+        assert_eq!(layout.verse_nums.len(), 2);
+        assert_eq!(layout.verse_start[0].1, layout.verse_nums[0].start);
+        assert_eq!(span_text(&layout.text, layout.verse_nums[0]), "1");
+        assert_eq!(span_text(&layout.text, layout.verse_nums[1]), "2");
+        let v1_end = layout.verse_end.iter().find(|(v, _)| *v == 1).unwrap().1;
+        let v2_start = layout.verse_start.iter().find(|(v, _)| *v == 2).unwrap().1;
+        assert!(v1_end <= v2_start);
+        let v1: String = layout
+            .text
+            .chars()
+            .skip(layout.verse_start[0].1 as usize)
+            .take((v1_end - layout.verse_start[0].1) as usize)
+            .collect();
+        assert!(v1.contains("The LORD also spake"), "{v1}");
+        assert!(!v1.contains("Speak to the children"), "{v1}");
+    }
+
+    #[test]
+    fn paragraphs_honor_para_break() {
+        let verses = vec![
+            verse(1, "The LORD also spake", true),
+            verse(2, "Speak to the children", false),
+            verse(7, "And they appointed Kedesh", true),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], para_opts());
+        assert!(
+            layout
+                .text
+                .contains("1 The LORD also spake 2 Speak to the children"),
+            "{}",
+            layout.text
+        );
+        assert!(
+            layout
+                .text
+                .contains("children\n\n7 And they appointed Kedesh"),
+            "para_break starts a new paragraph: {}",
+            layout.text
+        );
+        assert!(!layout.text.contains('¶'), "{}", layout.text);
+        assert_eq!(layout.verse_nums.len(), 3);
+        for (i, v) in verses.iter().enumerate() {
+            assert_eq!(layout.verse_start[i].0, v.verse);
+            assert_eq!(layout.verse_nums[i].start, layout.verse_start[i].1);
+            assert_eq!(
+                span_text(&layout.text, layout.verse_nums[i]),
+                format!("{}", v.verse)
+            );
+        }
+    }
+
+    #[test]
+    fn paragraphs_drop_pilcrow_verse_mode_keeps_it() {
+        let verses = vec![
+            verse(1, "The LORD also spake", true),
+            verse(2, "Speak to the children", false),
+        ];
+        let para = layout_chapter(&verses, &books(), &[], &[], &[], &[], para_opts());
+        let verse_mode = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        assert!(!para.text.contains('¶'), "{}", para.text);
+        assert!(
+            verse_mode.text.contains("1 ¶ The LORD also spake"),
+            "{}",
+            verse_mode.text
+        );
+        assert!(!verse_mode.text.contains("2 ¶"), "{}", verse_mode.text);
     }
 
     #[test]
@@ -1054,7 +1183,7 @@ God creates heaven and earth.
 * beginning. Proverbs 8:22–24 Proverbs 16:4 Mark 13:19 John 1:1–3 Hebrews 1:10 1 John 1:1
 * God. Exodus 20:11 Exodus 31:18 1 Chronicles 16:26",
         )];
-        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], verse_opts());
         assert_eq!(layout.tsk.len(), 2, "{}", layout.text);
         assert_eq!(layout.tsk[0].heading, "beginning");
         assert_eq!(layout.tsk[1].heading, "God");
@@ -1097,7 +1226,7 @@ God creates heaven and earth.
             6u8,
             "* Let there. Genesis 1:14 Job 26:7\n* firmament. Heb. expansion.",
         )];
-        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], verse_opts());
         assert_eq!(layout.tsk.len(), 1, "{}", layout.text);
         assert_eq!(layout.tsk[0].heading, "Let there");
         assert_eq!(
@@ -1125,7 +1254,7 @@ God creates heaven and earth.
             11u8,
             "* grass. Heb. tender grass. fruit. Genesis 1:29 Genesis 2:9",
         )];
-        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], verse_opts());
         assert_eq!(layout.tsk.len(), 1, "{}", layout.text);
         assert_eq!(layout.tsk[0].heading, "fruit");
         assert_eq!(before(&layout.text, layout.tsk[0].span.start, 5), "fruit");
@@ -1140,7 +1269,7 @@ God creates heaven and earth.
     fn tsk_unmatched_heading_does_not_mark_verse_number() {
         let verses = vec![verse(1, "In the beginning God created", true)];
         let tsk = [(1u8, "* xyzzy. Genesis 1:1 Exodus 20:11")];
-        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &tsk, &[], &[], &[], verse_opts());
         assert!(layout.tsk.is_empty(), "{}", layout.text);
         assert_eq!(span_text(&layout.text, layout.verse_nums[0]), "1");
         assert!(!layout.text.contains("20:11"), "{}", layout.text);
@@ -1189,7 +1318,7 @@ God creates heaven and earth.
             verse(2, "Speak to the children", false),
             verse(3, "Appoint cities", false),
         ];
-        let layout = layout_chapter(&verses, &books(), &[], &[2], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &[], &[2], &[], &[], verse_opts());
         assert!(
             !layout.mhc.iter().any(|m| m.verse == 1),
             "verse 1 is before the MHC start"
@@ -1236,13 +1365,13 @@ God creates heaven and earth.
             "MHC-only verses must not grow an apparatus line: {}",
             layout.text
         );
-        let none = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        let none = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert!(none.mhc.is_empty());
         assert!(!none.text.contains("MHC"));
         assert!(!none.text.contains('\u{2020}'));
 
         let tsk = [(2u8, "* Speak. Exodus 21:1")];
-        let with_tsk = layout_chapter(&verses, &books(), &tsk, &[2], &[], &[], false);
+        let with_tsk = layout_chapter(&verses, &books(), &tsk, &[2], &[], &[], verse_opts());
         let mark = with_tsk.mhc.iter().find(|m| m.verse == 2).unwrap();
         assert_eq!(slice(&with_tsk.text, mark.span), "M");
         assert!(
@@ -1267,7 +1396,7 @@ God creates heaven and earth.
         assert_eq!(notes, vec!["the light from...: Heb. between the light"]);
 
         let verses = vec![verse(4, stored, true)];
-        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert!(
             !layout.text.contains('{'),
             "braces must not appear in the reader: {}",
@@ -1301,7 +1430,7 @@ God creates heaven and earth.
         let stored =
             "And God said, Let there be a firmament in the midst of the waters. {firmament: Heb. expansion}";
         let verses = vec![verse(6, stored, true)];
-        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert_eq!(layout.notes.len(), 1);
         assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
         assert_eq!(layout.notes[0].text, "Heb. expansion");
@@ -1322,7 +1451,7 @@ God creates heaven and earth.
     fn unmatched_note_dagger_sits_at_end_of_body() {
         let stored = "In the beginning God created. {no-such-heading: Heb. foo}";
         let verses = vec![verse(1, stored, true)];
-        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert_eq!(layout.notes.len(), 1);
         assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
         assert_eq!(layout.notes[0].text, "Heb. foo");
@@ -1352,7 +1481,7 @@ God creates heaven and earth.
         assert_eq!(notes, vec!["moving: or, creeping", "creature: Heb. soul"]);
 
         let verses = vec![verse(20, stored, true)];
-        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert_eq!(layout.notes.len(), 2, "{}", layout.text);
         assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
         assert_eq!(slice(&layout.text, layout.notes[1].span), "†");
@@ -1379,7 +1508,7 @@ God creates heaven and earth.
             &[],
             &[w],
             &[("H7225".into(), "re'shiyth".into())],
-            true,
+            inter_opts(),
         );
         assert!(
             layout.text.contains("beginning (re'shiyth)"),
@@ -1426,7 +1555,7 @@ God creates heaven and earth.
             &[],
             &[w],
             &[("H7225".into(), "re'shiyth".into())],
-            true,
+            inter_opts(),
         );
         assert!(
             layout.text.contains("beginninga (re'shiyth)")

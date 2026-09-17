@@ -41,6 +41,7 @@ pub struct App {
     layout: ChapterLayout,
     font_size: i32,
     interlinear: bool,
+    paragraphs: bool,
     font_provider: gtk::CssProvider,
     xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
 }
@@ -73,6 +74,7 @@ pub enum Msg {
     FontSmaller,
     FontLarger,
     SetInterlinear(bool),
+    SetParagraphs(bool),
 }
 
 #[relm4::component(pub)]
@@ -168,6 +170,18 @@ impl SimpleComponent for App {
                         set_sensitive: model.error.is_none() && !model.search_open,
                         connect_clicked[sender] => move |btn| {
                             sender.input(Msg::SetInterlinear(btn.is_active()));
+                        }
+                    },
+                    pack_end = &gtk::ToggleButton {
+                        set_label: "Paragraphs",
+                        set_tooltip_text: Some("Flow consecutive verses as prose"),
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_active: model.paragraphs,
+                        #[watch]
+                        set_sensitive: model.error.is_none() && !model.search_open,
+                        connect_clicked[sender] => move |btn| {
+                            sender.input(Msg::SetParagraphs(btn.is_active()));
                         }
                     },
                     pack_end = &gtk::Button {
@@ -350,7 +364,8 @@ impl SimpleComponent for App {
         buffer.tag_table().add(&italic);
         let verse_num = gtk::TextTag::new(Some("verse-num"));
         verse_num.set_weight(700);
-        verse_num.set_scale(0.9);
+        verse_num.set_scale(0.75);
+        verse_num.set_rise(gtk::pango::SCALE * 4);
         verse_num.set_foreground(Some("#9a9996"));
         buffer.tag_table().add(&verse_num);
         let note = gtk::TextTag::new(Some("note"));
@@ -409,10 +424,16 @@ impl SimpleComponent for App {
             );
         }
 
-        let (conn, books, at, font_size, interlinear, error) = match load_library() {
-            Ok((conn, books, at, font_size, interlinear)) => {
-                (Some(conn), books, at, font_size, interlinear, None)
-            }
+        let (conn, books, at, font_size, interlinear, paragraphs, error) = match load_library() {
+            Ok((conn, books, at, font_size, interlinear, paragraphs)) => (
+                Some(conn),
+                books,
+                at,
+                font_size,
+                interlinear,
+                paragraphs,
+                None,
+            ),
             Err(e) => (
                 None,
                 Vec::new(),
@@ -423,6 +444,7 @@ impl SimpleComponent for App {
                 },
                 layout::DEFAULT_FONT,
                 false,
+                true,
                 Some(e),
             ),
         };
@@ -451,6 +473,7 @@ impl SimpleComponent for App {
             layout: ChapterLayout::default(),
             font_size,
             interlinear,
+            paragraphs,
             font_provider,
             xref_tips: Rc::new(RefCell::new(Vec::new())),
         };
@@ -822,6 +845,16 @@ impl SimpleComponent for App {
                     self.refresh_chapter(false);
                 }
             }
+            Msg::SetParagraphs(on) => {
+                if self.paragraphs == on {
+                    return;
+                }
+                self.paragraphs = on;
+                self.save_state();
+                if !self.search_open {
+                    self.refresh_chapter(false);
+                }
+            }
         }
     }
 }
@@ -875,6 +908,7 @@ impl App {
             self.at,
             self.font_size,
             self.interlinear,
+            self.paragraphs,
         ));
     }
 
@@ -981,7 +1015,10 @@ impl App {
             &mhc_starts,
             &words,
             &lemmas,
-            self.interlinear,
+            layout::LayoutOpts {
+                interlinear: self.interlinear,
+                paragraphs: self.paragraphs,
+            },
         );
         self.strongs_popover.popdown();
         self.tsk_popover.popdown();
@@ -1130,14 +1167,20 @@ impl App {
     }
 
     fn highlight_verse(&self, verse: u8) {
-        let Some((_, offset)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
+        let Some((_, start)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
             return;
         };
-        let match_start = self.buffer.iter_at_offset(*offset);
-        let mut match_end = match_start;
-        match_end.forward_to_line_end();
+        let end = self
+            .layout
+            .verse_end
+            .iter()
+            .find(|(v, _)| *v == verse)
+            .map(|(_, e)| *e)
+            .unwrap_or(*start);
+        let match_start = self.buffer.iter_at_offset(*start);
+        let match_end = self.buffer.iter_at_offset(end);
         self.buffer.select_range(&match_start, &match_end);
-        let offset = *offset;
+        let offset = *start;
         let view = self.chapter_view.clone();
         let buffer = self.buffer.clone();
         glib::idle_add_local_once(move || {
@@ -1168,7 +1211,9 @@ impl App {
     }
 }
 
-fn load_library() -> Result<(Connection, Vec<Book>, Ref, i32, bool), String> {
+type LoadedLibrary = (Connection, Vec<Book>, Ref, i32, bool, bool);
+
+fn load_library() -> Result<LoadedLibrary, String> {
     let path = config::locate_database()?;
     let conn = bible_app_db::open(&path)
         .map_err(|e| format!("Could not open {}:\n{e}", path.display()))?;
@@ -1179,6 +1224,7 @@ fn load_library() -> Result<(Connection, Vec<Book>, Ref, i32, bool), String> {
     let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
     let interlinear = state.interlinear;
+    let paragraphs = state.paragraphs;
     let mut at = Ref::from(state);
     if bible_app_db::chapter(&conn, at.book, at.chapter)
         .map(|v| v.is_empty())
@@ -1190,7 +1236,7 @@ fn load_library() -> Result<(Connection, Vec<Book>, Ref, i32, bool), String> {
             verse: 1,
         };
     }
-    Ok((conn, books, at, font_size, interlinear))
+    Ok((conn, books, at, font_size, interlinear, paragraphs))
 }
 
 fn chapter_lemmas(conn: &Connection, words: &[bible_app_db::VerseWord]) -> Vec<(String, String)> {

@@ -13,6 +13,7 @@ cargo run -p bible-app
 
 Override the database path with `BIBLE_APP_DB` if you already have an unpacked copy.
 
+- Paragraphs (default) flows consecutive verses as prose; toggle off for one verse per block. Alt+Left / Alt+Right still change chapter.
 - Alt+Left / Alt+Right: previous / next chapter
 - Back / Forward: jump through navigation history
 - Ctrl+L then type `John 3:16` and Enter
@@ -27,7 +28,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - TSK opens the Treasury of Scripture Knowledge; click a cross-reference to jump
 - Click a tagged KJV word for its Strong’s number, lemma, and definition
 - Dict opens Easton and the other dictionaries and topics; type a headword and click a result
-- Last position, font size, and interlinear are stored in `~/.config/bible-app/state.toml`
+- Last position, font size, interlinear, and paragraphs are stored in `~/.config/bible-app/state.toml`
 
 The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, the public-domain dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set).
 
