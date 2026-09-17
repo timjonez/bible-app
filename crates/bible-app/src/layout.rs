@@ -43,6 +43,12 @@ pub struct WordSpan {
     pub codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteMark {
+    pub span: Span,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChapterLayout {
     pub text: String,
@@ -52,11 +58,14 @@ pub struct ChapterLayout {
     pub tsk: Vec<TskMark>,
     pub words: Vec<WordSpan>,
     pub verse_nums: Vec<Span>,
-    pub notes: Vec<Span>,
+    pub notes: Vec<NoteMark>,
     pub apparatus: Vec<Span>,
     pub verse_body: Vec<(u8, i32)>,
     pub verse_start: Vec<(u8, i32)>,
 }
+
+const NOTE_DAGGER: &str = "†";
+const MHC_MARK: &str = "M";
 
 /// Pull trailing `{...}` translator notes off a stored KJV verse.
 pub fn split_notes(text: &str) -> (String, Vec<String>) {
@@ -275,15 +284,40 @@ pub fn layout_chapter(
             .filter(|w| w.verse == v.verse)
             .cloned()
             .collect();
-        let (body, italics, word_spans) =
+        let (body, italics, word_spans, lemma_inserts) =
             build_body(&stored_body, &verse_words, lemmas, interlinear);
         let phrases = tsk_notes
             .iter()
             .find(|(verse, _)| *verse == v.verse)
             .map(|(_, text)| tsk_parse::parse_tsk_phrases(text, books))
             .unwrap_or_default();
-        let (body, italics, word_spans, tsk_marks) =
+        let (body, italics, word_spans, tsk_marks, tsk_inserts) =
             apply_tsk_marks(body, italics, word_spans, &phrases, v.verse);
+        let (stripped, _) = strip_supplied(&stored_body);
+        let note_plan: Vec<(i32, String)> = plan_note_inserts(&stripped, &note_texts)
+            .into_iter()
+            .map(|(at, text)| {
+                let at = shift_by_inserts(at, &lemma_inserts);
+                (shift_by_inserts(at, &tsk_inserts), text)
+            })
+            .collect();
+        let has_mhc = mhc_starts.contains(&v.verse);
+        let mut mark_inserts: Vec<(i32, i32)> = note_plan
+            .iter()
+            .map(|(at, _)| (*at, char_len(NOTE_DAGGER)))
+            .collect();
+        if has_mhc {
+            mark_inserts.push((char_len(&body), char_len(MHC_MARK)));
+        }
+        let (body, italics, word_spans, note_marks, mhc_span) =
+            insert_inline_marks(body, italics, word_spans, note_plan, has_mhc);
+        let tsk_marks: Vec<TskMark> = tsk_marks
+            .into_iter()
+            .map(|mut mark| {
+                mark.span = shift_span_inserts(mark.span, &mark_inserts);
+                mark
+            })
+            .collect();
         layout.text.push_str(&body);
 
         for ital in italics {
@@ -300,39 +334,29 @@ pub fn layout_chapter(
             mark.span = shift_span(mark.span, body_start);
             layout.tsk.push(mark);
         }
-        layout.verse_start.push((v.verse, verse_start));
-        layout.verse_body.push((v.verse, body_start));
-
-        if !note_texts.is_empty() {
-            layout.text.push('\n');
-            let s = char_len(&layout.text);
-            layout.text.push_str(&note_texts.join("  "));
-            layout.notes.push(Span {
-                start: s,
-                end: char_len(&layout.text),
+        for mut mark in note_marks {
+            mark.span = shift_span(mark.span, body_start);
+            layout.notes.push(mark);
+        }
+        if let Some(span) = mhc_span {
+            layout.mhc.push(MhcMark {
+                span: shift_span(span, body_start),
+                verse: v.verse,
             });
         }
-
-        if !mhc_starts.contains(&v.verse) {
-            continue;
-        }
-        layout.text.push('\n');
-        let line_start = char_len(&layout.text);
-        layout.text.push_str("MHC");
-        layout.mhc.push(MhcMark {
-            span: Span {
-                start: line_start,
-                end: char_len(&layout.text),
-            },
-            verse: v.verse,
-        });
-        layout.apparatus.push(Span {
-            start: line_start,
-            end: char_len(&layout.text),
-        });
+        layout.verse_start.push((v.verse, verse_start));
+        layout.verse_body.push((v.verse, body_start));
     }
     layout
 }
+
+type TskApplied = (
+    String,
+    Vec<Span>,
+    Vec<WordSpan>,
+    Vec<TskMark>,
+    Vec<(i32, i32)>,
+);
 
 fn apply_tsk_marks(
     body: String,
@@ -340,9 +364,9 @@ fn apply_tsk_marks(
     words: Vec<WordSpan>,
     phrases: &[TskPhrase],
     verse: u8,
-) -> (String, Vec<Span>, Vec<WordSpan>, Vec<TskMark>) {
+) -> TskApplied {
     if phrases.is_empty() {
-        return (body, italics, words, Vec::new());
+        return (body, italics, words, Vec::new(), Vec::new());
     }
     let forbidden: Vec<Span> = words.iter().filter_map(|w| w.lemma_span).collect();
     let mut claimed = Vec::new();
@@ -355,7 +379,7 @@ fn apply_tsk_marks(
         }
     }
     if hits.is_empty() {
-        return (body, italics, words, Vec::new());
+        return (body, italics, words, Vec::new(), Vec::new());
     }
     hits.sort_by_key(|(span, _, _)| span.start);
 
@@ -400,7 +424,7 @@ fn apply_tsk_marks(
             w
         })
         .collect();
-    (out, italics, words, marks)
+    (out, italics, words, marks, inserts)
 }
 
 fn find_heading(body: &str, heading: &str, claimed: &[Span], forbidden: &[Span]) -> Option<Span> {
@@ -472,12 +496,14 @@ fn shift_span_around_inserts(span: Span, inserts: &[(i32, i32)]) -> Span {
     Span { start, end }
 }
 
+type BuiltBody = (String, Vec<Span>, Vec<WordSpan>, Vec<(i32, i32)>);
+
 fn build_body(
     stored: &str,
     words: &[VerseWord],
     lemmas: &[(String, String)],
     interlinear: bool,
-) -> (String, Vec<Span>, Vec<WordSpan>) {
+) -> BuiltBody {
     let (stripped, italics) = strip_supplied(stored);
     let mut word_spans: Vec<WordSpan> = Vec::new();
     for w in words {
@@ -497,7 +523,7 @@ fn build_body(
     }
     word_spans.sort_by_key(|w| w.span.start);
     if !interlinear {
-        return (stripped, italics, word_spans);
+        return (stripped, italics, word_spans, Vec::new());
     }
 
     let mut out = String::new();
@@ -542,7 +568,240 @@ fn build_body(
             (e > s).then_some(Span { start: s, end: e })
         })
         .collect();
-    (out, new_italics, new_words)
+    (out, new_italics, new_words, inserts)
+}
+
+fn plan_note_inserts(body: &str, notes: &[String]) -> Vec<(i32, String)> {
+    let parsed: Vec<(String, bool, String)> = notes.iter().map(|n| parse_note(n)).collect();
+    let mut cores = vec![None; parsed.len()];
+    let mut used = Vec::new();
+    for (i, (heading, _, _)) in parsed.iter().enumerate() {
+        if heading.is_empty() {
+            continue;
+        }
+        if let Some(span) = find_phrase(body, heading, &used) {
+            cores[i] = Some(span);
+            used.push(span);
+        }
+    }
+    let body_end = char_len(body);
+    parsed
+        .iter()
+        .enumerate()
+        .map(|(i, (_, ellipsis, expl))| {
+            let at = match cores[i] {
+                Some(span) if *ellipsis => {
+                    let others: Vec<Span> = cores
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .filter_map(|(_, s)| *s)
+                        .collect();
+                    extend_phrase(body, span.end, &others)
+                }
+                Some(span) => span.end,
+                None => body_end,
+            };
+            (at, expl.clone())
+        })
+        .collect()
+}
+
+fn parse_note(note: &str) -> (String, bool, String) {
+    let Some((raw_head, raw_expl)) = note.split_once(':') else {
+        return (String::new(), false, note.trim().to_string());
+    };
+    let (heading, ellipsis) = strip_trailing_ellipsis(raw_head.trim());
+    let expl = raw_expl.trim();
+    let text = if expl.is_empty() {
+        note.trim().to_string()
+    } else {
+        expl.to_string()
+    };
+    (heading, ellipsis, text)
+}
+
+fn strip_trailing_ellipsis(heading: &str) -> (String, bool) {
+    for suffix in ["...", "…"] {
+        if let Some(stripped) = heading.strip_suffix(suffix) {
+            return (stripped.trim_end().to_string(), true);
+        }
+    }
+    (heading.to_string(), false)
+}
+
+fn find_phrase(body: &str, phrase: &str, used: &[Span]) -> Option<Span> {
+    let b: Vec<char> = body.chars().collect();
+    let p: Vec<char> = phrase.chars().collect();
+    if p.is_empty() || p.len() > b.len() {
+        return None;
+    }
+    let last = b.len() - p.len();
+    for start in 0..=last {
+        if !chars_eq_ci(&b[start..start + p.len()], &p) {
+            continue;
+        }
+        if !has_word_bounds(&b, start, start + p.len()) {
+            continue;
+        }
+        let span = Span {
+            start: start as i32,
+            end: (start + p.len()) as i32,
+        };
+        if used.iter().any(|u| spans_overlap(*u, span)) {
+            continue;
+        }
+        return Some(span);
+    }
+    None
+}
+
+fn chars_eq_ci(a: &[char], b: &[char]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
+fn has_word_bounds(body: &[char], start: usize, end: usize) -> bool {
+    let left_ok = start == 0 || !is_word_char(body[start - 1]) || !is_word_char(body[start]);
+    let right_ok = end == body.len() || !is_word_char(body[end]) || !is_word_char(body[end - 1]);
+    left_ok && right_ok
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '\''
+}
+
+fn spans_overlap(a: Span, b: Span) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+fn extend_phrase(body: &str, match_end: i32, others: &[Span]) -> i32 {
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = match_end.max(0) as usize;
+    while i < chars.len() {
+        if is_phrase_end(chars[i]) {
+            break;
+        }
+        let off = i as i32;
+        if others.iter().any(|s| off >= s.start && off < s.end) {
+            return match_end;
+        }
+        i += 1;
+    }
+    while i > match_end as usize && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i as i32
+}
+
+fn is_phrase_end(c: char) -> bool {
+    matches!(c, ',' | ';' | '.' | ':' | '?' | '!')
+}
+
+fn insert_inline_marks(
+    body: String,
+    italics: Vec<Span>,
+    words: Vec<WordSpan>,
+    notes: Vec<(i32, String)>,
+    mhc: bool,
+) -> (
+    String,
+    Vec<Span>,
+    Vec<WordSpan>,
+    Vec<NoteMark>,
+    Option<Span>,
+) {
+    struct Pending {
+        at: i32,
+        glyph: &'static str,
+        note: Option<String>,
+    }
+    let mut pending: Vec<Pending> = notes
+        .into_iter()
+        .map(|(at, text)| Pending {
+            at,
+            glyph: NOTE_DAGGER,
+            note: Some(text),
+        })
+        .collect();
+    if mhc {
+        pending.push(Pending {
+            at: char_len(&body),
+            glyph: MHC_MARK,
+            note: None,
+        });
+    }
+    if pending.is_empty() {
+        return (body, italics, words, Vec::new(), None);
+    }
+
+    let insert_lens: Vec<(i32, i32)> = pending.iter().map(|p| (p.at, char_len(p.glyph))).collect();
+
+    let mut out = body;
+    let mut order: Vec<usize> = (0..pending.len()).collect();
+    order.sort_by(|&a, &b| pending[b].at.cmp(&pending[a].at).then(b.cmp(&a)));
+    for i in order {
+        insert_at(&mut out, pending[i].at, pending[i].glyph);
+    }
+
+    let italics = shift_spans(italics, &insert_lens);
+    let words = words
+        .into_iter()
+        .map(|mut w| {
+            w.span = shift_span_inserts(w.span, &insert_lens);
+            if let Some(ls) = w.lemma_span.as_mut() {
+                *ls = shift_span_inserts(*ls, &insert_lens);
+            }
+            w
+        })
+        .collect();
+
+    let mut note_marks = Vec::new();
+    let mut mhc_span = None;
+    for (idx, p) in pending.iter().enumerate() {
+        let start = p.at
+            + insert_lens
+                .iter()
+                .enumerate()
+                .filter(|(j, (at, _))| *at < p.at || (*at == p.at && *j < idx))
+                .map(|(_, (_, n))| *n)
+                .sum::<i32>();
+        let span = Span {
+            start,
+            end: start + char_len(p.glyph),
+        };
+        if let Some(text) = &p.note {
+            note_marks.push(NoteMark {
+                span,
+                text: text.clone(),
+            });
+        } else {
+            mhc_span = Some(span);
+        }
+    }
+    (out, italics, words, note_marks, mhc_span)
+}
+
+fn shift_spans(spans: Vec<Span>, inserts: &[(i32, i32)]) -> Vec<Span> {
+    spans
+        .into_iter()
+        .filter_map(|span| {
+            let shifted = shift_span_inserts(span, inserts);
+            (shifted.end > shifted.start).then_some(shifted)
+        })
+        .collect()
+}
+
+fn shift_span_inserts(span: Span, inserts: &[(i32, i32)]) -> Span {
+    Span {
+        start: shift_by_inserts(span.start, inserts),
+        end: shift_by_inserts(span.end, inserts),
+    }
+}
+
+fn insert_at(s: &mut String, at: i32, text: &str) {
+    let at = at.max(0) as usize;
+    let byte = s.char_indices().nth(at).map(|(i, _)| i).unwrap_or(s.len());
+    s.insert_str(byte, text);
 }
 
 fn lemma_of(codes: &[String], lemmas: &[(String, String)]) -> Option<String> {
@@ -699,6 +958,17 @@ mod tests {
             end,
             strongs: strongs.into(),
         }
+    }
+
+    fn slice(text: &str, span: Span) -> String {
+        text.chars()
+            .skip(span.start as usize)
+            .take((span.end - span.start).max(0) as usize)
+            .collect()
+    }
+
+    fn before_mark(text: &str, span: Span) -> String {
+        text.chars().take(span.start as usize).collect()
     }
 
     #[test]
@@ -930,50 +1200,170 @@ God creates heaven and earth.
             "inline MHC is only on the comment start: {}",
             layout.text
         );
-        assert!(layout.text.contains("MHC"));
+        assert!(
+            !layout.text.contains("MHC"),
+            "MHC must not sit on its own apparatus line: {}",
+            layout.text
+        );
+        let mark = layout.mhc.iter().find(|m| m.verse == 2).unwrap();
+        assert_eq!(slice(&layout.text, mark.span), "M");
+        let body = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
+        assert!(
+            mark.span.start >= body,
+            "M must sit on the reading line, not the verse number"
+        );
+        assert!(
+            !layout
+                .verse_nums
+                .iter()
+                .any(|n| n.contains(mark.span.start)),
+            "M must not sit on a verse number"
+        );
+        let v2_line_end = layout
+            .text
+            .chars()
+            .skip(body as usize)
+            .position(|c| c == '\n')
+            .map(|n| body + n as i32)
+            .unwrap_or(char_len(&layout.text));
+        assert!(
+            mark.span.end <= v2_line_end,
+            "M belongs at the end of verse 2's body: {}",
+            layout.text
+        );
+        assert!(
+            layout.apparatus.is_empty(),
+            "MHC-only verses must not grow an apparatus line: {}",
+            layout.text
+        );
         let none = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
         assert!(none.mhc.is_empty());
         assert!(!none.text.contains("MHC"));
+        assert!(!none.text.contains('\u{2020}'));
+
+        let tsk = [(2u8, "* Speak. Exodus 21:1")];
+        let with_tsk = layout_chapter(&verses, &books(), &tsk, &[2], &[], &[], false);
+        let mark = with_tsk.mhc.iter().find(|m| m.verse == 2).unwrap();
+        assert_eq!(slice(&with_tsk.text, mark.span), "M");
+        assert!(
+            !with_tsk.text.contains("MHC"),
+            "TSK superscripts must not glue an MHC token: {}",
+            with_tsk.text
+        );
+        assert!(with_tsk.apparatus.is_empty(), "{}", with_tsk.text);
+        assert!(
+            with_tsk.tsk.iter().any(|m| m.verse == 2),
+            "TSK letter still lands on the reading line: {}",
+            with_tsk.text
+        );
     }
 
     #[test]
-    fn translator_notes_leave_the_verse_body() {
+    fn ellipsis_note_gets_a_dagger_on_the_phrase() {
         let stored =
             "And God divided the light from the darkness. {the light from...: Heb. between the light}";
         let (body, notes) = split_notes(stored);
         assert_eq!(body, "And God divided the light from the darkness.");
         assert_eq!(notes, vec!["the light from...: Heb. between the light"]);
 
-        let multi = "Let fowl fly. {moving: or, creeping} {creature: Heb. soul}";
-        let (body, notes) = split_notes(multi);
-        assert_eq!(body, "Let fowl fly.");
-        assert_eq!(notes, vec!["moving: or, creeping", "creature: Heb. soul"]);
-
-        let verses = vec![verse(6, stored, true)];
+        let verses = vec![verse(4, stored, true)];
         let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
         assert!(
             !layout.text.contains('{'),
             "braces must not appear in the reader: {}",
             layout.text
         );
-        assert!(layout
-            .text
-            .contains("And God divided the light from the darkness."));
-        assert!(layout
-            .text
-            .contains("the light from...: Heb. between the light"));
-        assert_eq!(layout.notes.len(), 1);
-        let shown: String = layout
-            .text
-            .chars()
-            .skip(layout.notes[0].start as usize)
-            .take((layout.notes[0].end - layout.notes[0].start) as usize)
-            .collect();
-        assert_eq!(shown, "the light from...: Heb. between the light");
         assert!(
-            layout.notes[0].start > layout.verse_body[0].1,
-            "note sits under the verse"
+            !layout.text.contains("Heb. between the light"),
+            "note sentence must not sit under the verse: {}",
+            layout.text
         );
+        assert_eq!(layout.notes.len(), 1);
+        assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
+        assert_eq!(layout.notes[0].text, "Heb. between the light");
+        let before = before_mark(&layout.text, layout.notes[0].span);
+        assert!(
+            before.ends_with("the light from the darkness") || before.ends_with("the light from"),
+            "dagger should follow the matched prefix: {before}"
+        );
+        assert!(
+            layout.notes[0].span.start >= layout.verse_body[0].1,
+            "dagger is on the reading line"
+        );
+        assert!(!layout
+            .verse_nums
+            .iter()
+            .any(|n| n.contains(layout.notes[0].span.start)));
+    }
+
+    #[test]
+    fn exact_note_heading_gets_a_dagger_after_the_word() {
+        let stored =
+            "And God said, Let there be a firmament in the midst of the waters. {firmament: Heb. expansion}";
+        let verses = vec![verse(6, stored, true)];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        assert_eq!(layout.notes.len(), 1);
+        assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
+        assert_eq!(layout.notes[0].text, "Heb. expansion");
+        assert!(
+            before_mark(&layout.text, layout.notes[0].span).ends_with("firmament"),
+            "{}",
+            layout.text
+        );
+        assert!(
+            !layout.text.contains("Heb. expansion"),
+            "explanation stays off the chapter body: {}",
+            layout.text
+        );
+        assert!(!layout.text.contains('{'));
+    }
+
+    #[test]
+    fn unmatched_note_dagger_sits_at_end_of_body() {
+        let stored = "In the beginning God created. {no-such-heading: Heb. foo}";
+        let verses = vec![verse(1, stored, true)];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        assert_eq!(layout.notes.len(), 1);
+        assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
+        assert_eq!(layout.notes[0].text, "Heb. foo");
+        assert!(
+            before_mark(&layout.text, layout.notes[0].span).ends_with("created."),
+            "unmatched dagger belongs at the end of the body: {}",
+            layout.text
+        );
+        assert!(
+            !layout
+                .verse_nums
+                .iter()
+                .any(|n| n.contains(layout.notes[0].span.start)),
+            "unmatched dagger must not sit on the verse number: {}",
+            layout.text
+        );
+        assert!(layout.notes[0].span.start >= layout.verse_body[0].1);
+        assert!(!layout.text.contains("Heb. foo"));
+    }
+
+    #[test]
+    fn two_notes_make_two_daggers() {
+        let stored =
+            "the moving creature that hath life. {moving: or, creeping} {creature: Heb. soul}";
+        let (body, notes) = split_notes(stored);
+        assert_eq!(body, "the moving creature that hath life.");
+        assert_eq!(notes, vec!["moving: or, creeping", "creature: Heb. soul"]);
+
+        let verses = vec![verse(20, stored, true)];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], false);
+        assert_eq!(layout.notes.len(), 2, "{}", layout.text);
+        assert_eq!(slice(&layout.text, layout.notes[0].span), "†");
+        assert_eq!(slice(&layout.text, layout.notes[1].span), "†");
+        assert_eq!(layout.notes[0].text, "or, creeping");
+        assert_eq!(layout.notes[1].text, "Heb. soul");
+        assert!(layout.notes[0].span.start < layout.notes[1].span.start);
+        assert!(before_mark(&layout.text, layout.notes[0].span).ends_with("moving"));
+        assert!(before_mark(&layout.text, layout.notes[1].span).ends_with("creature"));
+        assert!(!layout.text.contains("or, creeping"));
+        assert!(!layout.text.contains("Heb. soul"));
+        assert!(!layout.text.contains('{'));
     }
 
     #[test]

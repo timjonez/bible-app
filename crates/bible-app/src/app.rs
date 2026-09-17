@@ -357,8 +357,12 @@ impl SimpleComponent for App {
         note.set_style(gtk::pango::Style::Italic);
         note.set_foreground(Some("#77767b"));
         note.set_scale(0.85);
-        note.set_left_margin(44);
         buffer.tag_table().add(&note);
+        let note_mark = gtk::TextTag::new(Some("note-mark"));
+        note_mark.set_foreground(Some("#77767b"));
+        note_mark.set_scale(0.7);
+        note_mark.set_rise(4 * gtk::pango::SCALE);
+        buffer.tag_table().add(&note_mark);
         let apparatus = gtk::TextTag::new(Some("apparatus"));
         apparatus.set_foreground(Some("#9a9996"));
         apparatus.set_scale(0.8);
@@ -370,10 +374,11 @@ impl SimpleComponent for App {
         xref.set_foreground(Some("#1c71d8"));
         xref.set_scale(0.8);
         buffer.tag_table().add(&xref);
-        let mhc_tag = gtk::TextTag::new(Some("mhc"));
+        let mhc_tag = gtk::TextTag::new(Some("mhc-sup"));
         mhc_tag.set_weight(700);
         mhc_tag.set_foreground(Some("#1c71d8"));
-        mhc_tag.set_scale(0.8);
+        mhc_tag.set_scale(0.7);
+        mhc_tag.set_rise(4 * gtk::pango::SCALE);
         buffer.tag_table().add(&mhc_tag);
         let tsk_sup = gtk::TextTag::new(Some("tsk-sup"));
         tsk_sup.set_foreground(Some("#1c71d8"));
@@ -392,6 +397,7 @@ impl SimpleComponent for App {
         xref.set_priority(2);
         mhc_tag.set_priority(2);
         tsk_sup.set_priority(2);
+        note_mark.set_priority(2);
         let strongs_popover = strongs::create(&chapter_view);
         let tsk_popover = tsk::create_popover(&chapter_view);
         let font_provider = gtk::CssProvider::new();
@@ -727,6 +733,10 @@ impl SimpleComponent for App {
                 } else if let Some(verse) = self.mhc_at(offset) {
                     self.go(Ref { verse, ..self.at }, false);
                     self.ensure_mhc(&sender);
+                } else if let Some((start, text)) =
+                    self.note_at(offset).map(|n| (n.span.start, n.text.clone()))
+                {
+                    strongs::present_text(&self.strongs_popover, &self.chapter_view, start, &text);
                 } else {
                     self.open_strongs(offset);
                 }
@@ -895,6 +905,10 @@ impl App {
         self.layout.tsk.iter().find(|m| m.span.contains(offset))
     }
 
+    fn note_at(&self, offset: i32) -> Option<&layout::NoteMark> {
+        self.layout.notes.iter().find(|n| n.span.contains(offset))
+    }
+
     fn ensure_mhc(&mut self, sender: &ComponentSender<Self>) {
         if self.mhc.is_none() && self.error.is_none() {
             let widgets = mhc::open(sender.input_sender().clone(), self.at, &self.books);
@@ -988,8 +1002,8 @@ impl App {
         for span in &self.layout.verse_nums {
             self.apply_tag("verse-num", *span);
         }
-        for span in &self.layout.notes {
-            self.apply_tag("note", *span);
+        for mark in &self.layout.notes {
+            self.apply_tag("note-mark", mark.span);
         }
         for span in &self.layout.apparatus {
             self.apply_tag("apparatus", *span);
@@ -1001,7 +1015,7 @@ impl App {
             self.apply_tag("xref", link.span);
         }
         for mark in &self.layout.mhc {
-            self.apply_tag("mhc", mark.span);
+            self.apply_tag("mhc-sup", mark.span);
         }
         for mark in &self.layout.tsk {
             self.apply_tag("tsk-sup", mark.span);
@@ -1065,6 +1079,9 @@ impl App {
         }
         for mark in &self.layout.mhc {
             tips.push((mark.span.start, mark.span.end, "Open Matthew Henry".into()));
+        }
+        for mark in &self.layout.notes {
+            tips.push((mark.span.start, mark.span.end, mark.text.clone()));
         }
         for word in &self.layout.words {
             tips.push((word.span.start, word.span.end, "Click for Strong's".into()));
