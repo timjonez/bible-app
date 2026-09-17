@@ -75,6 +75,7 @@ pub enum Msg {
     OpenStrongsCode(String),
     ClickWord(i32),
     OpenDict(String),
+    OpenDictWord { module: String, headword: String },
     DictClosed,
     DictSearch(String),
     DictOpen(i32),
@@ -907,21 +908,11 @@ impl SimpleComponent for App {
                 }
             }
             Msg::OpenDict(id) => {
-                if self.error.is_some() {
-                    return;
-                }
-                if self.dict.is_none() {
-                    let mut widgets = dict::open(sender.input_sender().clone());
-                    if let Some(conn) = &self.conn {
-                        dict::load_modules(&mut widgets, conn);
-                    }
-                    self.dict = Some(widgets);
-                }
-                if let Some(widgets) = &mut self.dict {
-                    dict::select_module(widgets, &id);
-                    widgets.window.present();
-                    widgets.search.grab_focus();
-                }
+                self.open_library(&id, None, &sender);
+            }
+            Msg::OpenDictWord { module, headword } => {
+                self.strongs_popover.popdown();
+                self.open_library(&module, Some(&headword), &sender);
             }
             Msg::DictClosed => {
                 self.dict = None;
@@ -1236,7 +1227,11 @@ impl App {
             tips.push((mark.span.start, mark.span.end, mark.text.clone()));
         }
         for word in &self.layout.words {
-            tips.push((word.span.start, word.span.end, "Click for Strong's".into()));
+            tips.push((
+                word.span.start,
+                word.span.end,
+                "Click for Strong's and dictionaries".into(),
+            ));
         }
         *self.xref_tips.borrow_mut() = tips;
     }
@@ -1276,7 +1271,12 @@ impl App {
             .iter()
             .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
             .collect();
-        if defs.is_empty() {
+        let mut surface = layout::token_at(&self.layout.text, offset);
+        if surface.is_empty() {
+            surface = layout::word_surface(&self.layout.text, word.span);
+        }
+        let dict = bible_app_db::lookup_clicked_word(conn, &surface).unwrap_or_default();
+        if defs.is_empty() && dict.is_empty() {
             return;
         }
         self.strongs_at = word.span.start;
@@ -1286,6 +1286,7 @@ impl App {
             &self.chapter_view,
             self.strongs_at,
             &defs,
+            &dict,
             sender.input_sender().clone(),
         );
     }
@@ -1301,8 +1302,35 @@ impl App {
             &self.chapter_view,
             self.strongs_at,
             &[def],
+            &bible_app_db::ClickedDict::default(),
             sender.input_sender().clone(),
         );
+    }
+
+    fn open_library(
+        &mut self,
+        module: &str,
+        headword: Option<&str>,
+        sender: &ComponentSender<Self>,
+    ) {
+        if self.error.is_some() {
+            return;
+        }
+        if self.dict.is_none() {
+            let mut widgets = dict::open(sender.input_sender().clone());
+            if let Some(conn) = &self.conn {
+                dict::load_modules(&mut widgets, conn);
+            }
+            self.dict = Some(widgets);
+        }
+        if let Some(widgets) = &mut self.dict {
+            if let (Some(conn), Some(head)) = (&self.conn, headword) {
+                dict::open_headword(widgets, conn, module, head);
+            } else {
+                dict::select_module(widgets, module);
+            }
+            widgets.window.present();
+        }
     }
 
     fn highlight_verse(&self, verse: u8) {

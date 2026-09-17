@@ -832,6 +832,47 @@ fn slice_chars(s: &str, start: i32, end: i32) -> String {
     s.chars().skip(start.max(0) as usize).take(n).collect()
 }
 
+/// Visible English token for a mapped KJV word, punctuation stripped.
+pub fn word_surface(text: &str, span: Span) -> String {
+    let raw = slice_chars(text, span.start, span.end);
+    normalize_token(&raw)
+}
+
+/// Word under a click. Strong's spans are often a whole phrase.
+pub fn token_at(text: &str, offset: i32) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let mut i = (offset.max(0) as usize).min(chars.len() - 1);
+    if !is_token_char(chars[i]) {
+        if i > 0 && is_token_char(chars[i - 1]) {
+            i -= 1;
+        } else {
+            return String::new();
+        }
+    }
+    let mut start = i;
+    while start > 0 && is_token_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = i + 1;
+    while end < chars.len() && is_token_char(chars[end]) {
+        end += 1;
+    }
+    normalize_token(&chars[start..end].iter().collect::<String>())
+}
+
+fn is_token_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\''
+}
+
+fn normalize_token(raw: &str) -> String {
+    raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+        .trim_matches('\'')
+        .to_string()
+}
+
 fn char_len(s: &str) -> i32 {
     s.chars().count() as i32
 }
@@ -1624,12 +1665,34 @@ God creates heaven and earth.
             .take((span.end - span.start) as usize)
             .collect();
         assert_eq!(shown, "beginning");
+        assert_eq!(word_surface(&layout.text, span), "beginning");
         assert!(word_at_offset(&layout.words, layout.verse_start[0].1).is_none());
         assert_eq!(
             verse_at_offset(&layout.verse_start, mid),
             Some(1),
             "word click still belongs to its verse"
         );
+    }
+
+    #[test]
+    fn word_surface_strips_wrapping_punctuation() {
+        let span = Span { start: 0, end: 7 };
+        assert_eq!(word_surface("(God's)", span), "God's");
+        assert_eq!(
+            word_surface("beginning", Span { start: 0, end: 9 }),
+            "beginning"
+        );
+    }
+
+    #[test]
+    fn token_at_picks_the_clicked_word_in_a_phrase() {
+        let text = "and let it divide the waters";
+        // "divide" starts at char 11
+        assert_eq!(token_at(text, 11), "divide");
+        assert_eq!(token_at(text, 16), "divide");
+        assert_eq!(token_at(text, 0), "and");
+        assert_eq!(token_at(text, 3), "and");
+        assert_eq!(token_at(", divide", 0), "");
     }
 
     #[test]

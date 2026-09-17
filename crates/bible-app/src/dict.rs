@@ -155,7 +155,18 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
 }
 
 pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
-    widgets.modules = bible_app_db::dictionary_modules(conn).unwrap_or_default();
+    let mut modules = bible_app_db::dictionary_modules(conn).unwrap_or_default();
+    if !modules.iter().any(|m| m.id == bible_app_db::STRONGS_MODULE) {
+        modules.insert(
+            0,
+            bible_app_db::DictModule {
+                id: bible_app_db::STRONGS_MODULE.into(),
+                title: "Strong's".into(),
+                kind: "dictionary".into(),
+            },
+        );
+    }
+    widgets.modules = modules;
 }
 
 pub fn select_module(widgets: &mut DictWidgets, id: &str) {
@@ -181,7 +192,28 @@ pub fn current_module(widgets: &DictWidgets) -> Option<&str> {
     widgets.module_id.as_deref()
 }
 
+pub fn open_headword(widgets: &mut DictWidgets, conn: &Connection, module: &str, headword: &str) {
+    select_module(widgets, module);
+    widgets.query = headword.to_string();
+    widgets.syncing.set(true);
+    widgets.search.set_text(headword);
+    widgets.syncing.set(false);
+    search_hits(widgets, conn, false);
+    let idx = widgets
+        .hits
+        .iter()
+        .position(|h| h.headword.eq_ignore_ascii_case(headword))
+        .unwrap_or(0);
+    if !widgets.hits.is_empty() {
+        open_hit(widgets, conn, idx as i32);
+    }
+}
+
 pub fn search(widgets: &mut DictWidgets, conn: &Connection) {
+    search_hits(widgets, conn, true);
+}
+
+fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool) {
     let Some(module) = current_module(widgets).map(str::to_string) else {
         widgets.hits.clear();
         refill_list(&widgets.list, &[]);
@@ -198,14 +230,21 @@ pub fn search(widgets: &mut DictWidgets, conn: &Connection) {
         widgets.popover.popdown();
         return;
     }
-    widgets.hits =
-        bible_app_db::search_entries(conn, &module, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default();
+    widgets.hits = if module == bible_app_db::STRONGS_MODULE {
+        bible_app_db::search_strongs(conn, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default()
+    } else {
+        bible_app_db::search_entries(conn, &module, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default()
+    };
     refill_list(&widgets.list, &widgets.hits);
     if widgets.hits.is_empty() {
         widgets.popover.popdown();
         return;
     }
     widgets.list.select_row(widgets.list.row_at_index(0).as_ref());
+    if !show_popover {
+        widgets.popover.popdown();
+        return;
+    }
     let width = widgets.search.width();
     if width > 0 {
         widgets.popover.set_size_request(width, -1);
@@ -223,7 +262,12 @@ pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
     let Some(module) = current_module(widgets) else {
         return;
     };
-    match bible_app_db::get_entry(conn, module, hit.i) {
+    let loaded = if module == bible_app_db::STRONGS_MODULE {
+        bible_app_db::get_strongs_entry(conn, hit.i)
+    } else {
+        bible_app_db::get_entry(conn, module, hit.i)
+    };
+    match loaded {
         Ok(Some((head, text))) => {
             widgets.syncing.set(true);
             widgets.search.set_text(&head);
