@@ -19,10 +19,16 @@ pub struct State {
     pub font_size: i32,
     #[serde(default)]
     pub interlinear: bool,
+    #[serde(default = "default_true")]
+    pub paragraphs: bool,
 }
 
 fn default_font_size() -> i32 {
     layout::DEFAULT_FONT
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for State {
@@ -33,6 +39,7 @@ impl Default for State {
             verse: 1,
             font_size: layout::DEFAULT_FONT,
             interlinear: false,
+            paragraphs: true,
         }
     }
 }
@@ -48,13 +55,14 @@ impl From<State> for Ref {
 }
 
 impl State {
-    pub fn from_ref(r: Ref, font_size: i32, interlinear: bool) -> Self {
+    pub fn from_ref(r: Ref, font_size: i32, interlinear: bool, paragraphs: bool) -> Self {
         Self {
             book: r.book,
             chapter: r.chapter,
             verse: r.verse,
             font_size,
             interlinear,
+            paragraphs,
         }
     }
 }
@@ -198,6 +206,14 @@ pub fn path_display(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn old_state_defaults_paragraphs_on() {
+        let s: State = toml::from_str("book = 1\nchapter = 1\nverse = 1\n").unwrap();
+        assert!(s.paragraphs);
+        assert!(!s.interlinear);
+        assert_eq!(s.font_size, layout::DEFAULT_FONT);
+    }
 
     #[test]
     fn extract_gzip_roundtrip() {
