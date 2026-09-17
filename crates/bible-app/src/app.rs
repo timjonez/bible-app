@@ -36,6 +36,7 @@ pub struct App {
     tsk: Option<tsk::TskWidgets>,
     dict: Option<dict::DictWidgets>,
     strongs_popover: gtk::Popover,
+    tsk_popover: gtk::Popover,
     history: History,
     layout: ChapterLayout,
     font_size: i32,
@@ -59,6 +60,7 @@ pub enum Msg {
     ToggleTsk,
     TskClosed,
     OpenTskXref(i32),
+    OpenTskDest(Ref),
     ClickWord(i32),
     ToggleDict,
     DictClosed,
@@ -373,11 +375,11 @@ impl SimpleComponent for App {
         mhc_tag.set_foreground(Some("#1c71d8"));
         mhc_tag.set_scale(0.8);
         buffer.tag_table().add(&mhc_tag);
-        let tsk_more = gtk::TextTag::new(Some("tsk-more"));
-        tsk_more.set_weight(700);
-        tsk_more.set_foreground(Some("#1c71d8"));
-        tsk_more.set_scale(0.8);
-        buffer.tag_table().add(&tsk_more);
+        let tsk_sup = gtk::TextTag::new(Some("tsk-sup"));
+        tsk_sup.set_foreground(Some("#1c71d8"));
+        tsk_sup.set_scale(0.7);
+        tsk_sup.set_rise(4 * 1024);
+        buffer.tag_table().add(&tsk_sup);
         let lemma = gtk::TextTag::new(Some("lemma"));
         lemma.set_foreground(Some("#77767b"));
         lemma.set_scale(0.85);
@@ -389,8 +391,9 @@ impl SimpleComponent for App {
         lemma.set_priority(1);
         xref.set_priority(2);
         mhc_tag.set_priority(2);
-        tsk_more.set_priority(2);
+        tsk_sup.set_priority(2);
         let strongs_popover = strongs::create(&chapter_view);
+        let tsk_popover = tsk::create_popover(&chapter_view);
         let font_provider = gtk::CssProvider::new();
         if let Some(display) = gtk::gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
@@ -438,6 +441,7 @@ impl SimpleComponent for App {
             tsk: None,
             dict: None,
             strongs_popover,
+            tsk_popover,
             layout: ChapterLayout::default(),
             font_size,
             interlinear,
@@ -697,12 +701,29 @@ impl SimpleComponent for App {
                 self.search_open = false;
                 self.go(at, true);
             }
+            Msg::OpenTskDest(at) => {
+                self.tsk_popover.popdown();
+                self.search_open = false;
+                self.go(at, true);
+            }
             Msg::ClickWord(offset) => {
-                if let Some(at) = self.xref_at(offset) {
+                self.tsk_popover.popdown();
+                let tsk_hit = self
+                    .tsk_at(offset)
+                    .map(|m| (m.span.start, m.heading.clone(), m.dests.clone()));
+                if let Some((start, heading, dests)) = tsk_hit {
+                    self.strongs_popover.popdown();
+                    tsk::present_phrase(
+                        &self.tsk_popover,
+                        &self.chapter_view,
+                        start,
+                        &heading,
+                        &dests,
+                        &self.books,
+                        sender.input_sender().clone(),
+                    );
+                } else if let Some(at) = self.xref_at(offset) {
                     self.go(at, true);
-                } else if let Some(verse) = self.tsk_more_at(offset) {
-                    self.go(Ref { verse, ..self.at }, false);
-                    self.ensure_tsk(&sender);
                 } else if let Some(verse) = self.mhc_at(offset) {
                     self.go(Ref { verse, ..self.at }, false);
                     self.ensure_mhc(&sender);
@@ -870,12 +891,8 @@ impl App {
             .map(|m| m.verse)
     }
 
-    fn tsk_more_at(&self, offset: i32) -> Option<u8> {
-        self.layout
-            .tsk_more
-            .iter()
-            .find(|m| m.span.contains(offset))
-            .map(|m| m.verse)
+    fn tsk_at(&self, offset: i32) -> Option<&layout::TskMark> {
+        self.layout.tsk.iter().find(|m| m.span.contains(offset))
     }
 
     fn ensure_mhc(&mut self, sender: &ComponentSender<Self>) {
@@ -884,14 +901,6 @@ impl App {
             self.mhc = Some(widgets);
         }
         self.refresh_mhc();
-    }
-
-    fn ensure_tsk(&mut self, sender: &ComponentSender<Self>) {
-        if self.tsk.is_none() && self.error.is_none() {
-            let widgets = tsk::open(sender.input_sender().clone(), self.at, &self.books);
-            self.tsk = Some(widgets);
-        }
-        self.refresh_tsk();
     }
 
     fn copy_current_verse(&self) {
@@ -935,8 +944,12 @@ impl App {
                 return;
             }
         };
-        let xrefs =
-            bible_app_db::chapter_xrefs(conn, self.at.book, self.at.chapter).unwrap_or_default();
+        let tsk_rows = bible_app_db::chapter_resources(conn, "TSK", self.at.book, self.at.chapter)
+            .unwrap_or_default();
+        let tsk_notes: Vec<(u8, &str)> = tsk_rows
+            .iter()
+            .map(|r| (r.verse, r.text.as_str()))
+            .collect();
         let mhc_starts =
             bible_app_db::chapter_resource_verses(conn, "MHC", self.at.book, self.at.chapter)
                 .unwrap_or_default();
@@ -950,13 +963,14 @@ impl App {
         self.layout = layout::layout_chapter(
             &verses,
             &self.books,
-            &xrefs,
+            &tsk_notes,
             &mhc_starts,
             &words,
             &lemmas,
             self.interlinear,
         );
         self.strongs_popover.popdown();
+        self.tsk_popover.popdown();
         self.apply_layout_tags();
         self.fill_xref_tips(conn);
         self.save_state();
@@ -989,8 +1003,8 @@ impl App {
         for mark in &self.layout.mhc {
             self.apply_tag("mhc", mark.span);
         }
-        for mark in &self.layout.tsk_more {
-            self.apply_tag("tsk-more", mark.span);
+        for mark in &self.layout.tsk {
+            self.apply_tag("tsk-sup", mark.span);
         }
         for word in &self.layout.words {
             self.apply_tag("strongs", word.span);
@@ -1014,6 +1028,29 @@ impl App {
 
     fn fill_xref_tips(&self, conn: &Connection) {
         let mut tips = Vec::new();
+        for mark in &self.layout.tsk {
+            let dests: Vec<bible_app_db::Xref> = mark
+                .dests
+                .iter()
+                .map(|d| bible_app_db::Xref {
+                    book: d.book,
+                    chapter: d.chapter,
+                    verse: d.verse,
+                })
+                .collect();
+            let (line, _, hidden) = layout::format_xref_line(&dests, &self.books);
+            let extra = if hidden > 0 {
+                format!(" · {hidden} more")
+            } else {
+                String::new()
+            };
+            let text = if line.is_empty() {
+                mark.heading.clone()
+            } else {
+                format!("{}\n{line}{extra}", mark.heading)
+            };
+            tips.push((mark.span.start, mark.span.end, text));
+        }
         for link in &self.layout.xrefs {
             let preview =
                 match bible_app_db::get_verse(conn, link.at.book, link.at.chapter, link.at.verse) {
@@ -1028,13 +1065,6 @@ impl App {
         }
         for mark in &self.layout.mhc {
             tips.push((mark.span.start, mark.span.end, "Open Matthew Henry".into()));
-        }
-        for mark in &self.layout.tsk_more {
-            tips.push((
-                mark.span.start,
-                mark.span.end,
-                format!("Open TSK ({} more)", mark.hidden),
-            ));
         }
         for word in &self.layout.words {
             tips.push((word.span.start, word.span.end, "Click for Strong's".into()));
@@ -1073,6 +1103,7 @@ impl App {
         if defs.is_empty() {
             return;
         }
+        self.tsk_popover.popdown();
         strongs::present(
             &self.strongs_popover,
             &self.chapter_view,
