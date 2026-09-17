@@ -73,7 +73,6 @@ pub struct LayoutOpts {
 }
 
 const NOTE_DAGGER: &str = "†";
-const MHC_MARK: &str = "M";
 
 /// Pull trailing `{...}` translator notes off a stored KJV verse.
 pub fn split_notes(text: &str) -> (String, Vec<String>) {
@@ -280,17 +279,23 @@ pub fn layout_chapter(
                 }
             } else {
                 layout.text.push('\n');
-                layout.text.push('\n');
             }
         }
 
         let verse_start = char_len(&layout.text);
         let num = format!("{}", v.verse);
         layout.text.push_str(&num);
-        layout.verse_nums.push(Span {
+        let num_span = Span {
             start: verse_start,
             end: char_len(&layout.text),
-        });
+        };
+        layout.verse_nums.push(num_span);
+        if mhc_starts.contains(&v.verse) {
+            layout.mhc.push(MhcMark {
+                span: num_span,
+                verse: v.verse,
+            });
+        }
         layout.text.push(' ');
         if !opts.paragraphs && v.para_break {
             layout.text.push('¶');
@@ -321,16 +326,12 @@ pub fn layout_chapter(
                 (shift_by_inserts(at, &tsk_inserts), text)
             })
             .collect();
-        let has_mhc = mhc_starts.contains(&v.verse);
-        let mut mark_inserts: Vec<(i32, i32)> = note_plan
+        let mark_inserts: Vec<(i32, i32)> = note_plan
             .iter()
             .map(|(at, _)| (*at, char_len(NOTE_DAGGER)))
             .collect();
-        if has_mhc {
-            mark_inserts.push((char_len(&body), char_len(MHC_MARK)));
-        }
-        let (body, italics, word_spans, note_marks, mhc_span) =
-            insert_inline_marks(body, italics, word_spans, note_plan, has_mhc);
+        let (body, italics, word_spans, note_marks) =
+            insert_inline_marks(body, italics, word_spans, note_plan);
         let tsk_marks: Vec<TskMark> = tsk_marks
             .into_iter()
             .map(|mut mark| {
@@ -357,12 +358,6 @@ pub fn layout_chapter(
         for mut mark in note_marks {
             mark.span = shift_span(mark.span, body_start);
             layout.notes.push(mark);
-        }
-        if let Some(span) = mhc_span {
-            layout.mhc.push(MhcMark {
-                span: shift_span(span, body_start),
-                verse: v.verse,
-            });
         }
         layout.verse_start.push((v.verse, verse_start));
         layout.verse_body.push((v.verse, body_start));
@@ -724,36 +719,22 @@ fn insert_inline_marks(
     italics: Vec<Span>,
     words: Vec<WordSpan>,
     notes: Vec<(i32, String)>,
-    mhc: bool,
-) -> (
-    String,
-    Vec<Span>,
-    Vec<WordSpan>,
-    Vec<NoteMark>,
-    Option<Span>,
-) {
+) -> (String, Vec<Span>, Vec<WordSpan>, Vec<NoteMark>) {
     struct Pending {
         at: i32,
         glyph: &'static str,
-        note: Option<String>,
+        note: String,
     }
-    let mut pending: Vec<Pending> = notes
+    let pending: Vec<Pending> = notes
         .into_iter()
         .map(|(at, text)| Pending {
             at,
             glyph: NOTE_DAGGER,
-            note: Some(text),
+            note: text,
         })
         .collect();
-    if mhc {
-        pending.push(Pending {
-            at: char_len(&body),
-            glyph: MHC_MARK,
-            note: None,
-        });
-    }
     if pending.is_empty() {
-        return (body, italics, words, Vec::new(), None);
+        return (body, italics, words, Vec::new());
     }
 
     let insert_lens: Vec<(i32, i32)> = pending.iter().map(|p| (p.at, char_len(p.glyph))).collect();
@@ -778,7 +759,6 @@ fn insert_inline_marks(
         .collect();
 
     let mut note_marks = Vec::new();
-    let mut mhc_span = None;
     for (idx, p) in pending.iter().enumerate() {
         let start = p.at
             + insert_lens
@@ -787,20 +767,15 @@ fn insert_inline_marks(
                 .filter(|(j, (at, _))| *at < p.at || (*at == p.at && *j < idx))
                 .map(|(_, (_, n))| *n)
                 .sum::<i32>();
-        let span = Span {
-            start,
-            end: start + char_len(p.glyph),
-        };
-        if let Some(text) = &p.note {
-            note_marks.push(NoteMark {
-                span,
-                text: text.clone(),
-            });
-        } else {
-            mhc_span = Some(span);
-        }
+        note_marks.push(NoteMark {
+            span: Span {
+                start,
+                end: start + char_len(p.glyph),
+            },
+            text: p.note.clone(),
+        });
     }
-    (out, italics, words, note_marks, mhc_span)
+    (out, italics, words, note_marks)
 }
 
 fn shift_spans(spans: Vec<Span>, inserts: &[(i32, i32)]) -> Vec<Span> {
@@ -870,9 +845,9 @@ pub fn verse_at_offset(verse_start: &[(u8, i32)], offset: i32) -> Option<u8> {
         .map(|(verse, _)| *verse)
 }
 
-/// Half-open highlight range `[verse_start, next verse_start)` for `verse`.
-/// `text_end` is the exclusive end of the last verse. Uses `verse_start` so
-/// this still works if verses later flow into paragraphs.
+/// Half-open range `[verse_start, next verse_start)` for `verse`.
+/// `text_end` is the exclusive end of the last verse.
+#[allow(dead_code)]
 pub fn verse_range(verse_start: &[(u8, i32)], verse: u8, text_end: i32) -> Option<Span> {
     let i = verse_start.iter().position(|(v, _)| *v == verse)?;
     let start = verse_start[i].1;
@@ -1049,6 +1024,16 @@ mod tests {
         let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
         assert!(
             layout.text.contains("1 ¶ The LORD also spake"),
+            "{}",
+            layout.text
+        );
+        assert!(
+            layout.text.contains("spake\n2 Speak"),
+            "verse mode uses a single line break, not a blank line: {}",
+            layout.text
+        );
+        assert!(
+            !layout.text.contains("spake\n\n2"),
             "{}",
             layout.text
         );
@@ -1358,36 +1343,18 @@ God creates heaven and earth.
             layout.text
         );
         assert!(
-            !layout.text.contains("MHC"),
-            "MHC must not sit on its own apparatus line: {}",
+            !layout.text.contains("MHC") && !layout.text.contains('M'),
+            "no MHC glyph in the chapter: {}",
             layout.text
         );
         let mark = layout.mhc.iter().find(|m| m.verse == 2).unwrap();
-        assert_eq!(slice(&layout.text, mark.span), "M");
-        let body = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
-        assert!(
-            mark.span.start >= body,
-            "M must sit on the reading line, not the verse number"
-        );
-        assert!(
-            !layout
-                .verse_nums
-                .iter()
-                .any(|n| n.contains(mark.span.start)),
-            "M must not sit on a verse number"
-        );
-        let v2_line_end = layout
-            .text
-            .chars()
-            .skip(body as usize)
-            .position(|c| c == '\n')
-            .map(|n| body + n as i32)
-            .unwrap_or(char_len(&layout.text));
-        assert!(
-            mark.span.end <= v2_line_end,
-            "M belongs at the end of verse 2's body: {}",
-            layout.text
-        );
+        let num = layout
+            .verse_nums
+            .iter()
+            .find(|n| slice(&layout.text, **n) == "2")
+            .copied()
+            .unwrap();
+        assert_eq!(mark.span, num, "MHC click target is the verse number");
         assert!(
             layout.apparatus.is_empty(),
             "MHC-only verses must not grow an apparatus line: {}",
@@ -1401,10 +1368,10 @@ God creates heaven and earth.
         let tsk = [(2u8, "* Speak. Exodus 21:1")];
         let with_tsk = layout_chapter(&verses, &books(), &tsk, &[2], &[], &[], verse_opts());
         let mark = with_tsk.mhc.iter().find(|m| m.verse == 2).unwrap();
-        assert_eq!(slice(&with_tsk.text, mark.span), "M");
+        assert_eq!(slice(&with_tsk.text, mark.span), "2");
         assert!(
-            !with_tsk.text.contains("MHC"),
-            "TSK superscripts must not glue an MHC token: {}",
+            !with_tsk.text.contains("MHC") && !with_tsk.text.contains('M'),
+            "no MHC glyph when TSK letters are present: {}",
             with_tsk.text
         );
         assert!(with_tsk.apparatus.is_empty(), "{}", with_tsk.text);

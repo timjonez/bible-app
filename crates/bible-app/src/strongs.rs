@@ -1,5 +1,6 @@
 use adw::prelude::*;
 use bible_app_db::StrongDef;
+use gtk::glib;
 use relm4::{adw, gtk};
 
 pub fn create(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
@@ -11,7 +12,13 @@ pub fn create(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
     popover
 }
 
-pub fn present(popover: &gtk::Popover, view: &gtk::TextView, start: i32, defs: &[StrongDef]) {
+pub fn present(
+    popover: &gtk::Popover,
+    view: &gtk::TextView,
+    start: i32,
+    defs: &[StrongDef],
+    sender: relm4::Sender<super::app::Msg>,
+) {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_start(14);
     body.set_margin_end(14);
@@ -49,13 +56,26 @@ pub fn present(popover: &gtk::Popover, view: &gtk::TextView, start: i32, defs: &
         title.set_selectable(true);
         body.append(&title);
 
-        if !def.definition.is_empty() {
-            let text = gtk::Label::new(Some(&def.definition));
-            text.set_wrap(true);
-            text.set_max_width_chars(44);
-            text.set_xalign(0.0);
-            text.set_selectable(true);
-            body.append(&text);
+        let (text, see) = split_see_also(&def.definition, &def.lang);
+        if !text.is_empty() {
+            let label = gtk::Label::new(Some(&text));
+            label.set_wrap(true);
+            label.set_max_width_chars(44);
+            label.set_xalign(0.0);
+            label.set_selectable(true);
+            body.append(&label);
+        }
+        for code in see {
+            let link = gtk::Label::new(None);
+            link.set_markup(&format!("<a href=\"{code}\">See {code}</a>"));
+            link.set_xalign(0.0);
+            link.set_use_markup(true);
+            let send = sender.clone();
+            link.connect_activate_link(move |_, uri| {
+                send.emit(super::app::Msg::OpenStrongsCode(uri.to_string()));
+                glib::Propagation::Stop
+            });
+            body.append(&link);
         }
     }
 
@@ -93,4 +113,131 @@ pub fn present_text(popover: &gtk::Popover, view: &gtk::TextView, start: i32, te
 
 pub fn make_tag() -> gtk::TextTag {
     gtk::TextTag::new(Some("strongs"))
+}
+
+/// Pull trailing/inline "See H433" / "See 430" refs out of a Strong's definition.
+pub fn split_see_also(definition: &str, default_lang: &str) -> (String, Vec<String>) {
+    let s: Vec<char> = definition.chars().collect();
+    let mut used = vec![false; s.len()];
+    let mut codes = Vec::new();
+    let lang0 = if default_lang.eq_ignore_ascii_case("G") {
+        "G"
+    } else {
+        "H"
+    };
+    let mut i = 0usize;
+    while i < s.len() {
+        if let Some((code, end)) = see_ref_at(&s, i, lang0) {
+            if !codes.iter().any(|c| c == &code) {
+                codes.push(code);
+            }
+            used[i..end].fill(true);
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    let mut body = String::new();
+    for (idx, ch) in s.iter().enumerate() {
+        if !used[idx] {
+            body.push(*ch);
+        }
+    }
+    let body = collapse_blank_lines(body.trim());
+    (body, codes)
+}
+
+fn see_ref_at(s: &[char], i: usize, default_lang: &str) -> Option<(String, usize)> {
+    if i + 3 > s.len() {
+        return None;
+    }
+    let see = s[i].eq_ignore_ascii_case(&'s')
+        && s[i + 1].eq_ignore_ascii_case(&'e')
+        && s[i + 2].eq_ignore_ascii_case(&'e');
+    if !see {
+        return None;
+    }
+    let before_ok = i == 0 || !s[i - 1].is_alphanumeric();
+    if !before_ok {
+        return None;
+    }
+    let mut j = i + 3;
+    if j >= s.len() || !s[j].is_whitespace() {
+        return None;
+    }
+    while j < s.len() && s[j].is_whitespace() {
+        j += 1;
+    }
+    let (lang, k) = if j < s.len()
+        && (s[j].eq_ignore_ascii_case(&'h') || s[j].eq_ignore_ascii_case(&'g'))
+        && j + 1 < s.len()
+        && s[j + 1].is_ascii_digit()
+    {
+        (s[j].to_ascii_uppercase().to_string(), j + 1)
+    } else {
+        (default_lang.to_string(), j)
+    };
+    if k >= s.len() || !s[k].is_ascii_digit() {
+        return None;
+    }
+    let mut k2 = k;
+    while k2 < s.len() && s[k2].is_ascii_digit() {
+        k2 += 1;
+    }
+    let num: String = s[k..k2].iter().collect();
+    let mut end = k2;
+    if end < s.len() && matches!(s[end], '.' | ',') {
+        end += 1;
+    }
+    Some((format!("{lang}{num}"), end))
+}
+
+fn collapse_blank_lines(s: &str) -> String {
+    let mut out = String::new();
+    let mut blank = 0u8;
+    for line in s.lines() {
+        if line.trim().is_empty() {
+            blank = blank.saturating_add(1);
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+            if blank > 0 {
+                out.push('\n');
+            }
+        }
+        out.push_str(line.trim_end());
+        blank = 0;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn see_h_line_becomes_a_code() {
+        let (body, codes) = split_see_also(
+            "plural of 433; gods in the ordinary sense.\n\nSee H433",
+            "H",
+        );
+        assert_eq!(codes, vec!["H433".to_string()]);
+        assert!(body.contains("plural of 433"));
+        assert!(!body.to_ascii_lowercase().contains("see h433"));
+    }
+
+    #[test]
+    fn see_without_letter_inherits_lang() {
+        let (body, codes) = split_see_also("a deity or the Deity:--God, god. See 430.", "H");
+        assert_eq!(codes, vec!["H430".to_string()]);
+        assert!(body.contains("Deity"));
+        assert!(!body.to_ascii_lowercase().contains("see 430"));
+    }
+
+    #[test]
+    fn several_see_lines() {
+        let (_, codes) = split_see_also("See H410 \nSee H430", "H");
+        assert_eq!(codes, vec!["H410".to_string(), "H430".to_string()]);
+    }
 }
