@@ -1,9 +1,10 @@
+use crate::occurrences;
 use adw::prelude::*;
 use bible_app_db::{self, DictHit, DictModule};
 use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub struct DictWidgets {
@@ -17,6 +18,8 @@ pub struct DictWidgets {
     pub module_id: Option<String>,
     pub hits: Vec<DictHit>,
     pub query: String,
+    see_kjv: gtk::Button,
+    occ_code: Rc<RefCell<String>>,
     syncing: Rc<Cell<bool>>,
 }
 
@@ -76,7 +79,9 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     let list_keys = list.clone();
     keys.connect_key_pressed(move |_, keyval, _, _| {
         if keyval == gtk::gdk::Key::Down {
-            if let Some(row) = list_keys.selected_row().or_else(|| list_keys.row_at_index(0))
+            if let Some(row) = list_keys
+                .selected_row()
+                .or_else(|| list_keys.row_at_index(0))
             {
                 let next = list_keys.row_at_index(row.index() + 1).unwrap_or(row);
                 list_keys.select_row(Some(&next));
@@ -114,12 +119,28 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     text_scroll.set_vexpand(true);
     text_scroll.set_child(Some(&view));
 
+    let occ_code = Rc::new(RefCell::new(String::new()));
+    let see_kjv = gtk::Button::with_label("See all in the KJV");
+    see_kjv.set_halign(gtk::Align::Start);
+    see_kjv.add_css_class("pill");
+    see_kjv.set_tooltip_text(Some("List every KJV verse tagged with this number"));
+    see_kjv.set_visible(false);
+    let send_occ = sender.clone();
+    let occ_click = occ_code.clone();
+    see_kjv.connect_clicked(move |_| {
+        let code = occ_click.borrow().clone();
+        if !code.is_empty() {
+            send_occ.emit(super::app::Msg::OpenStrongsOccurrences(code));
+        }
+    });
+
     let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
     body.set_margin_start(12);
     body.set_margin_end(12);
     body.set_margin_top(8);
     body.set_margin_bottom(8);
     body.append(&search);
+    body.append(&see_kjv);
     body.append(&text_scroll);
 
     let toolbar = adw::ToolbarView::new();
@@ -150,6 +171,8 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
         module_id: None,
         hits: Vec::new(),
         query: String::new(),
+        see_kjv,
+        occ_code,
         syncing,
     }
 }
@@ -183,6 +206,8 @@ pub fn select_module(widgets: &mut DictWidgets, id: &str) {
     widgets.hits.clear();
     refill_list(&widgets.list, &[]);
     widgets.popover.popdown();
+    widgets.occ_code.borrow_mut().clear();
+    widgets.see_kjv.set_visible(false);
     widgets
         .buffer
         .set_text("Search a headword to open its entry.");
@@ -233,14 +258,17 @@ fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool)
     widgets.hits = if module == bible_app_db::STRONGS_MODULE {
         bible_app_db::search_strongs(conn, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default()
     } else {
-        bible_app_db::search_entries(conn, &module, q, bible_app_db::ENTRY_LIMIT).unwrap_or_default()
+        bible_app_db::search_entries(conn, &module, q, bible_app_db::ENTRY_LIMIT)
+            .unwrap_or_default()
     };
     refill_list(&widgets.list, &widgets.hits);
     if widgets.hits.is_empty() {
         widgets.popover.popdown();
         return;
     }
-    widgets.list.select_row(widgets.list.row_at_index(0).as_ref());
+    widgets
+        .list
+        .select_row(widgets.list.row_at_index(0).as_ref());
     if !show_popover {
         widgets.popover.popdown();
         return;
@@ -274,9 +302,34 @@ pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
             widgets.syncing.set(false);
             widgets.buffer.set_text(&format!("{head}\n\n{text}"));
             widgets.popover.popdown();
+            if module == bible_app_db::STRONGS_MODULE {
+                if let Some((num, lang)) = bible_app_db::parse_strongs_code(&hit.headword) {
+                    let code = format!("{lang}{num}");
+                    let count = bible_app_db::strongs_occurrence_count(conn, &code).unwrap_or(0);
+                    *widgets.occ_code.borrow_mut() = code.clone();
+                    widgets
+                        .see_kjv
+                        .set_label(&occurrences::see_all_label(&code, count));
+                    widgets.see_kjv.set_visible(true);
+                } else {
+                    widgets.occ_code.borrow_mut().clear();
+                    widgets.see_kjv.set_visible(false);
+                }
+            } else {
+                widgets.occ_code.borrow_mut().clear();
+                widgets.see_kjv.set_visible(false);
+            }
         }
-        Ok(None) => widgets.buffer.set_text("Entry missing."),
-        Err(e) => widgets.buffer.set_text(&e.to_string()),
+        Ok(None) => {
+            widgets.occ_code.borrow_mut().clear();
+            widgets.see_kjv.set_visible(false);
+            widgets.buffer.set_text("Entry missing.");
+        }
+        Err(e) => {
+            widgets.occ_code.borrow_mut().clear();
+            widgets.see_kjv.set_visible(false);
+            widgets.buffer.set_text(&e.to_string());
+        }
     }
 }
 

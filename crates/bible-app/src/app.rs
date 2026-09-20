@@ -4,6 +4,7 @@ use crate::history::History;
 use crate::layout::{self, ChapterLayout};
 use crate::mhc;
 use crate::nav::{self, Ref};
+use crate::occurrences;
 use crate::picker;
 use crate::search;
 use crate::strongs;
@@ -40,6 +41,7 @@ pub struct App {
     tsk: Option<tsk::TskWidgets>,
     dict: Option<dict::DictWidgets>,
     dict_modules: Vec<DictModule>,
+    occurrences: Option<occurrences::OccWidgets>,
     strongs_popover: gtk::Popover,
     strongs_at: i32,
     tsk_popover: gtk::Popover,
@@ -79,6 +81,9 @@ pub enum Msg {
     DictClosed,
     DictSearch(String),
     DictOpen(i32),
+    OpenStrongsOccurrences(String),
+    OpenOccurrenceHit(i32),
+    OccurrencesClosed,
     Back,
     Forward,
     FontSmaller,
@@ -475,10 +480,7 @@ impl SimpleComponent for App {
             .as_ref()
             .and_then(|c| bible_app_db::dictionary_modules(c).ok())
             .unwrap_or_default();
-        let dict_action = gio::SimpleAction::new(
-            "open-dict",
-            Some(glib::VariantTy::STRING),
-        );
+        let dict_action = gio::SimpleAction::new("open-dict", Some(glib::VariantTy::STRING));
         dict_action.set_enabled(error.is_none() && !dict_modules.is_empty());
         let dict_sender = sender.clone();
         dict_action.connect_activate(move |_, param| {
@@ -515,6 +517,7 @@ impl SimpleComponent for App {
             tsk: None,
             dict: None,
             dict_modules,
+            occurrences: None,
             strongs_popover,
             strongs_at: 0,
             tsk_popover,
@@ -932,6 +935,23 @@ impl SimpleComponent for App {
                     dict::open_hit(widgets, conn, idx);
                 }
             }
+            Msg::OpenStrongsOccurrences(code) => {
+                self.strongs_popover.popdown();
+                self.open_occurrences(&code, &sender);
+            }
+            Msg::OpenOccurrenceHit(idx) => {
+                let Some(widgets) = &self.occurrences else {
+                    return;
+                };
+                let Some(at) = occurrences::hit_at(widgets, idx) else {
+                    return;
+                };
+                self.search_open = false;
+                self.go(at, true);
+            }
+            Msg::OccurrencesClosed => {
+                self.occurrences = None;
+            }
             Msg::Back => {
                 if self.search_open {
                     return;
@@ -1030,10 +1050,8 @@ impl App {
     }
 
     fn sync_study_actions(&self) {
-        self.mhc_action
-            .set_state(&self.mhc.is_some().to_variant());
-        self.tsk_action
-            .set_state(&self.tsk.is_some().to_variant());
+        self.mhc_action.set_state(&self.mhc.is_some().to_variant());
+        self.tsk_action.set_state(&self.tsk.is_some().to_variant());
     }
 
     fn apply_font(&self) {
@@ -1271,6 +1289,7 @@ impl App {
             .iter()
             .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
             .collect();
+        let counts = strongs_counts(conn, &defs);
         let mut surface = layout::token_at(&self.layout.text, offset);
         if surface.is_empty() {
             surface = layout::word_surface(&self.layout.text, word.span);
@@ -1286,6 +1305,7 @@ impl App {
             &self.chapter_view,
             self.strongs_at,
             &defs,
+            &counts,
             &dict,
             sender.input_sender().clone(),
         );
@@ -1296,15 +1316,33 @@ impl App {
         let Some(def) = bible_app_db::lookup_strongs(conn, code).ok().flatten() else {
             return;
         };
+        let counts = strongs_counts(conn, std::slice::from_ref(&def));
         self.tsk_popover.popdown();
         strongs::present(
             &self.strongs_popover,
             &self.chapter_view,
             self.strongs_at,
             &[def],
+            &counts,
             &bible_app_db::ClickedDict::default(),
             sender.input_sender().clone(),
         );
+    }
+
+    fn open_occurrences(&mut self, code: &str, sender: &ComponentSender<Self>) {
+        if self.error.is_some() {
+            return;
+        }
+        if self.occurrences.is_none() {
+            let widgets = occurrences::open(sender.input_sender().clone());
+            self.occurrences = Some(widgets);
+        }
+        if let Some(widgets) = &mut self.occurrences {
+            if let Some(conn) = &self.conn {
+                occurrences::fill(widgets, conn, &self.books, code);
+            }
+            widgets.window.present();
+        }
     }
 
     fn open_library(
@@ -1357,7 +1395,13 @@ impl App {
         let Some((_, vs)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
             return;
         };
-        let Some(span) = self.layout.verse_nums.iter().copied().find(|s| s.start == *vs) else {
+        let Some(span) = self
+            .layout
+            .verse_nums
+            .iter()
+            .copied()
+            .find(|s| s.start == *vs)
+        else {
             return;
         };
         self.apply_tag("current-verse", span);
@@ -1388,6 +1432,15 @@ impl App {
 }
 
 type LoadedLibrary = (Connection, Vec<Book>, Ref, i32, bool);
+
+fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<usize> {
+    defs.iter()
+        .map(|d| {
+            let code = format!("{}{}", d.lang, d.num);
+            bible_app_db::strongs_occurrence_count(conn, &code).unwrap_or(0)
+        })
+        .collect()
+}
 
 fn load_library() -> Result<LoadedLibrary, String> {
     let path = config::locate_database()?;
@@ -1425,10 +1478,7 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
 
     let commentary = gio::Menu::new();
     commentary.append(Some("Matthew Henry"), Some("win.mhc"));
-    commentary.append(
-        Some("Treasury of Scripture Knowledge"),
-        Some("win.tsk"),
-    );
+    commentary.append(Some("Treasury of Scripture Knowledge"), Some("win.tsk"));
     let dictionaries = gio::Menu::new();
     let topics = gio::Menu::new();
     for module in modules {

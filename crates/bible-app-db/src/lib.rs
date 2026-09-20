@@ -1,9 +1,11 @@
+mod occurrences;
 mod search;
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use thiserror::Error;
 
+pub use occurrences::{strongs_occurrence_count, strongs_occurrences, Occurrence};
 pub use search::{
     ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
 };
