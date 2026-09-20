@@ -2,12 +2,14 @@ use crate::config;
 use crate::dict;
 use crate::history::History;
 use crate::layout::{self, ChapterLayout};
+use crate::marks;
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::picker;
 use crate::search;
 use crate::strongs;
 use crate::tsk;
+use crate::user_db;
 use adw::prelude::*;
 use bible_app_db::{self, Book, DictModule, SearchHit};
 use gtk::gio;
@@ -17,6 +19,8 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -53,6 +57,10 @@ pub struct App {
     xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
     mhc_action: gio::SimpleAction,
     tsk_action: gio::SimpleAction,
+    user: Option<Connection>,
+    chapter_marks: HashMap<u8, user_db::VerseMarks>,
+    marks: Option<marks::MarksWidgets>,
+    verse_menu: gtk::PopoverMenu,
 }
 
 #[derive(Debug)]
@@ -84,6 +92,22 @@ pub enum Msg {
     FontSmaller,
     FontLarger,
     SetParagraphs(bool),
+    OpenBookmarks,
+    OpenNotes,
+    MarksClosed,
+    MarksBookmarkActivated(i32),
+    MarksBookmarkSelected,
+    MarksNoteActivated(i32),
+    MarksNoteSelected(i32),
+    SaveNote,
+    DeleteEditingNote,
+    RemoveSelectedBookmark,
+    ToggleBookmark,
+    SetHighlight(String),
+    AddNote,
+    VerseContext { offset: i32, x: i32, y: i32 },
+    ExportNotes,
+    ExportWrite(PathBuf),
 }
 
 #[relm4::component(pub)]
@@ -384,6 +408,7 @@ impl SimpleComponent for App {
         current_verse.set_foreground(Some("#99c1f1"));
         current_verse.set_weight(700);
         buffer.tag_table().add(&current_verse);
+        marks::install_tags(&buffer);
         current_verse.set_priority(0);
         apparatus.set_priority(0);
         note.set_priority(0);
@@ -475,10 +500,7 @@ impl SimpleComponent for App {
             .as_ref()
             .and_then(|c| bible_app_db::dictionary_modules(c).ok())
             .unwrap_or_default();
-        let dict_action = gio::SimpleAction::new(
-            "open-dict",
-            Some(glib::VariantTy::STRING),
-        );
+        let dict_action = gio::SimpleAction::new("open-dict", Some(glib::VariantTy::STRING));
         dict_action.set_enabled(error.is_none() && !dict_modules.is_empty());
         let dict_sender = sender.clone();
         dict_action.connect_activate(move |_, param| {
@@ -487,12 +509,53 @@ impl SimpleComponent for App {
             }
         });
 
+        let user = user_db::open_default().ok();
+        let marks_on = error.is_none() && user.is_some();
+        let bookmarks_action: RelmAction<BookmarksAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::OpenBookmarks))
+        };
+        let notes_action: RelmAction<NotesAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::OpenNotes))
+        };
+        let export_notes_action: RelmAction<ExportNotesAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::ExportNotes))
+        };
+        let toggle_bookmark_action: RelmAction<ToggleBookmarkAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::ToggleBookmark))
+        };
+        let add_note_action: RelmAction<AddNoteAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::AddNote))
+        };
+        bookmarks_action.gio_action().set_enabled(marks_on);
+        notes_action.gio_action().set_enabled(marks_on);
+        export_notes_action.gio_action().set_enabled(marks_on);
+        toggle_bookmark_action.gio_action().set_enabled(marks_on);
+        add_note_action.gio_action().set_enabled(marks_on);
+
+        let highlight_action = gio::SimpleAction::new("highlight", Some(glib::VariantTy::STRING));
+        highlight_action.set_enabled(marks_on);
+        let highlight_sender = sender.clone();
+        highlight_action.connect_activate(move |_, param| {
+            let color = param.and_then(|p| p.get::<String>()).unwrap_or_default();
+            highlight_sender.input(Msg::SetHighlight(color));
+        });
+
         let mut group = RelmActionGroup::<WindowActionGroup>::new();
         group.add_action(paragraphs_action);
         group.add_action(font_larger);
         group.add_action(font_smaller);
         group.add_action(mhc_action);
         group.add_action(tsk_action);
+        group.add_action(bookmarks_action);
+        group.add_action(notes_action);
+        group.add_action(export_notes_action);
+        group.add_action(toggle_bookmark_action);
+        group.add_action(add_note_action);
 
         let mut model = App {
             history: History::new(at),
@@ -527,6 +590,10 @@ impl SimpleComponent for App {
             xref_tips: Rc::new(RefCell::new(Vec::new())),
             mhc_action: mhc_gio,
             tsk_action: tsk_gio,
+            user,
+            chapter_marks: HashMap::new(),
+            marks: None,
+            verse_menu: gtk::PopoverMenu::from_model(None::<&gio::MenuModel>),
         };
         model.apply_font();
         picker::install_css();
@@ -537,11 +604,18 @@ impl SimpleComponent for App {
         let widgets = view_output!();
         let group = group.into_action_group();
         group.add_action(&dict_action);
+        group.add_action(&highlight_action);
         root.insert_action_group("win", Some(&group));
+        model.verse_menu.insert_action_group("win", Some(&group));
         model.goto_popover.set_parent(&widgets.title_box);
+        model.verse_menu.set_parent(&model.chapter_view);
+        model.verse_menu.set_has_arrow(false);
+        model.verse_menu.set_halign(gtk::Align::Start);
         let goto_on_destroy = model.goto_popover.clone();
+        let verse_on_destroy = model.verse_menu.clone();
         root.connect_destroy(move |_| {
             goto_on_destroy.unparent();
+            verse_on_destroy.unparent();
         });
 
         let key = gtk::EventControllerKey::new();
@@ -604,6 +678,10 @@ impl SimpleComponent for App {
             }
             if ctrl && (keyval == gtk::gdk::Key::minus || keyval == gtk::gdk::Key::KP_Subtract) {
                 sender_keys.input(Msg::FontSmaller);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
+                sender_keys.input(Msg::ToggleBookmark);
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -675,6 +753,27 @@ impl SimpleComponent for App {
             }
         });
         model.chapter_view.add_controller(click);
+
+        let right = gtk::GestureClick::new();
+        right.set_button(gtk::gdk::BUTTON_SECONDARY);
+        right.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let view = model.chapter_view.clone();
+        let right_sender = sender.clone();
+        right.connect_pressed(move |g, _, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            let (bx, by) =
+                view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            let offset = view
+                .iter_at_location(bx, by)
+                .map(|iter| iter.offset())
+                .unwrap_or(-1);
+            right_sender.input(Msg::VerseContext {
+                offset,
+                x: x as i32,
+                y: y as i32,
+            });
+        });
+        model.chapter_view.add_controller(right);
 
         let motion = gtk::EventControllerMotion::new();
         let view = model.chapter_view.clone();
@@ -972,6 +1071,89 @@ impl SimpleComponent for App {
                     self.refresh_chapter(false);
                 }
             }
+            Msg::OpenBookmarks => self.ensure_marks(&sender, "bookmarks"),
+            Msg::OpenNotes => self.ensure_marks(&sender, "notes"),
+            Msg::MarksClosed => {
+                self.marks = None;
+            }
+            Msg::MarksBookmarkActivated(idx) => {
+                if let Some(at) = self.marks.as_ref().and_then(|w| marks::bookmark_at(w, idx)) {
+                    self.search_open = false;
+                    self.go(at, true);
+                }
+            }
+            Msg::MarksBookmarkSelected => {
+                if let Some(w) = &self.marks {
+                    w.remove_bookmark
+                        .set_sensitive(w.bookmark_list.selected_row().is_some());
+                }
+            }
+            Msg::MarksNoteActivated(idx) => {
+                if let Some(at) = self.marks.as_ref().and_then(|w| marks::note_at(w, idx)) {
+                    self.search_open = false;
+                    self.go(at, true);
+                }
+            }
+            Msg::MarksNoteSelected(idx) => {
+                if self.marks.as_ref().is_some_and(|w| w.syncing.get()) {
+                    return;
+                }
+                let Some(at) = self.marks.as_ref().and_then(|w| marks::note_at(w, idx)) else {
+                    return;
+                };
+                let text = self
+                    .user
+                    .as_ref()
+                    .and_then(|u| user_db::get_note(u, at).ok().flatten())
+                    .unwrap_or_default();
+                if let Some(w) = &mut self.marks {
+                    marks::load_note(w, &self.books, at, &text);
+                }
+            }
+            Msg::SaveNote => {
+                let Some(widgets) = &self.marks else { return };
+                if widgets.syncing.get() {
+                    return;
+                }
+                let Some(at) = widgets.editing else { return };
+                let text = marks::editor_text(widgets);
+                let was_present = widgets.notes.iter().any(|n| n.at() == at);
+                let now_present = !text.trim().is_empty();
+                if let Some(user) = &self.user {
+                    let _ = user_db::upsert_note(user, at, &text);
+                }
+                self.reload_user_marks(was_present != now_present);
+                if let Some(w) = &self.marks {
+                    w.delete_note.set_sensitive(now_present);
+                }
+            }
+            Msg::DeleteEditingNote => {
+                let Some(at) = self.marks.as_ref().and_then(|w| w.editing) else {
+                    return;
+                };
+                if let Some(user) = &self.user {
+                    let _ = user_db::delete_note(user, at);
+                }
+                if let Some(w) = &mut self.marks {
+                    marks::clear_editor(w);
+                }
+                self.reload_user_marks(true);
+            }
+            Msg::RemoveSelectedBookmark => {
+                let Some(at) = self.marks.as_ref().and_then(marks::selected_bookmark) else {
+                    return;
+                };
+                if let Some(user) = &self.user {
+                    let _ = user_db::delete_bookmark(user, at);
+                }
+                self.reload_user_marks(true);
+            }
+            Msg::ToggleBookmark => self.toggle_bookmark(),
+            Msg::SetHighlight(color) => self.set_highlight(&color),
+            Msg::AddNote => self.add_note(&sender),
+            Msg::VerseContext { offset, x, y } => self.show_verse_menu(offset, x, y),
+            Msg::ExportNotes => self.export_notes(&sender),
+            Msg::ExportWrite(path) => self.write_export(&path),
         }
         self.sync_study_actions();
     }
@@ -1030,10 +1212,8 @@ impl App {
     }
 
     fn sync_study_actions(&self) {
-        self.mhc_action
-            .set_state(&self.mhc.is_some().to_variant());
-        self.tsk_action
-            .set_state(&self.tsk.is_some().to_variant());
+        self.mhc_action.set_state(&self.mhc.is_some().to_variant());
+        self.tsk_action.set_state(&self.tsk.is_some().to_variant());
     }
 
     fn apply_font(&self) {
@@ -1128,6 +1308,12 @@ impl App {
         self.strongs_popover.popdown();
         self.tsk_popover.popdown();
         self.apply_layout_tags();
+        self.chapter_marks = self
+            .user
+            .as_ref()
+            .and_then(|u| user_db::chapter_marks(u, self.at.book, self.at.chapter).ok())
+            .unwrap_or_default();
+        marks::apply_tags(&self.buffer, &self.layout, &self.chapter_marks);
         self.fill_xref_tips(conn);
         self.save_state();
         if highlight {
@@ -1220,8 +1406,30 @@ impl App {
                 };
             tips.push((link.span.start, link.span.end, preview));
         }
-        for mark in &self.layout.mhc {
-            tips.push((mark.span.start, mark.span.end, "Open Matthew Henry".into()));
+        for (span, (verse, _)) in self
+            .layout
+            .verse_nums
+            .iter()
+            .zip(self.layout.verse_start.iter())
+        {
+            let mut parts = Vec::new();
+            if self.layout.mhc.iter().any(|m| m.verse == *verse) {
+                parts.push("Open Matthew Henry".to_string());
+            }
+            if let Some(m) = self.chapter_marks.get(verse) {
+                if m.bookmark {
+                    parts.push("Bookmarked".into());
+                }
+                if m.highlight.is_some() {
+                    parts.push("Highlighted".into());
+                }
+                if m.note {
+                    parts.push("Has a note".into());
+                }
+            }
+            if !parts.is_empty() {
+                tips.push((span.start, span.end, parts.join(" · ")));
+            }
         }
         for mark in &self.layout.notes {
             tips.push((mark.span.start, mark.span.end, mark.text.clone()));
@@ -1354,13 +1562,137 @@ impl App {
         let start = self.buffer.start_iter();
         let end = self.buffer.end_iter();
         self.buffer.remove_tag(&tag, &start, &end);
-        let Some((_, vs)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
-            return;
-        };
-        let Some(span) = self.layout.verse_nums.iter().copied().find(|s| s.start == *vs) else {
+        let Some(span) = marks::verse_num_span(&self.layout, verse) else {
             return;
         };
         self.apply_tag("current-verse", span);
+    }
+
+    fn load_chapter_marks(&mut self) {
+        self.chapter_marks = self
+            .user
+            .as_ref()
+            .and_then(|u| user_db::chapter_marks(u, self.at.book, self.at.chapter).ok())
+            .unwrap_or_default();
+    }
+
+    fn reload_user_marks(&mut self, refresh_lists: bool) {
+        self.load_chapter_marks();
+        marks::apply_tags(&self.buffer, &self.layout, &self.chapter_marks);
+        if let Some(conn) = &self.conn {
+            self.fill_xref_tips(conn);
+        }
+        if refresh_lists {
+            if let (Some(widgets), Some(user)) = (&mut self.marks, &self.user) {
+                marks::refresh_lists(widgets, user, &self.books);
+            }
+        }
+    }
+
+    fn toggle_bookmark(&mut self) {
+        if let Some(user) = &self.user {
+            let _ = user_db::toggle_bookmark(user, self.at);
+        }
+        self.reload_user_marks(true);
+    }
+
+    fn set_highlight(&mut self, color: &str) {
+        let color = if color.is_empty() { None } else { Some(color) };
+        if let Some(user) = &self.user {
+            let _ = user_db::set_highlight(user, self.at, color);
+        }
+        self.reload_user_marks(false);
+    }
+
+    fn add_note(&mut self, sender: &ComponentSender<Self>) {
+        self.ensure_marks(sender, "notes");
+        let text = self
+            .user
+            .as_ref()
+            .and_then(|u| user_db::get_note(u, self.at).ok().flatten())
+            .unwrap_or_default();
+        if let Some(w) = &mut self.marks {
+            marks::edit_note(w, &self.books, self.at, &text);
+        }
+    }
+
+    fn ensure_marks(&mut self, sender: &ComponentSender<Self>, page: &str) {
+        if self.error.is_some() || self.user.is_none() {
+            return;
+        }
+        if self.marks.is_none() {
+            self.marks = Some(marks::open(sender.input_sender().clone()));
+        }
+        if let (Some(widgets), Some(user)) = (&mut self.marks, &self.user) {
+            marks::show_page(widgets, page);
+            marks::fill(widgets, user, &self.books);
+            widgets.window.present();
+        }
+    }
+
+    fn show_verse_menu(&mut self, offset: i32, x: i32, y: i32) {
+        if self.user.is_none() || self.error.is_some() {
+            return;
+        }
+        self.tsk_popover.popdown();
+        self.strongs_popover.popdown();
+        if let Some(verse) = layout::verse_at_offset(&self.layout.verse_start, offset) {
+            self.select_verse(verse);
+        }
+        let mark = self.chapter_marks.get(&self.at.verse);
+        let bookmarked = mark.is_some_and(|m| m.bookmark);
+        let has_note = mark.is_some_and(|m| m.note);
+        self.verse_menu
+            .set_menu_model(Some(&marks::verse_menu_model(bookmarked, has_note)));
+        self.verse_menu
+            .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
+        self.verse_menu.popup();
+    }
+
+    fn export_notes(&self, sender: &ComponentSender<Self>) {
+        if self.user.is_none() || self.conn.is_none() {
+            return;
+        }
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Export notes");
+        dialog.set_initial_name(Some("bible-app-notes.md"));
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Markdown"));
+        filter.add_suffix("md");
+        filter.add_mime_type("text/markdown");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        dialog.set_filters(Some(&filters));
+        dialog.set_default_filter(Some(&filter));
+        let parent = self.chapter_view.root().and_downcast::<gtk::Window>();
+        let sender = sender.clone();
+        dialog.save(parent.as_ref(), None::<&gio::Cancellable>, move |result| {
+            if let Ok(file) = result {
+                if let Some(path) = file.path() {
+                    sender.input(Msg::ExportWrite(path));
+                }
+            }
+        });
+    }
+
+    fn write_export(&self, path: &std::path::Path) {
+        let Some(user) = &self.user else { return };
+        let Some(conn) = &self.conn else { return };
+        match user_db::export_markdown(user, conn, &self.books) {
+            Ok(md) => {
+                if let Err(e) = std::fs::write(path, md) {
+                    self.alert("Could not export notes", &e.to_string());
+                }
+            }
+            Err(e) => self.alert("Could not export notes", &e.to_string()),
+        }
+    }
+
+    fn alert(&self, title: &str, body: &str) {
+        let dlg = adw::AlertDialog::new(Some(title), Some(body));
+        dlg.add_response("ok", "OK");
+        let parent = self.chapter_view.root().and_downcast::<gtk::Window>();
+        dlg.present(parent.as_ref());
     }
 
     fn scroll_to_top(&self) {
@@ -1425,10 +1757,7 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
 
     let commentary = gio::Menu::new();
     commentary.append(Some("Matthew Henry"), Some("win.mhc"));
-    commentary.append(
-        Some("Treasury of Scripture Knowledge"),
-        Some("win.tsk"),
-    );
+    commentary.append(Some("Treasury of Scripture Knowledge"), Some("win.tsk"));
     let dictionaries = gio::Menu::new();
     let topics = gio::Menu::new();
     for module in modules {
@@ -1442,6 +1771,12 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
             topics.append(Some(module.title.as_str()), Some(action.as_str()));
         }
     }
+    let marks = gio::Menu::new();
+    marks.append(Some("Bookmarks"), Some("win.bookmarks"));
+    marks.append(Some("Notes"), Some("win.notes"));
+    marks.append(Some("Export notes…"), Some("win.export-notes"));
+    menu.append_section(None, &marks);
+
     let study = gio::Menu::new();
     study.append_submenu(Some("Commentary"), &commentary);
     if dictionaries.n_items() > 0 {
@@ -1460,3 +1795,8 @@ relm4::new_stateless_action!(FontLargerAction, WindowActionGroup, "font-larger")
 relm4::new_stateless_action!(FontSmallerAction, WindowActionGroup, "font-smaller");
 relm4::new_stateful_action!(MhcAction, WindowActionGroup, "mhc", (), bool);
 relm4::new_stateful_action!(TskAction, WindowActionGroup, "tsk", (), bool);
+relm4::new_stateless_action!(BookmarksAction, WindowActionGroup, "bookmarks");
+relm4::new_stateless_action!(NotesAction, WindowActionGroup, "notes");
+relm4::new_stateless_action!(ExportNotesAction, WindowActionGroup, "export-notes");
+relm4::new_stateless_action!(ToggleBookmarkAction, WindowActionGroup, "toggle-bookmark");
+relm4::new_stateless_action!(AddNoteAction, WindowActionGroup, "add-note");

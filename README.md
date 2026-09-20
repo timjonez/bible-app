@@ -28,6 +28,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Menu → Commentary opens Matthew Henry or the Treasury of Scripture Knowledge for the current verse in a second window
 - Menu → Dictionary → Webster’s 1828, Easton, or another dictionary; type a headword in the search bar
 - Menu → Topics → Nave, Torrey, and the other topical works
+- Bookmarks, notes, and highlights are local, verse-anchored, and exportable as Markdown. They live in `~/.local/share/bible-app/user.sqlite`, not in the shipped library database. Right-click a verse to bookmark, highlight, or add a note; Menu → Bookmarks / Notes / Export notes…
 - Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
 
 The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, **Webster’s 1828**, the public-domain Bible dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set).
