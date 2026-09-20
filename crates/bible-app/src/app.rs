@@ -5,6 +5,7 @@ use crate::layout::{self, ChapterLayout};
 use crate::marks;
 use crate::mhc;
 use crate::nav::{self, Ref};
+use crate::occurrences;
 use crate::picker;
 use crate::search;
 use crate::strongs;
@@ -44,6 +45,7 @@ pub struct App {
     tsk: Option<tsk::TskWidgets>,
     dict: Option<dict::DictWidgets>,
     dict_modules: Vec<DictModule>,
+    occurrences: Option<occurrences::OccWidgets>,
     strongs_popover: gtk::Popover,
     strongs_at: i32,
     tsk_popover: gtk::Popover,
@@ -87,6 +89,9 @@ pub enum Msg {
     DictClosed,
     DictSearch(String),
     DictOpen(i32),
+    OpenStrongsOccurrences(String),
+    OpenOccurrenceHit(i32),
+    OccurrencesClosed,
     Back,
     Forward,
     CopyVerses,
@@ -597,6 +602,7 @@ impl SimpleComponent for App {
             tsk: None,
             dict: None,
             dict_modules,
+            occurrences: None,
             strongs_popover,
             strongs_at: 0,
             tsk_popover,
@@ -1064,6 +1070,23 @@ impl SimpleComponent for App {
                 if let Some(conn) = &self.conn {
                     dict::open_hit(widgets, conn, idx);
                 }
+            }
+            Msg::OpenStrongsOccurrences(code) => {
+                self.strongs_popover.popdown();
+                self.open_occurrences(&code, &sender);
+            }
+            Msg::OpenOccurrenceHit(idx) => {
+                let Some(widgets) = &self.occurrences else {
+                    return;
+                };
+                let Some(at) = occurrences::hit_at(widgets, idx) else {
+                    return;
+                };
+                self.search_open = false;
+                self.go(at, true);
+            }
+            Msg::OccurrencesClosed => {
+                self.occurrences = None;
             }
             Msg::Back => {
                 if self.search_open {
@@ -1553,6 +1576,7 @@ impl App {
             .iter()
             .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
             .collect();
+        let counts = strongs_counts(conn, &defs);
         let mut surface = layout::token_at(&self.layout.text, offset);
         if surface.is_empty() {
             surface = layout::word_surface(&self.layout.text, word.span);
@@ -1568,6 +1592,7 @@ impl App {
             &self.chapter_view,
             self.strongs_at,
             &defs,
+            &counts,
             &dict,
             sender.input_sender().clone(),
         );
@@ -1578,15 +1603,33 @@ impl App {
         let Some(def) = bible_app_db::lookup_strongs(conn, code).ok().flatten() else {
             return;
         };
+        let counts = strongs_counts(conn, std::slice::from_ref(&def));
         self.tsk_popover.popdown();
         strongs::present(
             &self.strongs_popover,
             &self.chapter_view,
             self.strongs_at,
             &[def],
+            &counts,
             &bible_app_db::ClickedDict::default(),
             sender.input_sender().clone(),
         );
+    }
+
+    fn open_occurrences(&mut self, code: &str, sender: &ComponentSender<Self>) {
+        if self.error.is_some() {
+            return;
+        }
+        if self.occurrences.is_none() {
+            let widgets = occurrences::open(sender.input_sender().clone());
+            self.occurrences = Some(widgets);
+        }
+        if let Some(widgets) = &mut self.occurrences {
+            if let Some(conn) = &self.conn {
+                occurrences::fill(widgets, conn, &self.books, code);
+            }
+            widgets.window.present();
+        }
     }
 
     fn open_library(
@@ -1794,6 +1837,15 @@ impl App {
 }
 
 type LoadedLibrary = (Connection, Vec<Book>, Ref, i32, bool);
+
+fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<usize> {
+    defs.iter()
+        .map(|d| {
+            let code = format!("{}{}", d.lang, d.num);
+            bible_app_db::strongs_occurrence_count(conn, &code).unwrap_or(0)
+        })
+        .collect()
+}
 
 fn load_library() -> Result<LoadedLibrary, String> {
     let path = config::locate_database()?;

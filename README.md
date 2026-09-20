@@ -22,7 +22,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Ctrl+- / Ctrl++: smaller / larger text (also in the menu)
 - Copy the current verse with citation (Ctrl+C / menu / right-click), not a header button. A chapter selection copies that verse range.
 - Click a verse (number or body) to select it; MHC and TSK follow that verse
-- Click a tagged KJV word for Strong’s plus a tab per matching dictionary (Easton, Smith, Webster, …). Each tab can open that word in the library window. Lemmas are not inserted beside words in the chapter.
+- Click a tagged KJV word for Strong’s plus a tab per matching dictionary (Easton, Smith, Webster, …). Each tab can open that word in the library window. The Strong’s tab can list every KJV verse for that number. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list
 - A verse number is a link when a Matthew Henry comment starts there; click it to open Matthew Henry

@@ -6,6 +6,7 @@ mod layout;
 mod marks;
 mod mhc;
 mod nav;
+mod occurrences;
 mod picker;
 mod search;
 mod strongs;

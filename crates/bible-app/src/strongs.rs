@@ -1,3 +1,4 @@
+use crate::occurrences;
 use adw::prelude::*;
 use bible_app_db::{ClickedDict, DictEntry, StrongDef};
 use gtk::glib;
@@ -17,6 +18,7 @@ pub fn present(
     view: &gtk::TextView,
     start: i32,
     defs: &[StrongDef],
+    counts: &[usize],
     dict: &ClickedDict,
     sender: relm4::Sender<super::app::Msg>,
 ) {
@@ -26,7 +28,7 @@ pub fn present(
     let mut pages = 0u32;
     if !defs.is_empty() {
         stack.add_titled(
-            &strongs_page(defs, sender.clone()),
+            &strongs_page(defs, counts, sender.clone()),
             Some("strongs"),
             "Strong's",
         );
@@ -106,7 +108,11 @@ fn library_button(
     btn
 }
 
-fn strongs_page(defs: &[StrongDef], sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
+fn strongs_page(
+    defs: &[StrongDef],
+    counts: &[usize],
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_start(14);
     body.set_margin_end(14);
@@ -133,7 +139,8 @@ fn strongs_page(defs: &[StrongDef], sender: relm4::Sender<super::app::Msg>) -> g
             body.append(&lemma);
         }
 
-        let title = gtk::Label::new(Some(&format!("{}{}", def.lang, def.num)));
+        let code = format!("{}{}", def.lang, def.num);
+        let title = gtk::Label::new(Some(&code));
         if def.lemma.is_empty() {
             title.add_css_class("heading");
         } else {
@@ -152,9 +159,9 @@ fn strongs_page(defs: &[StrongDef], sender: relm4::Sender<super::app::Msg>) -> g
             label.set_selectable(true);
             body.append(&label);
         }
-        for code in see {
+        for see_code in see {
             let link = gtk::Label::new(None);
-            link.set_markup(&format!("<a href=\"{code}\">See {code}</a>"));
+            link.set_markup(&format!("<a href=\"{see_code}\">See {see_code}</a>"));
             link.set_xalign(0.0);
             link.set_use_markup(true);
             let send = sender.clone();
@@ -164,16 +171,31 @@ fn strongs_page(defs: &[StrongDef], sender: relm4::Sender<super::app::Msg>) -> g
             });
             body.append(&link);
         }
-    }
-    if let Some(def) = defs.first() {
-        let code = format!("{}{}", def.lang, def.num);
         body.append(&library_button(
-            sender,
+            sender.clone(),
             bible_app_db::STRONGS_MODULE,
             &code,
         ));
+        let count = counts.get(i).copied().unwrap_or(0);
+        body.append(&occurrences_button(sender.clone(), &code, count));
     }
     body
+}
+
+fn occurrences_button(
+    sender: relm4::Sender<super::app::Msg>,
+    code: &str,
+    count: usize,
+) -> gtk::Button {
+    let btn = gtk::Button::with_label(&occurrences::see_all_label(code, count));
+    btn.set_halign(gtk::Align::Start);
+    btn.add_css_class("pill");
+    btn.set_tooltip_text(Some("List every KJV verse tagged with this number"));
+    let code = code.to_string();
+    btn.connect_clicked(move |_| {
+        sender.emit(super::app::Msg::OpenStrongsOccurrences(code.clone()));
+    });
+    btn
 }
 
 fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
