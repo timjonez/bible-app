@@ -89,6 +89,8 @@ pub enum Msg {
     DictOpen(i32),
     Back,
     Forward,
+    CopyVerses,
+    CopyAtOffset(i32),
     FontSmaller,
     FontLarger,
     SetParagraphs(bool),
@@ -469,6 +471,13 @@ impl SimpleComponent for App {
                 sender.input(Msg::SetParagraphs(*state));
             })
         };
+        let copy_verse: RelmAction<CopyVerseAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::CopyVerses))
+        };
+        if error.is_some() {
+            copy_verse.gio_action().set_enabled(false);
+        }
         let font_larger: RelmAction<FontLargerAction> = {
             let sender = sender.clone();
             RelmAction::new_stateless(move |_| sender.input(Msg::FontLarger))
@@ -545,8 +554,18 @@ impl SimpleComponent for App {
             highlight_sender.input(Msg::SetHighlight(color));
         });
 
+        let copy_offset = Rc::new(Cell::new(0i32));
+        let copy_here = gio::SimpleAction::new("copy-verse-here", None);
+        copy_here.set_enabled(error.is_none());
+        let copy_here_sender = sender.clone();
+        let copy_here_offset = copy_offset.clone();
+        copy_here.connect_activate(move |_, _| {
+            copy_here_sender.input(Msg::CopyAtOffset(copy_here_offset.get()));
+        });
+
         let mut group = RelmActionGroup::<WindowActionGroup>::new();
         group.add_action(paragraphs_action);
+        group.add_action(copy_verse);
         group.add_action(font_larger);
         group.add_action(font_smaller);
         group.add_action(mhc_action);
@@ -605,6 +624,7 @@ impl SimpleComponent for App {
         let group = group.into_action_group();
         group.add_action(&dict_action);
         group.add_action(&highlight_action);
+        group.add_action(&copy_here);
         root.insert_action_group("win", Some(&group));
         model.verse_menu.insert_action_group("win", Some(&group));
         model.goto_popover.set_parent(&widgets.title_box);
@@ -759,6 +779,7 @@ impl SimpleComponent for App {
         right.set_propagation_phase(gtk::PropagationPhase::Capture);
         let view = model.chapter_view.clone();
         let right_sender = sender.clone();
+        let right_offset = copy_offset.clone();
         right.connect_pressed(move |g, _, x, y| {
             g.set_state(gtk::EventSequenceState::Claimed);
             let (bx, by) =
@@ -767,6 +788,7 @@ impl SimpleComponent for App {
                 .iter_at_location(bx, by)
                 .map(|iter| iter.offset())
                 .unwrap_or(-1);
+            right_offset.set(offset);
             right_sender.input(Msg::VerseContext {
                 offset,
                 x: x as i32,
@@ -775,6 +797,18 @@ impl SimpleComponent for App {
         });
         model.chapter_view.add_controller(right);
 
+        let copy_keys = gtk::EventControllerKey::new();
+        copy_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let copy_key_sender = sender.clone();
+        copy_keys.connect_key_pressed(move |_, keyval, _, mods| {
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if ctrl && (keyval == gtk::gdk::Key::c || keyval == gtk::gdk::Key::C) {
+                copy_key_sender.input(Msg::CopyVerses);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        model.chapter_view.add_controller(copy_keys);
         let motion = gtk::EventControllerMotion::new();
         let view = model.chapter_view.clone();
         let tips = model.xref_tips.clone();
@@ -1051,6 +1085,14 @@ impl SimpleComponent for App {
                     self.sync_pickers();
                 }
             }
+            Msg::CopyVerses => {
+                self.copy_from_selection_or_current();
+            }
+            Msg::CopyAtOffset(offset) => {
+                let verse = layout::verse_at_offset(&self.layout.verse_start, offset)
+                    .unwrap_or(self.at.verse);
+                self.copy_verse_range(verse, verse);
+            }
             Msg::FontSmaller => {
                 self.font_size = layout::smaller_font(self.font_size);
                 self.apply_font();
@@ -1221,6 +1263,38 @@ impl App {
             "textview.chapter-view {{ font-size: {}pt; }}",
             self.font_size
         ));
+    }
+
+    fn copy_from_selection_or_current(&self) {
+        if let Some((from, to)) = self.selected_verse_range() {
+            self.copy_verse_range(from, to);
+            return;
+        }
+        self.copy_verse_range(self.at.verse, self.at.verse);
+    }
+
+    fn selected_verse_range(&self) -> Option<(u8, u8)> {
+        let (start, end) = self.buffer.selection_bounds()?;
+        layout::verses_in_selection(&self.layout.verse_start, start.offset(), end.offset())
+    }
+
+    fn copy_verse_range(&self, from: u8, to: u8) {
+        let Some(conn) = &self.conn else { return };
+        let Ok(chapter) = bible_app_db::chapter(conn, self.at.book, self.at.chapter) else {
+            return;
+        };
+        let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
+        let verses: Vec<_> = chapter
+            .into_iter()
+            .filter(|v| v.verse >= lo && v.verse <= hi)
+            .collect();
+        if verses.is_empty() {
+            return;
+        }
+        let text = layout::copy_verses(&self.books, &verses);
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&text);
+        }
     }
 
     fn xref_at(&self, offset: i32) -> Option<Ref> {
@@ -1631,7 +1705,7 @@ impl App {
     }
 
     fn show_verse_menu(&mut self, offset: i32, x: i32, y: i32) {
-        if self.user.is_none() || self.error.is_some() {
+        if self.error.is_some() {
             return;
         }
         self.tsk_popover.popdown();
@@ -1751,6 +1825,7 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     menu.append(Some("Paragraphs"), Some("win.paragraphs"));
 
     let text = gio::Menu::new();
+    text.append(Some("Copy verse"), Some("win.copy-verse"));
     text.append(Some("Larger text"), Some("win.font-larger"));
     text.append(Some("Smaller text"), Some("win.font-smaller"));
     menu.append_section(None, &text);
@@ -1791,6 +1866,7 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
 
 relm4::new_action_group!(WindowActionGroup, "win");
 relm4::new_stateful_action!(ParagraphsAction, WindowActionGroup, "paragraphs", (), bool);
+relm4::new_stateless_action!(CopyVerseAction, WindowActionGroup, "copy-verse");
 relm4::new_stateless_action!(FontLargerAction, WindowActionGroup, "font-larger");
 relm4::new_stateless_action!(FontSmallerAction, WindowActionGroup, "font-smaller");
 relm4::new_stateful_action!(MhcAction, WindowActionGroup, "mhc", (), bool);

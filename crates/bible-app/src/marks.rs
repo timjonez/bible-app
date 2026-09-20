@@ -116,6 +116,7 @@ fn apply_tag(buffer: &gtk::TextBuffer, name: &str, span: layout::Span) {
 
 pub fn verse_menu_model(bookmarked: bool, has_note: bool) -> gio::Menu {
     let menu = gio::Menu::new();
+    menu.append(Some("Copy verse"), Some("win.copy-verse-here"));
     let bookmark = if bookmarked {
         "Remove bookmark"
     } else {
