@@ -18,7 +18,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Alt+Left / Alt+Right: previous / next chapter
 - History back / forward (header icons, Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward)
 - Ctrl+L then type `John 3:16` and Enter
-- Ctrl+F searches the KJV without leaving the chapter; Enter on a result jumps to that verse
+- Ctrl+F searches the KJV by default without leaving the chapter; a scope menu in the overlay also searches commentary (MHC/TSK), dictionaries, and topics. Enter on a KJV hit jumps to that verse; commentary opens MHC or TSK; dictionary and topic hits open the library window
 - Ctrl+- / Ctrl++: smaller / larger text (also in the menu)
 - Click a verse (number or body) to select it; MHC and TSK follow that verse
 - Click a tagged KJV word for Strong’s plus a tab per matching dictionary (Easton, Smith, Webster, …). Each tab can open that word in the library window. Lemmas are not inserted beside words in the chapter.

@@ -9,7 +9,7 @@ use crate::search;
 use crate::strongs;
 use crate::tsk;
 use adw::prelude::*;
-use bible_app_db::{self, Book, DictModule, SearchHit};
+use bible_app_db::{self, Book, DictModule, LibraryHit, LibraryKind, SearchScope};
 use gtk::gio;
 use gtk::glib;
 use relm4::actions::{RelmAction, RelmActionGroup};
@@ -32,7 +32,8 @@ pub struct App {
     chapter_view: gtk::TextView,
     search_open: bool,
     search_query: String,
-    search_hits: Vec<SearchHit>,
+    search_scope: SearchScope,
+    search_hits: Vec<LibraryHit>,
     search_status: String,
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
@@ -64,6 +65,7 @@ pub enum Msg {
     GoTo(String),
     SetSearch(bool),
     Search(String),
+    SetSearchScope(SearchScope),
     SearchActivate,
     OpenHit(i32),
     ToggleMhc,
@@ -231,16 +233,30 @@ impl SimpleComponent for App {
                                         set_margin_top: 12,
                                         set_margin_bottom: 12,
 
-                                        #[local_ref]
-                                        search_entry -> gtk::SearchEntry {
-                                            set_placeholder_text: Some("Search the KJV"),
-                                            set_tooltip_text: Some("Search the King James Version"),
-                                            set_hexpand: true,
-                                            connect_search_changed[sender] => move |entry| {
-                                                sender.input(Msg::Search(entry.text().to_string()));
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Horizontal,
+                                            set_spacing: 8,
+
+                                            #[local_ref]
+                                            search_entry -> gtk::SearchEntry {
+                                                #[watch]
+                                                set_placeholder_text: Some(search::placeholder(model.search_scope)),
+                                                #[watch]
+                                                set_tooltip_text: Some(search::placeholder(model.search_scope)),
+                                                set_hexpand: true,
+                                                connect_search_changed[sender] => move |entry| {
+                                                    sender.input(Msg::Search(entry.text().to_string()));
+                                                },
+                                                connect_activate => Msg::SearchActivate,
+                                                connect_stop_search => Msg::SetSearch(false),
                                             },
-                                            connect_activate => Msg::SearchActivate,
-                                            connect_stop_search => Msg::SetSearch(false),
+
+                                            #[local_ref]
+                                            search_scope -> gtk::DropDown {
+                                                set_tooltip_text: Some("Search in"),
+                                                set_valign: gtk::Align::Center,
+                                                set_hexpand: false,
+                                            }
                                         },
 
                                         gtk::Label {
@@ -253,11 +269,17 @@ impl SimpleComponent for App {
 
                                         gtk::Label {
                                             #[watch]
-                                            set_label: search::empty_description(&model.search_query)
-                                                .unwrap_or(""),
+                                            set_label: search::empty_description(
+                                                &model.search_query,
+                                                model.search_scope,
+                                            )
+                                            .unwrap_or(""),
                                             #[watch]
-                                            set_visible: search::empty_description(&model.search_query)
-                                                .is_some(),
+                                            set_visible: search::empty_description(
+                                                &model.search_query,
+                                                model.search_scope,
+                                            )
+                                            .is_some(),
                                             set_xalign: 0.0,
                                             set_wrap: true,
                                             add_css_class: "dim-label",
@@ -334,6 +356,11 @@ impl SimpleComponent for App {
         chapter_dropdown.update_property(&[gtk::accessible::Property::Label("Chapter")]);
         let search_list = gtk::ListBox::new();
         let search_entry = gtk::SearchEntry::new();
+        let scope_labels = SearchScope::ALL.map(SearchScope::label);
+        let search_scope = gtk::DropDown::from_strings(&scope_labels);
+        search_scope.set_selected(SearchScope::Kjv.index());
+        search_scope.set_enable_search(false);
+        search_scope.update_property(&[gtk::accessible::Property::Label("Search in")]);
         let chapter_view = gtk::TextView::new();
         let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
         buffer.tag_table().add(&strongs::make_tag());
@@ -475,10 +502,7 @@ impl SimpleComponent for App {
             .as_ref()
             .and_then(|c| bible_app_db::dictionary_modules(c).ok())
             .unwrap_or_default();
-        let dict_action = gio::SimpleAction::new(
-            "open-dict",
-            Some(glib::VariantTy::STRING),
-        );
+        let dict_action = gio::SimpleAction::new("open-dict", Some(glib::VariantTy::STRING));
         dict_action.set_enabled(error.is_none() && !dict_modules.is_empty());
         let dict_sender = sender.clone();
         dict_action.connect_activate(move |_, param| {
@@ -507,8 +531,9 @@ impl SimpleComponent for App {
             chapter_view: chapter_view.clone(),
             search_open: false,
             search_query: String::new(),
+            search_scope: SearchScope::Kjv,
             search_hits: Vec::new(),
-            search_status: search::status("", 0, bible_app_db::DEFAULT_LIMIT),
+            search_status: search::status("", 0, bible_app_db::DEFAULT_LIMIT, SearchScope::Kjv),
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
             mhc: None,
@@ -663,6 +688,15 @@ impl SimpleComponent for App {
         });
         model.search_entry.add_controller(down);
 
+        let scope_sender = sender.clone();
+        search_scope.connect_selected_notify(move |dd| {
+            let pos = dd.selected();
+            if pos == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            scope_sender.input(Msg::SetSearchScope(SearchScope::from_index(pos)));
+        });
+
         let click = gtk::GestureClick::new();
         click.set_button(1);
         let view = model.chapter_view.clone();
@@ -814,16 +848,22 @@ impl SimpleComponent for App {
             Msg::Search(query) => {
                 self.run_search(query);
             }
+            Msg::SetSearchScope(scope) => {
+                if self.search_scope != scope {
+                    self.search_scope = scope;
+                    self.run_search(self.search_query.clone());
+                }
+            }
             Msg::SearchActivate => {
                 let idx = self
                     .search_list
                     .selected_row()
                     .map(|r| r.index())
                     .unwrap_or(0);
-                self.open_hit(idx);
+                self.open_hit(idx, &sender);
             }
             Msg::OpenHit(idx) => {
-                self.open_hit(idx);
+                self.open_hit(idx, &sender);
             }
             Msg::ToggleMhc => {
                 if let Some(widgets) = self.mhc.take() {
@@ -981,30 +1021,61 @@ impl App {
     fn run_search(&mut self, query: String) {
         self.search_query = query;
         self.search_hits = match &self.conn {
-            Some(conn) if !self.search_query.trim().is_empty() => {
-                bible_app_db::search_verses(conn, &self.search_query, bible_app_db::DEFAULT_LIMIT)
-                    .unwrap_or_default()
-            }
+            Some(conn) if !self.search_query.trim().is_empty() => bible_app_db::search_library(
+                conn,
+                &self.search_query,
+                self.search_scope,
+                bible_app_db::DEFAULT_LIMIT,
+            )
+            .unwrap_or_default(),
             _ => Vec::new(),
         };
         self.search_status = search::status(
             &self.search_query,
             self.search_hits.len(),
             bible_app_db::DEFAULT_LIMIT,
+            self.search_scope,
         );
         search::refill_list(&self.search_list, &self.search_hits, &self.books);
     }
 
-    fn open_hit(&mut self, idx: i32) {
+    fn open_hit(&mut self, idx: i32, sender: &ComponentSender<Self>) {
         let Ok(idx) = usize::try_from(idx) else {
             return;
         };
         let Some(hit) = self.search_hits.get(idx) else {
             return;
         };
+        let kind = hit.kind;
+        let module = hit.module.clone();
+        let headword = hit.headword.clone();
         let at = search::hit_ref(hit);
         self.search_open = false;
-        self.go(at, true);
+        match kind {
+            LibraryKind::Verse => {
+                let Some(at) = at else {
+                    return;
+                };
+                self.go(at, true);
+            }
+            LibraryKind::Commentary => {
+                let Some(at) = at else {
+                    return;
+                };
+                self.go(at, true);
+                if module == "TSK" {
+                    self.ensure_tsk(sender);
+                } else {
+                    self.ensure_mhc(sender);
+                }
+            }
+            LibraryKind::Dictionary | LibraryKind::Topic => {
+                let Some(headword) = headword.as_deref() else {
+                    return;
+                };
+                self.open_library(&module, Some(headword), sender);
+            }
+        }
     }
 
     fn focus_search(&self) {
@@ -1030,10 +1101,8 @@ impl App {
     }
 
     fn sync_study_actions(&self) {
-        self.mhc_action
-            .set_state(&self.mhc.is_some().to_variant());
-        self.tsk_action
-            .set_state(&self.tsk.is_some().to_variant());
+        self.mhc_action.set_state(&self.mhc.is_some().to_variant());
+        self.tsk_action.set_state(&self.tsk.is_some().to_variant());
     }
 
     fn apply_font(&self) {
@@ -1073,6 +1142,14 @@ impl App {
             self.mhc = Some(widgets);
         }
         self.refresh_mhc();
+    }
+
+    fn ensure_tsk(&mut self, sender: &ComponentSender<Self>) {
+        if self.tsk.is_none() && self.error.is_none() {
+            let widgets = tsk::open(sender.input_sender().clone(), self.at, &self.books);
+            self.tsk = Some(widgets);
+        }
+        self.refresh_tsk();
     }
 
     fn refresh_chapter(&mut self, highlight: bool) {
@@ -1357,7 +1434,13 @@ impl App {
         let Some((_, vs)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
             return;
         };
-        let Some(span) = self.layout.verse_nums.iter().copied().find(|s| s.start == *vs) else {
+        let Some(span) = self
+            .layout
+            .verse_nums
+            .iter()
+            .copied()
+            .find(|s| s.start == *vs)
+        else {
             return;
         };
         self.apply_tag("current-verse", span);
@@ -1425,10 +1508,7 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
 
     let commentary = gio::Menu::new();
     commentary.append(Some("Matthew Henry"), Some("win.mhc"));
-    commentary.append(
-        Some("Treasury of Scripture Knowledge"),
-        Some("win.tsk"),
-    );
+    commentary.append(Some("Treasury of Scripture Knowledge"), Some("win.tsk"));
     let dictionaries = gio::Menu::new();
     let topics = gio::Menu::new();
     for module in modules {
