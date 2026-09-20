@@ -905,6 +905,54 @@ pub fn word_at_offset(words: &[WordSpan], offset: i32) -> Option<&WordSpan> {
         .find(|w| w.span.contains(offset) || w.lemma_span.is_some_and(|s| s.contains(offset)))
 }
 
+/// Verses covered by a half-open text selection `[start, end)`.
+pub fn verses_in_selection(verse_start: &[(u8, i32)], start: i32, end: i32) -> Option<(u8, u8)> {
+    if end <= start {
+        return None;
+    }
+    let v1 = verse_at_offset(verse_start, start)?;
+    let v2 = verse_at_offset(verse_start, end - 1)?;
+    Some(if v1 <= v2 { (v1, v2) } else { (v2, v1) })
+}
+
+/// Current-verse (or range) copy with a `Book chapter:verse` citation and `KJV`.
+pub fn copy_verses(books: &[Book], verses: &[Verse]) -> String {
+    if verses.is_empty() {
+        return String::new();
+    }
+    let body: Vec<String> = verses
+        .iter()
+        .map(|v| {
+            let (stored, _) = split_notes(&v.text);
+            let (text, _) = strip_supplied(&stored);
+            if verses.len() == 1 {
+                text
+            } else {
+                format!("{} {text}", v.verse)
+            }
+        })
+        .collect();
+    let first = &verses[0];
+    let last = verses.last().unwrap();
+    let name = books
+        .iter()
+        .find(|b| b.id == first.book)
+        .map(|b| b.name.as_str())
+        .unwrap_or("Book");
+    let cite =
+        if first.book == last.book && first.chapter == last.chapter && first.verse == last.verse {
+            format!("{name} {}:{}", first.chapter, first.verse)
+        } else if first.book == last.book && first.chapter == last.chapter {
+            format!("{name} {}:{}–{}", first.chapter, first.verse, last.verse)
+        } else {
+            format!(
+                "{name} {}:{}–{}:{}",
+                first.chapter, first.verse, last.chapter, last.verse
+            )
+        };
+    format!("{}\n\n{cite} (KJV)", body.join("\n\n"))
+}
+
 pub fn smaller_font(pt: i32) -> i32 {
     (pt - 1).clamp(MIN_FONT, MAX_FONT)
 }
@@ -1630,6 +1678,119 @@ God creates heaven and earth.
         assert_eq!(last.start, s3);
         assert_eq!(last.end, text_end);
         assert!(!last.contains(text_end));
+    }
+
+    #[test]
+    fn verses_in_selection_covers_the_spanned_range() {
+        let verses = vec![
+            verse(1, "First verse", true),
+            verse(2, "Second verse", false),
+            verse(3, "Third verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        let s1 = layout.verse_start[0].1;
+        let s2 = layout.verse_start[1].1;
+        let s3 = layout.verse_start[2].1;
+        assert_eq!(verses_in_selection(&layout.verse_start, s1, s1), None);
+        assert_eq!(
+            verses_in_selection(&layout.verse_start, s1, s2),
+            Some((1, 1))
+        );
+        assert_eq!(
+            verses_in_selection(&layout.verse_start, s1, s3),
+            Some((1, 2))
+        );
+        assert_eq!(
+            verses_in_selection(&layout.verse_start, s2, s3 + 1),
+            Some((2, 3))
+        );
+        assert_eq!(
+            verses_in_selection(&layout.verse_start, s3, s2),
+            None,
+            "inverted bounds are empty"
+        );
+    }
+
+    #[test]
+    fn copy_verses_includes_text_citation_and_kjv() {
+        let verses = vec![Verse {
+            book: 1,
+            chapter: 1,
+            verse: 1,
+            text: "In the [beginning] God created. {beginning: Heb. head}".into(),
+            para_break: true,
+        }];
+        let out = copy_verses(&books(), &verses);
+        assert!(out.contains("In the beginning God created"), "{out}");
+        assert!(!out.contains('['), "{out}");
+        assert!(!out.contains('{'), "{out}");
+        assert!(!out.contains("Heb. head"), "{out}");
+        assert!(out.contains("Genesis 1:1"), "{out}");
+        assert!(out.contains("KJV"), "{out}");
+    }
+
+    #[test]
+    fn copy_verses_range_prefixes_numbers_and_cites_span() {
+        let verses = vec![
+            Verse {
+                book: 1,
+                chapter: 1,
+                verse: 1,
+                text: "In the [beginning] God created. {beginning: Heb. head}".into(),
+                para_break: true,
+            },
+            Verse {
+                book: 1,
+                chapter: 1,
+                verse: 2,
+                text: "And the earth was without form.".into(),
+                para_break: false,
+            },
+            Verse {
+                book: 1,
+                chapter: 1,
+                verse: 3,
+                text: "And God said, Let there be light.".into(),
+                para_break: false,
+            },
+        ];
+        let out = copy_verses(&books(), &verses);
+        assert!(out.contains("1 In the beginning God created"), "{out}");
+        assert!(out.contains("2 And the earth was without form"), "{out}");
+        assert!(out.contains("3 And God said, Let there be light"), "{out}");
+        assert!(!out.contains('['), "{out}");
+        assert!(!out.contains('{'), "{out}");
+        assert!(!out.contains("Heb. head"), "{out}");
+        assert!(out.contains("Genesis 1:1–3"), "{out}");
+        assert!(out.contains("KJV"), "{out}");
+    }
+
+    #[test]
+    fn copy_verses_cross_chapter_citation() {
+        let verses = vec![
+            Verse {
+                book: 1,
+                chapter: 1,
+                verse: 31,
+                text: "And God saw every thing.".into(),
+                para_break: false,
+            },
+            Verse {
+                book: 1,
+                chapter: 2,
+                verse: 1,
+                text: "Thus the heavens and the earth were finished.".into(),
+                para_break: true,
+            },
+        ];
+        let out = copy_verses(&books(), &verses);
+        assert!(out.contains("31 And God saw every thing"), "{out}");
+        assert!(
+            out.contains("1 Thus the heavens and the earth were finished"),
+            "{out}"
+        );
+        assert!(out.contains("Genesis 1:31–2:1"), "{out}");
+        assert!(out.contains("KJV"), "{out}");
     }
 
     #[test]
