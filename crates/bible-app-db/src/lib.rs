@@ -7,7 +7,9 @@ use thiserror::Error;
 
 pub use occurrences::{strongs_occurrence_count, strongs_occurrences, Occurrence};
 pub use search::{
-    ensure_verses_fts, match_query, rebuild_verses_fts, search_verses, SearchHit, DEFAULT_LIMIT,
+    ensure_entries_fts, ensure_resources_fts, ensure_verses_fts, match_query, rebuild_entries_fts,
+    rebuild_resources_fts, rebuild_verses_fts, search_library, search_verses, LibraryHit,
+    LibraryKind, SearchHit, SearchScope, DEFAULT_LIMIT,
 };
 
 pub const SCHEMA_VERSION: i32 = 6;
@@ -41,6 +43,8 @@ pub fn open(path: &Path) -> Result<Connection, DbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(&conn)?;
     ensure_verses_fts(&conn)?;
+    ensure_resources_fts(&conn)?;
+    ensure_entries_fts(&conn)?;
     Ok(conn)
 }
 
@@ -144,6 +148,23 @@ pub fn init_schema(conn: &Connection) -> Result<(), DbError> {
             book UNINDEXED,
             chapter UNINDEXED,
             verse UNINDEXED,
+            tokenize = 'unicode61'
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
+            text,
+            module UNINDEXED,
+            book UNINDEXED,
+            chapter UNINDEXED,
+            verse UNINDEXED,
+            tokenize = 'unicode61'
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+            headword,
+            text,
+            module UNINDEXED,
+            i UNINDEXED,
             tokenize = 'unicode61'
         );
         "#,
@@ -343,11 +364,7 @@ pub fn parse_strongs_code(code: &str) -> Option<(i32, String)> {
 
 pub const STRONGS_MODULE: &str = "Strongs";
 
-pub fn search_strongs(
-    conn: &Connection,
-    query: &str,
-    limit: i32,
-) -> Result<Vec<DictHit>, DbError> {
+pub fn search_strongs(conn: &Connection, query: &str, limit: i32) -> Result<Vec<DictHit>, DbError> {
     let pattern = like_prefix(query);
     let mut stmt = conn.prepare(
         "SELECT num, lang, lemma FROM strongs
@@ -367,10 +384,7 @@ pub fn search_strongs(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn get_strongs_entry(
-    conn: &Connection,
-    i: i32,
-) -> Result<Option<(String, String)>, DbError> {
+pub fn get_strongs_entry(conn: &Connection, i: i32) -> Result<Option<(String, String)>, DbError> {
     let Some((num, lang)) = strongs_row_parts(i) else {
         return Ok(None);
     };
@@ -949,7 +963,8 @@ mod tests {
         assert_eq!(mods[0].id, "Webster");
         let hits = search_entries(&conn, "Webster", "prevent", 20).unwrap();
         assert!(
-            hits.iter().any(|h| h.headword.eq_ignore_ascii_case("prevent")),
+            hits.iter()
+                .any(|h| h.headword.eq_ignore_ascii_case("prevent")),
             "prevent missing from {hits:?}"
         );
         let hit = hits
