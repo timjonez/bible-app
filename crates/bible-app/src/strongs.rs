@@ -43,6 +43,15 @@ pub fn present(
         );
         pages += 1;
     }
+    for entry in &dict.topics {
+        let name = dict_tab_label(entry);
+        stack.add_titled(
+            &dict_page(entry, sender.clone()),
+            Some(&entry.module),
+            &name,
+        );
+        pages += 1;
+    }
     if let Some(entry) = &dict.english {
         let name = dict_tab_label(entry);
         stack.add_titled(
@@ -79,6 +88,8 @@ fn dict_tab_label(entry: &DictEntry) -> String {
         "Smith" => "Smith's".into(),
         "Names" => "Hitchcock's".into(),
         "ATSD" => "ATS".into(),
+        "Nave" => "Nave".into(),
+        "Torrey" => "Torrey".into(),
         _ => entry
             .title
             .split_whitespace()
@@ -396,5 +407,23 @@ mod tests {
     fn several_see_lines() {
         let (_, codes) = split_see_also("See H410 \nSee H430", "H");
         assert_eq!(codes, vec!["H410".to_string(), "H430".to_string()]);
+    }
+
+    #[test]
+    fn topic_tab_labels_use_short_names() {
+        let nave = DictEntry {
+            module: "Nave".into(),
+            title: "Nave's Topical Bible".into(),
+            headword: "God".into(),
+            text: "topic".into(),
+        };
+        let torrey = DictEntry {
+            module: "Torrey".into(),
+            title: "Torrey's Topical Textbook".into(),
+            headword: "God".into(),
+            text: "topic".into(),
+        };
+        assert_eq!(dict_tab_label(&nave), "Nave");
+        assert_eq!(dict_tab_label(&torrey), "Torrey");
     }
 }
