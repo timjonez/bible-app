@@ -1,28 +1,23 @@
 use crate::nav::{self, Ref};
 use adw::prelude::*;
 use bible_app_db::Book;
-use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
 
 pub struct TskWidgets {
-    pub window: adw::ApplicationWindow,
-    pub title: adw::WindowTitle,
+    pub root: gtk::Widget,
+    pub heading: gtk::Label,
     pub buffer: gtk::TextBuffer,
     pub xref_list: gtk::ListBox,
     pub xrefs: Vec<Ref>,
 }
 
-pub fn open(sender: relm4::Sender<super::app::Msg>, at: Ref, books: &[Book]) -> TskWidgets {
-    let app = relm4::main_adw_application();
-    let window = adw::ApplicationWindow::new(&app);
-    window.set_title(Some("Treasury of Scripture Knowledge"));
-    window.set_default_size(520, 720);
-
-    let subtitle = nav::format_ref(books, at);
-    let title = adw::WindowTitle::new("TSK", &subtitle);
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title));
+pub fn build(sender: relm4::Sender<super::app::Msg>) -> TskWidgets {
+    let heading = gtk::Label::new(None);
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    heading.set_wrap_mode(gtk::pango::WrapMode::WordChar);
 
     let xref_list = gtk::ListBox::new();
     xref_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -31,8 +26,7 @@ pub fn open(sender: relm4::Sender<super::app::Msg>, at: Ref, books: &[Book]) -> 
     let list = xref_list.clone();
     let send = sender.clone();
     xref_list.connect_row_activated(move |_, row| {
-        let idx = row.index();
-        send.emit(super::app::Msg::OpenTskXref(idx));
+        send.emit(super::app::Msg::OpenTskXref(row.index()));
     });
 
     let xref_scroll = gtk::ScrolledWindow::new();
@@ -66,31 +60,28 @@ pub fn open(sender: relm4::Sender<super::app::Msg>, at: Ref, books: &[Book]) -> 
     let hint = gtk::Label::new(Some("Cross-references"));
     hint.set_xalign(0.0);
     hint.add_css_class("heading");
+    body.append(&heading);
     body.append(&hint);
     body.append(&xref_scroll);
     body.append(&text_scroll);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&body));
-    window.set_content(Some(&toolbar));
-
-    window.connect_close_request(move |_| {
-        sender.emit(super::app::Msg::TskClosed);
-        glib::Propagation::Proceed
-    });
-    window.present();
     TskWidgets {
-        window,
-        title,
+        root: body.upcast(),
+        heading,
         buffer,
         xref_list,
         xrefs: Vec::new(),
     }
 }
 
-pub fn fill(widgets: &mut TskWidgets, conn: &Connection, books: &[Book], at: Ref) {
-    widgets.title.set_subtitle(&nav::format_ref(books, at));
+pub fn fill(
+    widgets: &mut TskWidgets,
+    conn: &Connection,
+    books: &[Book],
+    at: Ref,
+    sender: relm4::Sender<super::app::Msg>,
+) {
+    widgets.heading.set_label(&nav::format_ref(books, at));
     match bible_app_db::resource_covering(conn, "TSK", at.book, at.chapter, at.verse) {
         Ok(Some(res)) => {
             if res.verse != at.verse {
@@ -103,8 +94,8 @@ pub fn fill(widgets: &mut TskWidgets, conn: &Connection, books: &[Book], at: Ref
                     },
                 );
                 widgets
-                    .title
-                    .set_subtitle(&format!("{} · from {covering}", nav::format_ref(books, at)));
+                    .heading
+                    .set_label(&format!("{} · from {covering}", nav::format_ref(books, at)));
             }
             widgets.buffer.set_text(&res.text);
         }
@@ -126,7 +117,7 @@ pub fn fill(widgets: &mut TskWidgets, conn: &Connection, books: &[Book], at: Ref
             verse: x.verse,
         })
         .collect();
-    refill_xrefs(&widgets.xref_list, &widgets.xrefs, books);
+    refill_xrefs(&widgets.xref_list, &widgets.xrefs, books, sender);
 }
 
 pub fn xref_at(widgets: &TskWidgets, idx: i32) -> Option<Ref> {
@@ -156,7 +147,7 @@ pub fn present_phrase(
     body.set_margin_end(12);
     body.set_margin_top(10);
     body.set_margin_bottom(10);
-    body.set_width_request(260);
+    body.set_width_request(280);
 
     let title = gtk::Label::new(Some(heading));
     title.add_css_class("heading");
@@ -169,25 +160,17 @@ pub fn present_phrase(
     list.add_css_class("boxed-list");
     list.set_accessible_role(gtk::AccessibleRole::List);
     let dests_vec = dests.to_vec();
+    let jump = sender.clone();
     list.connect_row_activated(move |_, row| {
         let Ok(idx) = usize::try_from(row.index()) else {
             return;
         };
         if let Some(at) = dests_vec.get(idx).copied() {
-            sender.emit(super::app::Msg::OpenTskDest(at));
+            jump.emit(super::app::Msg::OpenTskDest(at));
         }
     });
     for at in dests {
-        let row = gtk::ListBoxRow::new();
-        let label = gtk::Label::new(Some(&nav::format_ref(books, *at)));
-        label.set_xalign(0.0);
-        label.set_margin_start(10);
-        label.set_margin_end(10);
-        label.set_margin_top(6);
-        label.set_margin_bottom(6);
-        row.set_child(Some(&label));
-        row.set_activatable(true);
-        list.append(&row);
+        list.append(&dest_row(*at, books, sender.clone()));
     }
 
     let scroll = gtk::ScrolledWindow::new();
@@ -207,20 +190,42 @@ pub fn present_phrase(
     popover.popup();
 }
 
-fn refill_xrefs(list: &gtk::ListBox, xrefs: &[Ref], books: &[Book]) {
+fn dest_row(at: Ref, books: &[Book], sender: relm4::Sender<super::app::Msg>) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    box_.set_margin_start(10);
+    box_.set_margin_end(6);
+    box_.set_margin_top(4);
+    box_.set_margin_bottom(4);
+    let label = gtk::Label::new(Some(&nav::format_ref(books, at)));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    box_.append(&label);
+    let beside = gtk::Button::from_icon_name("tab-new-symbolic");
+    beside.set_tooltip_text(Some("Open beside"));
+    beside.add_css_class("flat");
+    beside.set_valign(gtk::Align::Center);
+    beside.set_has_frame(false);
+    beside.connect_clicked(move |_| {
+        sender.emit(super::app::Msg::OpenTskDestBeside(at));
+    });
+    box_.append(&beside);
+    row.set_child(Some(&box_));
+    row.set_activatable(true);
+    row
+}
+
+fn refill_xrefs(
+    list: &gtk::ListBox,
+    xrefs: &[Ref],
+    books: &[Book],
+    sender: relm4::Sender<super::app::Msg>,
+) {
     while let Some(child) = list.row_at_index(0) {
         list.remove(&child);
     }
     for at in xrefs {
-        let row = gtk::ListBoxRow::new();
-        let label = gtk::Label::new(Some(&nav::format_ref(books, *at)));
-        label.set_xalign(0.0);
-        label.set_margin_start(12);
-        label.set_margin_end(12);
-        label.set_margin_top(8);
-        label.set_margin_bottom(8);
-        row.set_child(Some(&label));
-        row.set_activatable(true);
-        list.append(&row);
+        list.append(&dest_row(*at, books, sender.clone()));
     }
 }

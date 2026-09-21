@@ -1,16 +1,18 @@
 use crate::config;
 use crate::dict;
-use crate::history::History;
-use crate::layout::{self, ChapterLayout};
+use crate::layout;
 use crate::marks;
 use crate::mhc;
 use crate::nav::{self, Ref};
 use crate::occurrences;
+use crate::passage::{self, PassageView};
 use crate::picker;
 use crate::search;
+use crate::shell::{self, DetachedHost, SplitShell};
 use crate::strongs;
 use crate::tsk;
 use crate::user_db;
+use crate::workspace::{CloseOutcome, MarksPage, Pane, TabId, TabKind, Workspace};
 use adw::prelude::*;
 use bible_app_db::{self, Book, DictModule, LibraryHit, LibraryKind, SearchScope};
 use gtk::gio;
@@ -25,16 +27,33 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+struct HostedTab {
+    page: adw::TabPage,
+    content: TabContent,
+}
+
+enum TabContent {
+    Passage(Box<PassageView>),
+    Mhc(mhc::MhcWidgets),
+    Tsk(tsk::TskWidgets),
+    Library(dict::DictWidgets),
+    Marks(marks::MarksWidgets),
+    Occurrences(occurrences::OccWidgets),
+}
+
+#[derive(Clone)]
+struct MainViews {
+    left: adw::TabView,
+    right: adw::TabView,
+}
+
 pub struct App {
     conn: Option<Connection>,
     books: Vec<Book>,
-    at: Ref,
     error: Option<String>,
-    buffer: gtk::TextBuffer,
     book_dropdown: gtk::DropDown,
     chapter_dropdown: gtk::DropDown,
     picker_syncing: Rc<Cell<bool>>,
-    chapter_view: gtk::TextView,
     search_open: bool,
     search_query: String,
     search_scope: SearchScope,
@@ -42,28 +61,24 @@ pub struct App {
     search_status: String,
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
-    mhc: Option<mhc::MhcWidgets>,
-    tsk: Option<tsk::TskWidgets>,
-    dict: Option<dict::DictWidgets>,
     dict_modules: Vec<DictModule>,
-    occurrences: Option<occurrences::OccWidgets>,
-    strongs_popover: gtk::Popover,
-    strongs_at: i32,
-    tsk_popover: gtk::Popover,
-    goto_entry: gtk::Entry,
-    goto_popover: gtk::Popover,
-    history: History,
-    layout: ChapterLayout,
     font_size: i32,
     paragraphs: bool,
     font_provider: gtk::CssProvider,
-    xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
     mhc_action: gio::SimpleAction,
     tsk_action: gio::SimpleAction,
+    follow_action: gio::SimpleAction,
     user: Option<Connection>,
-    chapter_marks: HashMap<u8, user_db::VerseMarks>,
-    marks: Option<marks::MarksWidgets>,
-    verse_menu: gtk::PopoverMenu,
+    workspace: Workspace,
+    hosted: HashMap<TabId, HostedTab>,
+    shell: Option<SplitShell>,
+    detached: Rc<RefCell<Vec<DetachedHost>>>,
+    menu_tab: Rc<Cell<Option<TabId>>>,
+    goto_entry: gtk::Entry,
+    goto_popover: gtk::Popover,
+    actions: gio::SimpleActionGroup,
+    msg_tx: relm4::Sender<Msg>,
+    copy_offset: Rc<Cell<i32>>,
 }
 
 #[derive(Debug)]
@@ -73,27 +88,32 @@ pub enum Msg {
     PrevChapter,
     NextChapter,
     GoTo(String),
+    GoToBeside(String),
     SetSearch(bool),
     Search(String),
     SetSearchScope(SearchScope),
     SearchActivate,
     OpenHit(i32),
+    OpenHitBeside(i32),
     ToggleMhc,
-    MhcClosed,
     ToggleTsk,
-    TskClosed,
     OpenTskXref(i32),
     OpenTskDest(Ref),
+    OpenTskDestBeside(Ref),
     OpenStrongsCode(String),
-    ClickWord(i32),
+    ClickWord {
+        id: TabId,
+        offset: i32,
+    },
     OpenDict(String),
-    OpenDictWord { module: String, headword: String },
-    DictClosed,
+    OpenDictWord {
+        module: String,
+        headword: String,
+    },
     DictSearch(String),
     DictOpen(i32),
     OpenStrongsOccurrences(String),
     OpenOccurrenceHit(i32),
-    OccurrencesClosed,
     Back,
     Forward,
     CopyVerses,
@@ -103,7 +123,6 @@ pub enum Msg {
     SetParagraphs(bool),
     OpenBookmarks,
     OpenNotes,
-    MarksClosed,
     MarksBookmarkActivated(i32),
     MarksBookmarkSelected,
     MarksNoteActivated(i32),
@@ -114,9 +133,25 @@ pub enum Msg {
     ToggleBookmark,
     SetHighlight(String),
     AddNote,
-    VerseContext { offset: i32, x: i32, y: i32 },
+    VerseContext {
+        id: TabId,
+        offset: i32,
+        x: i32,
+        y: i32,
+    },
     ExportNotes,
     ExportWrite(PathBuf),
+    TabSelected(TabId),
+    TabClosed(TabId),
+    TabAttached {
+        id: TabId,
+        pane: Pane,
+        detached: bool,
+    },
+    SetupTabMenu(Option<TabId>),
+    DetachMenuTab,
+    BesideMenuTab,
+    SetTabFollow(bool),
 }
 
 #[relm4::component(pub)]
@@ -197,7 +232,7 @@ impl SimpleComponent for App {
                                 set_tooltip_text: Some("Back in history (Alt+Shift+Left)"),
                                 set_valign: gtk::Align::Center,
                                 #[watch]
-                                set_sensitive: model.history.can_back() && !model.search_open,
+                                set_sensitive: model.can_back() && !model.search_open,
                                 connect_clicked => Msg::Back,
                             },
                             gtk::Button {
@@ -205,7 +240,7 @@ impl SimpleComponent for App {
                                 set_tooltip_text: Some("Forward in history (Alt+Shift+Right)"),
                                 set_valign: gtk::Align::Center,
                                 #[watch]
-                                set_sensitive: model.history.can_forward() && !model.search_open,
+                                set_sensitive: model.can_forward() && !model.search_open,
                                 connect_clicked => Msg::Forward,
                             },
                         },
@@ -273,7 +308,7 @@ impl SimpleComponent for App {
                                                 #[watch]
                                                 set_placeholder_text: Some(search::placeholder(model.search_scope)),
                                                 #[watch]
-                                                set_tooltip_text: Some(search::placeholder(model.search_scope)),
+                                                set_tooltip_text: Some("Enter jumps in the current passage. Shift+Enter opens beside."),
                                                 set_hexpand: true,
                                                 connect_search_changed[sender] => move |entry| {
                                                     sender.input(Msg::Search(entry.text().to_string()));
@@ -346,27 +381,11 @@ impl SimpleComponent for App {
                             }
                         },
 
-                        gtk::ScrolledWindow {
+                        #[local_ref]
+                        workspace_host -> gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
                             set_hexpand: true,
                             set_vexpand: true,
-                            set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
-
-                            #[local_ref]
-                            chapter_view -> gtk::TextView {
-                                set_buffer: Some(&model.buffer),
-                                set_editable: false,
-                                set_cursor_visible: false,
-                                set_wrap_mode: gtk::WrapMode::WordChar,
-                                set_left_margin: 28,
-                                set_right_margin: 28,
-                                set_top_margin: 20,
-                                set_bottom_margin: 24,
-                                set_pixels_above_lines: 1,
-                                set_pixels_below_lines: 1,
-                                set_has_tooltip: true,
-                                add_css_class: "chapter-view",
-                                set_accessible_role: gtk::AccessibleRole::Document,
-                            }
                         }
                     }
                 },
@@ -392,69 +411,9 @@ impl SimpleComponent for App {
         search_scope.set_selected(SearchScope::Kjv.index());
         search_scope.set_enable_search(false);
         search_scope.update_property(&[gtk::accessible::Property::Label("Search in")]);
-        let chapter_view = gtk::TextView::new();
-        let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-        buffer.tag_table().add(&strongs::make_tag());
-        let italic = gtk::TextTag::new(Some("italic"));
-        italic.set_style(gtk::pango::Style::Italic);
-        buffer.tag_table().add(&italic);
-        let verse_num = gtk::TextTag::new(Some("verse-num"));
-        verse_num.set_weight(700);
-        verse_num.set_scale(0.75);
-        verse_num.set_rise(gtk::pango::SCALE * 4);
-        verse_num.set_foreground(Some("#9a9996"));
-        buffer.tag_table().add(&verse_num);
-        let note = gtk::TextTag::new(Some("note"));
-        note.set_style(gtk::pango::Style::Italic);
-        note.set_foreground(Some("#77767b"));
-        note.set_scale(0.85);
-        buffer.tag_table().add(&note);
-        let note_mark = gtk::TextTag::new(Some("note-mark"));
-        note_mark.set_foreground(Some("#77767b"));
-        note_mark.set_scale(0.7);
-        note_mark.set_rise(4 * gtk::pango::SCALE);
-        buffer.tag_table().add(&note_mark);
-        let apparatus = gtk::TextTag::new(Some("apparatus"));
-        apparatus.set_foreground(Some("#9a9996"));
-        apparatus.set_scale(0.8);
-        apparatus.set_left_margin(44);
-        apparatus.set_pixels_above_lines(2);
-        buffer.tag_table().add(&apparatus);
-        let xref = gtk::TextTag::new(Some("xref"));
-        xref.set_underline(gtk::pango::Underline::Single);
-        xref.set_foreground(Some("#1c71d8"));
-        xref.set_scale(0.8);
-        buffer.tag_table().add(&xref);
-        let mhc_tag = gtk::TextTag::new(Some("mhc-num"));
-        mhc_tag.set_weight(700);
-        mhc_tag.set_foreground(Some("#1c71d8"));
-        buffer.tag_table().add(&mhc_tag);
-        let tsk_sup = gtk::TextTag::new(Some("tsk-sup"));
-        tsk_sup.set_foreground(Some("#1c71d8"));
-        tsk_sup.set_scale(0.7);
-        tsk_sup.set_rise(4 * 1024);
-        buffer.tag_table().add(&tsk_sup);
-        let lemma = gtk::TextTag::new(Some("lemma"));
-        lemma.set_foreground(Some("#77767b"));
-        lemma.set_scale(0.85);
-        buffer.tag_table().add(&lemma);
-        let current_verse = gtk::TextTag::new(Some("current-verse"));
-        current_verse.set_foreground(Some("#99c1f1"));
-        current_verse.set_weight(700);
-        buffer.tag_table().add(&current_verse);
-        marks::install_tags(&buffer);
-        current_verse.set_priority(0);
-        apparatus.set_priority(0);
-        note.set_priority(0);
-        verse_num.set_priority(1);
-        italic.set_priority(1);
-        lemma.set_priority(1);
-        xref.set_priority(2);
-        mhc_tag.set_priority(2);
-        tsk_sup.set_priority(2);
-        note_mark.set_priority(2);
-        let strongs_popover = strongs::create(&chapter_view);
-        let tsk_popover = tsk::create_popover(&chapter_view);
+        let workspace_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        workspace_host.set_hexpand(true);
+        workspace_host.set_vexpand(true);
         let font_provider = gtk::CssProvider::new();
         if let Some(display) = gtk::gdk::Display::default() {
             gtk::style_context_add_provider_for_display(
@@ -484,7 +443,9 @@ impl SimpleComponent for App {
 
         let goto_entry = gtk::Entry::new();
         goto_entry.set_placeholder_text(Some("John 3:16"));
-        goto_entry.set_tooltip_text(Some("Go to a reference, then press Enter (Ctrl+L)"));
+        goto_entry.set_tooltip_text(Some(
+            "Go to a reference (Enter). Shift+Enter opens beside (Ctrl+L)",
+        ));
         goto_entry.set_width_chars(18);
         goto_entry.update_property(&[gtk::accessible::Property::Label("Go to reference")]);
         let goto_popover = gtk::Popover::new();
@@ -495,6 +456,19 @@ impl SimpleComponent for App {
         goto_entry.connect_activate(move |entry| {
             goto_sender.input(Msg::GoTo(entry.text().to_string()));
         });
+        let goto_keys = gtk::EventControllerKey::new();
+        goto_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let goto_entry_shift = goto_entry.clone();
+        let goto_shift_sender = sender.clone();
+        goto_keys.connect_key_pressed(move |_, keyval, _, mods| {
+            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if shift && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
+                goto_shift_sender.input(Msg::GoToBeside(goto_entry_shift.text().to_string()));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        goto_entry.add_controller(goto_keys);
 
         let paragraphs_action: RelmAction<ParagraphsAction> = {
             let sender = sender.clone();
@@ -595,6 +569,23 @@ impl SimpleComponent for App {
             copy_here_sender.input(Msg::CopyAtOffset(copy_here_offset.get()));
         });
 
+        let detach_tab: RelmAction<DetachTabAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::DetachMenuTab))
+        };
+        let beside_tab: RelmAction<BesideTabAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::BesideMenuTab))
+        };
+        let follow_tab: RelmAction<FollowTabAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateful(&true, move |_, state: &mut bool| {
+                *state = !*state;
+                sender.input(Msg::SetTabFollow(*state));
+            })
+        };
+        let follow_gio = follow_tab.gio_action().clone();
+
         let mut group = RelmActionGroup::<WindowActionGroup>::new();
         group.add_action(paragraphs_action);
         group.add_action(copy_verse);
@@ -607,18 +598,17 @@ impl SimpleComponent for App {
         group.add_action(export_notes_action);
         group.add_action(toggle_bookmark_action);
         group.add_action(add_note_action);
+        group.add_action(detach_tab);
+        group.add_action(beside_tab);
+        group.add_action(follow_tab);
 
         let mut model = App {
-            history: History::new(at),
             conn,
             books,
-            at,
             error,
-            buffer,
             book_dropdown: book_dropdown.clone(),
             chapter_dropdown: chapter_dropdown.clone(),
             picker_syncing: Rc::new(Cell::new(false)),
-            chapter_view: chapter_view.clone(),
             search_open: false,
             search_query: String::new(),
             search_scope: SearchScope::Kjv,
@@ -626,51 +616,71 @@ impl SimpleComponent for App {
             search_status: search::status("", 0, bible_app_db::DEFAULT_LIMIT, SearchScope::Kjv),
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
-            mhc: None,
-            tsk: None,
-            dict: None,
             dict_modules,
-            occurrences: None,
-            strongs_popover,
-            strongs_at: 0,
-            tsk_popover,
-            goto_entry: goto_entry.clone(),
-            goto_popover: goto_popover.clone(),
-            layout: ChapterLayout::default(),
             font_size,
             paragraphs,
             font_provider,
-            xref_tips: Rc::new(RefCell::new(Vec::new())),
             mhc_action: mhc_gio,
             tsk_action: tsk_gio,
+            follow_action: follow_gio,
             user,
-            chapter_marks: HashMap::new(),
-            marks: None,
-            verse_menu: gtk::PopoverMenu::from_model(None::<&gio::MenuModel>),
+            workspace: Workspace::new(at),
+            hosted: HashMap::new(),
+            shell: None,
+            detached: Rc::new(RefCell::new(Vec::new())),
+            menu_tab: Rc::new(Cell::new(None)),
+            goto_entry: goto_entry.clone(),
+            goto_popover: goto_popover.clone(),
+            actions: gio::SimpleActionGroup::new(),
+            msg_tx: sender.input_sender().clone(),
+            copy_offset,
         };
         model.apply_font();
         picker::install_css();
         picker::fill_books(&model.book_dropdown, &model.books);
-        model.sync_pickers();
-        model.refresh_chapter(false);
 
         let widgets = view_output!();
-        let group = group.into_action_group();
-        group.add_action(&dict_action);
-        group.add_action(&highlight_action);
-        group.add_action(&copy_here);
-        root.insert_action_group("win", Some(&group));
-        model.verse_menu.insert_action_group("win", Some(&group));
+        let action_group = group.into_action_group();
+        action_group.add_action(&dict_action);
+        action_group.add_action(&highlight_action);
+        action_group.add_action(&copy_here);
+        root.insert_action_group("win", Some(&action_group));
+        model.actions = action_group;
         model.goto_popover.set_parent(&widgets.title_box);
-        model.verse_menu.set_parent(&model.chapter_view);
-        model.verse_menu.set_has_arrow(false);
-        model.verse_menu.set_halign(gtk::Align::Start);
         let goto_on_destroy = model.goto_popover.clone();
-        let verse_on_destroy = model.verse_menu.clone();
         root.connect_destroy(move |_| {
             goto_on_destroy.unparent();
-            verse_on_destroy.unparent();
         });
+
+        if model.error.is_none() {
+            let shell = SplitShell::new();
+            let mains = MainViews {
+                left: shell.left.view.clone(),
+                right: shell.right.view.clone(),
+            };
+            let menu = shell::tab_menu_model();
+            wire_tab_view(
+                &mains.left,
+                mains.clone(),
+                sender.input_sender().clone(),
+                model.detached.clone(),
+                model.actions.clone(),
+                &menu,
+            );
+            wire_tab_view(
+                &mains.right,
+                mains.clone(),
+                sender.input_sender().clone(),
+                model.detached.clone(),
+                model.actions.clone(),
+                &menu,
+            );
+            workspace_host.append(&shell.paned);
+            model.shell = Some(shell);
+            let id = model.workspace.focused();
+            model.spawn_passage(id, at);
+            model.sync_pickers();
+        }
 
         let key = gtk::EventControllerKey::new();
         let goto_entry_keys = model.goto_entry.clone();
@@ -757,30 +767,6 @@ impl SimpleComponent for App {
         });
         root.add_controller(mouse_forward);
 
-        let tips = model.xref_tips.clone();
-        model
-            .chapter_view
-            .connect_query_tooltip(move |view, x, y, keyboard, tooltip| {
-                let offset = if keyboard {
-                    view.buffer().cursor_position()
-                } else {
-                    let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x, y);
-                    match view.iter_at_location(bx, by) {
-                        Some(iter) => iter.offset(),
-                        None => return false,
-                    }
-                };
-                let tips = tips.borrow();
-                if let Some((_, _, text)) =
-                    tips.iter().find(|(s, e, _)| offset >= *s && offset < *e)
-                {
-                    tooltip.set_text(Some(text));
-                    true
-                } else {
-                    false
-                }
-            });
-
         let down = gtk::EventControllerKey::new();
         let list = model.search_list.clone();
         down.connect_key_pressed(move |_, keyval, _, _| {
@@ -795,6 +781,37 @@ impl SimpleComponent for App {
         });
         model.search_entry.add_controller(down);
 
+        let search_shift = gtk::EventControllerKey::new();
+        search_shift.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let search_shift_sender = sender.clone();
+        let search_list_shift = model.search_list.clone();
+        search_shift.connect_key_pressed(move |_, keyval, _, mods| {
+            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if shift && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
+                let idx = search_list_shift
+                    .selected_row()
+                    .map(|r| r.index())
+                    .unwrap_or(0);
+                search_shift_sender.input(Msg::OpenHitBeside(idx));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        model.search_entry.add_controller(search_shift);
+
+        let list_shift = gtk::EventControllerKey::new();
+        list_shift.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let list_shift_sender = sender.clone();
+        list_shift.connect_key_pressed(move |_, keyval, _, mods| {
+            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if shift && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
+                list_shift_sender.input(Msg::OpenHitBeside(-1));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        model.search_list.add_controller(list_shift);
+
         let scope_sender = sender.clone();
         search_scope.connect_selected_notify(move |dd| {
             let pos = dd.selected();
@@ -803,80 +820,6 @@ impl SimpleComponent for App {
             }
             scope_sender.input(Msg::SetSearchScope(SearchScope::from_index(pos)));
         });
-
-        let click = gtk::GestureClick::new();
-        click.set_button(1);
-        let view = model.chapter_view.clone();
-        let click_sender = sender.clone();
-        click.connect_released(move |_, _, x, y| {
-            let (bx, by) =
-                view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            if let Some(iter) = view.iter_at_location(bx, by) {
-                click_sender.input(Msg::ClickWord(iter.offset()));
-            }
-        });
-        model.chapter_view.add_controller(click);
-
-        let right = gtk::GestureClick::new();
-        right.set_button(gtk::gdk::BUTTON_SECONDARY);
-        right.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let view = model.chapter_view.clone();
-        let right_sender = sender.clone();
-        let right_offset = copy_offset.clone();
-        right.connect_pressed(move |g, _, x, y| {
-            g.set_state(gtk::EventSequenceState::Claimed);
-            let (bx, by) =
-                view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            let offset = view
-                .iter_at_location(bx, by)
-                .map(|iter| iter.offset())
-                .unwrap_or(-1);
-            right_offset.set(offset);
-            right_sender.input(Msg::VerseContext {
-                offset,
-                x: x as i32,
-                y: y as i32,
-            });
-        });
-        model.chapter_view.add_controller(right);
-
-        let copy_keys = gtk::EventControllerKey::new();
-        copy_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let copy_key_sender = sender.clone();
-        copy_keys.connect_key_pressed(move |_, keyval, _, mods| {
-            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-            if ctrl && (keyval == gtk::gdk::Key::c || keyval == gtk::gdk::Key::C) {
-                copy_key_sender.input(Msg::CopyVerses);
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        model.chapter_view.add_controller(copy_keys);
-        let motion = gtk::EventControllerMotion::new();
-        let view = model.chapter_view.clone();
-        let tips = model.xref_tips.clone();
-        motion.connect_motion(move |_, x, y| {
-            let (bx, by) =
-                view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            let over = view
-                .iter_at_location(bx, by)
-                .map(|iter| {
-                    let off = iter.offset();
-                    tips.borrow().iter().any(|(s, e, _)| off >= *s && off < *e)
-                })
-                .unwrap_or(false);
-            let cursor = if over {
-                gtk::gdk::Cursor::from_name("pointer", None)
-            } else {
-                None
-            };
-            view.set_cursor(cursor.as_ref());
-        });
-        let view = model.chapter_view.clone();
-        motion.connect_leave(move |_| {
-            view.set_cursor(None);
-        });
-        model.chapter_view.add_controller(motion);
 
         let book_sender = sender.clone();
         let book_syncing = model.picker_syncing.clone();
@@ -912,7 +855,7 @@ impl SimpleComponent for App {
                 let Some(id) = picker::book_id_at(&self.books, idx) else {
                     return;
                 };
-                if self.at.book == id {
+                if self.at().book == id {
                     return;
                 }
                 self.go(
@@ -928,12 +871,12 @@ impl SimpleComponent for App {
                 let Some(chapter) = picker::chapter_from_index(idx) else {
                     return;
                 };
-                if self.at.chapter == chapter {
+                if self.at().chapter == chapter {
                     return;
                 }
                 self.go(
                     Ref {
-                        book: self.at.book,
+                        book: self.at().book,
                         chapter,
                         verse: 1,
                     },
@@ -945,7 +888,7 @@ impl SimpleComponent for App {
                     return;
                 }
                 if let Some(conn) = &self.conn {
-                    if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at) {
+                    if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at()) {
                         self.go(at, false);
                     }
                 }
@@ -955,7 +898,7 @@ impl SimpleComponent for App {
                     return;
                 }
                 if let Some(conn) = &self.conn {
-                    if let Ok(at) = nav::next_chapter(conn, &self.books, self.at) {
+                    if let Ok(at) = nav::next_chapter(conn, &self.books, self.at()) {
                         self.go(at, false);
                     }
                 }
@@ -966,9 +909,21 @@ impl SimpleComponent for App {
                     self.goto_popover.popdown();
                     return;
                 }
-                if let Some(at) = nav::parse_ref(text, &self.books, self.at) {
+                if let Some(at) = nav::parse_ref(text, &self.books, self.at()) {
                     self.search_open = false;
                     self.go(at, true);
+                    self.goto_popover.popdown();
+                }
+            }
+            Msg::GoToBeside(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    self.goto_popover.popdown();
+                    return;
+                }
+                if let Some(at) = nav::parse_ref(text, &self.books, self.at()) {
+                    self.search_open = false;
+                    self.go_beside(at);
                     self.goto_popover.popdown();
                 }
             }
@@ -1002,162 +957,135 @@ impl SimpleComponent for App {
                     .selected_row()
                     .map(|r| r.index())
                     .unwrap_or(0);
-                self.open_hit(idx, &sender);
+                self.open_hit(idx, false);
             }
             Msg::OpenHit(idx) => {
-                self.open_hit(idx, &sender);
+                self.open_hit(idx, false);
+            }
+            Msg::OpenHitBeside(idx) => {
+                let idx = if idx < 0 {
+                    self.search_list
+                        .selected_row()
+                        .map(|r| r.index())
+                        .unwrap_or(0)
+                } else {
+                    idx
+                };
+                self.open_hit(idx, true);
             }
             Msg::ToggleMhc => {
-                if let Some(widgets) = self.mhc.take() {
-                    widgets.window.close();
-                } else if self.error.is_none() {
-                    let widgets = mhc::open(sender.input_sender().clone(), self.at, &self.books);
-                    if let Some(conn) = &self.conn {
-                        mhc::fill(&widgets, conn, &self.books, self.at);
-                    }
-                    self.mhc = Some(widgets);
+                if let Some(id) = self.workspace.find_kind(|k| k.is_mhc()) {
+                    self.request_close(id);
+                } else {
+                    self.ensure_mhc();
                 }
-            }
-            Msg::MhcClosed => {
-                self.mhc = None;
             }
             Msg::ToggleTsk => {
-                if let Some(widgets) = self.tsk.take() {
-                    widgets.window.close();
-                } else if self.error.is_none() {
-                    let mut widgets =
-                        tsk::open(sender.input_sender().clone(), self.at, &self.books);
-                    if let Some(conn) = &self.conn {
-                        tsk::fill(&mut widgets, conn, &self.books, self.at);
-                    }
-                    self.tsk = Some(widgets);
+                if let Some(id) = self.workspace.find_kind(|k| k.is_tsk()) {
+                    self.request_close(id);
+                } else {
+                    self.ensure_tsk();
                 }
             }
-            Msg::TskClosed => {
-                self.tsk = None;
-            }
             Msg::OpenTskXref(idx) => {
-                let Some(widgets) = &self.tsk else { return };
-                let Some(at) = tsk::xref_at(widgets, idx) else {
+                let Some(at) = self.tsk_widgets().and_then(|w| tsk::xref_at(w, idx)) else {
                     return;
                 };
                 self.search_open = false;
                 self.go(at, true);
             }
             Msg::OpenTskDest(at) => {
-                self.tsk_popover.popdown();
+                self.popdown_passage_popovers();
                 self.search_open = false;
                 self.go(at, true);
             }
-            Msg::OpenStrongsCode(code) => {
-                self.open_strongs_code(&code, &sender);
+            Msg::OpenTskDestBeside(at) => {
+                self.popdown_passage_popovers();
+                self.search_open = false;
+                self.go_beside(at);
             }
-            Msg::ClickWord(offset) => {
-                self.tsk_popover.popdown();
-                let tsk_hit = self
-                    .tsk_at(offset)
-                    .map(|m| (m.span.start, m.heading.clone(), m.dests.clone()));
-                if let Some((start, heading, dests)) = tsk_hit {
-                    self.strongs_popover.popdown();
-                    tsk::present_phrase(
-                        &self.tsk_popover,
-                        &self.chapter_view,
-                        start,
-                        &heading,
-                        &dests,
-                        &self.books,
-                        sender.input_sender().clone(),
-                    );
-                } else if let Some(at) = self.xref_at(offset) {
-                    self.go(at, true);
-                } else if let Some(verse) = self.mhc_at(offset) {
-                    self.go(Ref { verse, ..self.at }, false);
-                    self.ensure_mhc(&sender);
-                } else if let Some((start, text)) =
-                    self.note_at(offset).map(|n| (n.span.start, n.text.clone()))
-                {
-                    strongs::present_text(&self.strongs_popover, &self.chapter_view, start, &text);
-                } else if layout::word_at_offset(&self.layout.words, offset).is_some() {
-                    if let Some(verse) = layout::verse_at_offset(&self.layout.verse_start, offset) {
-                        self.select_verse(verse);
-                    }
-                    self.open_strongs(offset, &sender);
-                } else if let Some(verse) =
-                    layout::verse_at_offset(&self.layout.verse_start, offset)
-                {
-                    self.strongs_popover.popdown();
-                    self.select_verse(verse);
-                }
+            Msg::OpenStrongsCode(code) => {
+                self.open_strongs_code(&code);
+            }
+            Msg::ClickWord { id, offset } => {
+                self.focus_tab(id);
+                self.handle_click(id, offset);
             }
             Msg::OpenDict(id) => {
-                self.open_library(&id, None, &sender);
+                self.open_library(&id, None);
             }
             Msg::OpenDictWord { module, headword } => {
-                self.strongs_popover.popdown();
-                self.open_library(&module, Some(&headword), &sender);
-            }
-            Msg::DictClosed => {
-                self.dict = None;
+                self.popdown_passage_popovers();
+                self.open_library(&module, Some(&headword));
             }
             Msg::DictSearch(query) => {
-                let Some(widgets) = &mut self.dict else {
+                let Some(id) = self
+                    .workspace
+                    .find_kind(|k| matches!(k, TabKind::Library { .. }))
+                else {
                     return;
                 };
-                widgets.query = query;
-                if let Some(conn) = &self.conn {
-                    dict::search(widgets, conn);
+                if let Some(TabContent::Library(widgets)) =
+                    self.hosted.get_mut(&id).map(|h| &mut h.content)
+                {
+                    widgets.query = query;
+                    if let Some(conn) = &self.conn {
+                        dict::search(widgets, conn);
+                    }
                 }
             }
             Msg::DictOpen(idx) => {
-                let Some(widgets) = &self.dict else { return };
-                if let Some(conn) = &self.conn {
+                let Some(conn) = &self.conn else { return };
+                if let Some(TabContent::Library(widgets)) = self.library() {
                     dict::open_hit(widgets, conn, idx);
                 }
+                self.sync_open_tab_title();
             }
             Msg::OpenStrongsOccurrences(code) => {
-                self.strongs_popover.popdown();
-                self.open_occurrences(&code, &sender);
+                self.popdown_passage_popovers();
+                self.open_occurrences(&code);
             }
             Msg::OpenOccurrenceHit(idx) => {
-                let Some(widgets) = &self.occurrences else {
-                    return;
-                };
-                let Some(at) = occurrences::hit_at(widgets, idx) else {
+                let Some(at) = self.occ_widgets().and_then(|w| occurrences::hit_at(w, idx)) else {
                     return;
                 };
                 self.search_open = false;
                 self.go(at, true);
-            }
-            Msg::OccurrencesClosed => {
-                self.occurrences = None;
             }
             Msg::Back => {
                 if self.search_open {
                     return;
                 }
-                if let Some(at) = self.history.back() {
-                    self.at = at;
-                    self.refresh_chapter(true);
-                    self.sync_pickers();
-                }
+                let Some(id) = self.workspace.focused_passage_id() else {
+                    return;
+                };
+                let Some(at) = self.passage_mut(id).and_then(|p| p.history.back()) else {
+                    return;
+                };
+                self.apply_passage_ref(id, at, true, false);
             }
             Msg::Forward => {
                 if self.search_open {
                     return;
                 }
-                if let Some(at) = self.history.forward() {
-                    self.at = at;
-                    self.refresh_chapter(true);
-                    self.sync_pickers();
-                }
+                let Some(id) = self.workspace.focused_passage_id() else {
+                    return;
+                };
+                let Some(at) = self.passage_mut(id).and_then(|p| p.history.forward()) else {
+                    return;
+                };
+                self.apply_passage_ref(id, at, true, false);
             }
             Msg::CopyVerses => {
                 self.copy_from_selection_or_current();
             }
             Msg::CopyAtOffset(offset) => {
-                let verse = layout::verse_at_offset(&self.layout.verse_start, offset)
-                    .unwrap_or(self.at.verse);
-                self.copy_verse_range(verse, verse);
+                let Some(p) = self.focused_passage() else {
+                    return;
+                };
+                let verse =
+                    layout::verse_at_offset(&p.layout.verse_start, offset).unwrap_or(p.at.verse);
+                self.copy_verse_range(p.at, verse, verse);
             }
             Msg::FontSmaller => {
                 self.font_size = layout::smaller_font(self.font_size);
@@ -1176,37 +1104,37 @@ impl SimpleComponent for App {
                 self.paragraphs = on;
                 self.save_state();
                 if !self.search_open {
-                    self.refresh_chapter(false);
+                    self.reload_all_passages(false);
                 }
             }
-            Msg::OpenBookmarks => self.ensure_marks(&sender, "bookmarks"),
-            Msg::OpenNotes => self.ensure_marks(&sender, "notes"),
-            Msg::MarksClosed => {
-                self.marks = None;
-            }
+            Msg::OpenBookmarks => self.ensure_marks("bookmarks"),
+            Msg::OpenNotes => self.ensure_marks("notes"),
             Msg::MarksBookmarkActivated(idx) => {
-                if let Some(at) = self.marks.as_ref().and_then(|w| marks::bookmark_at(w, idx)) {
+                if let Some(at) = self
+                    .marks_widgets()
+                    .and_then(|w| marks::bookmark_at(w, idx))
+                {
                     self.search_open = false;
                     self.go(at, true);
                 }
             }
             Msg::MarksBookmarkSelected => {
-                if let Some(w) = &self.marks {
+                if let Some(w) = self.marks_widgets() {
                     w.remove_bookmark
                         .set_sensitive(w.bookmark_list.selected_row().is_some());
                 }
             }
             Msg::MarksNoteActivated(idx) => {
-                if let Some(at) = self.marks.as_ref().and_then(|w| marks::note_at(w, idx)) {
+                if let Some(at) = self.marks_widgets().and_then(|w| marks::note_at(w, idx)) {
                     self.search_open = false;
                     self.go(at, true);
                 }
             }
             Msg::MarksNoteSelected(idx) => {
-                if self.marks.as_ref().is_some_and(|w| w.syncing.get()) {
+                if self.marks_widgets().is_some_and(|w| w.syncing.get()) {
                     return;
                 }
-                let Some(at) = self.marks.as_ref().and_then(|w| marks::note_at(w, idx)) else {
+                let Some(at) = self.marks_widgets().and_then(|w| marks::note_at(w, idx)) else {
                     return;
                 };
                 let text = self
@@ -1214,12 +1142,21 @@ impl SimpleComponent for App {
                     .as_ref()
                     .and_then(|u| user_db::get_note(u, at).ok().flatten())
                     .unwrap_or_default();
-                if let Some(w) = &mut self.marks {
-                    marks::load_note(w, &self.books, at, &text);
+                if let Some(id) = self
+                    .workspace
+                    .find_kind(|k| matches!(k, TabKind::Marks { .. }))
+                {
+                    if let Some(TabContent::Marks(w)) =
+                        self.hosted.get_mut(&id).map(|h| &mut h.content)
+                    {
+                        marks::load_note(w, &self.books, at, &text);
+                    }
                 }
             }
             Msg::SaveNote => {
-                let Some(widgets) = &self.marks else { return };
+                let Some(TabContent::Marks(widgets)) = self.marks() else {
+                    return;
+                };
                 if widgets.syncing.get() {
                     return;
                 }
@@ -1231,24 +1168,24 @@ impl SimpleComponent for App {
                     let _ = user_db::upsert_note(user, at, &text);
                 }
                 self.reload_user_marks(was_present != now_present);
-                if let Some(w) = &self.marks {
+                if let Some(TabContent::Marks(w)) = self.marks() {
                     w.delete_note.set_sensitive(now_present);
                 }
             }
             Msg::DeleteEditingNote => {
-                let Some(at) = self.marks.as_ref().and_then(|w| w.editing) else {
+                let Some(at) = self.marks_widgets().and_then(|w| w.editing) else {
                     return;
                 };
                 if let Some(user) = &self.user {
                     let _ = user_db::delete_note(user, at);
                 }
-                if let Some(w) = &mut self.marks {
+                if let Some(TabContent::Marks(w)) = self.marks_mut() {
                     marks::clear_editor(w);
                 }
                 self.reload_user_marks(true);
             }
             Msg::RemoveSelectedBookmark => {
-                let Some(at) = self.marks.as_ref().and_then(marks::selected_bookmark) else {
+                let Some(at) = self.marks_widgets().and_then(marks::selected_bookmark) else {
                     return;
                 };
                 if let Some(user) = &self.user {
@@ -1258,16 +1195,141 @@ impl SimpleComponent for App {
             }
             Msg::ToggleBookmark => self.toggle_bookmark(),
             Msg::SetHighlight(color) => self.set_highlight(&color),
-            Msg::AddNote => self.add_note(&sender),
-            Msg::VerseContext { offset, x, y } => self.show_verse_menu(offset, x, y),
+            Msg::AddNote => self.add_note(),
+            Msg::VerseContext { id, offset, x, y } => {
+                self.copy_offset.set(offset);
+                self.show_verse_menu(id, offset, x, y);
+            }
             Msg::ExportNotes => self.export_notes(&sender),
             Msg::ExportWrite(path) => self.write_export(&path),
+            Msg::TabSelected(id) => {
+                self.workspace.focus(id);
+                self.sync_pickers();
+            }
+            Msg::TabClosed(id) => {
+                self.forget_tab(id);
+            }
+            Msg::TabAttached { id, pane, detached } => {
+                self.workspace.set_host(id, pane, detached);
+                self.workspace.focus(id);
+                self.collapse_empty_panes();
+                self.sync_shell();
+            }
+            Msg::SetupTabMenu(id) => {
+                self.menu_tab.set(id);
+                let tab = id.and_then(|id| self.workspace.tab(id));
+                let followable = tab
+                    .is_some_and(|t| matches!(t.kind, TabKind::Mhc { .. } | TabKind::Tsk { .. }));
+                self.follow_action.set_enabled(followable);
+                self.follow_action
+                    .set_state(&tab.is_some_and(|t| t.kind.follows_verse()).to_variant());
+            }
+            Msg::DetachMenuTab => {
+                if let Some(id) = self.menu_tab.get() {
+                    self.detach_tab(id);
+                }
+            }
+            Msg::BesideMenuTab => {
+                if let Some(id) = self.menu_tab.get() {
+                    self.move_tab_beside(id);
+                }
+            }
+            Msg::SetTabFollow(on) => {
+                if let Some(id) = self.menu_tab.get() {
+                    self.workspace.set_follow(id, on);
+                    if on {
+                        self.refresh_followers();
+                    }
+                }
+            }
         }
         self.sync_study_actions();
+        let _ = sender;
     }
 }
 
 impl App {
+    fn at(&self) -> Ref {
+        self.workspace
+            .focused_passage_ref()
+            .unwrap_or_else(|| self.workspace.last_at())
+    }
+
+    fn can_back(&self) -> bool {
+        self.focused_passage().is_some_and(|p| p.history.can_back())
+    }
+
+    fn can_forward(&self) -> bool {
+        self.focused_passage()
+            .is_some_and(|p| p.history.can_forward())
+    }
+
+    fn passage(&self, id: TabId) -> Option<&PassageView> {
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Passage(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn passage_mut(&mut self, id: TabId) -> Option<&mut PassageView> {
+        match self.hosted.get_mut(&id).map(|h| &mut h.content) {
+            Some(TabContent::Passage(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn focused_passage(&self) -> Option<&PassageView> {
+        self.workspace
+            .focused_passage_id()
+            .and_then(|id| self.passage(id))
+    }
+
+    fn library(&self) -> Option<&TabContent> {
+        let id = self
+            .workspace
+            .find_kind(|k| matches!(k, TabKind::Library { .. }))?;
+        self.hosted.get(&id).map(|h| &h.content)
+    }
+
+    fn marks(&self) -> Option<&TabContent> {
+        let id = self
+            .workspace
+            .find_kind(|k| matches!(k, TabKind::Marks { .. }))?;
+        self.hosted.get(&id).map(|h| &h.content)
+    }
+
+    fn marks_mut(&mut self) -> Option<&mut TabContent> {
+        let id = self
+            .workspace
+            .find_kind(|k| matches!(k, TabKind::Marks { .. }))?;
+        self.hosted.get_mut(&id).map(|h| &mut h.content)
+    }
+
+    fn marks_widgets(&self) -> Option<&marks::MarksWidgets> {
+        match self.marks() {
+            Some(TabContent::Marks(w)) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn tsk_widgets(&self) -> Option<&tsk::TskWidgets> {
+        let id = self.workspace.find_kind(|k| k.is_tsk())?;
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Tsk(w)) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn occ_widgets(&self) -> Option<&occurrences::OccWidgets> {
+        let id = self
+            .workspace
+            .find_kind(|k| matches!(k, TabKind::Occurrences { .. }))?;
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Occurrences(w)) => Some(w),
+            _ => None,
+        }
+    }
+
     fn run_search(&mut self, query: String) {
         self.search_query = query;
         self.search_hits = match &self.conn {
@@ -1289,7 +1351,7 @@ impl App {
         search::refill_list(&self.search_list, &self.search_hits, &self.books);
     }
 
-    fn open_hit(&mut self, idx: i32, sender: &ComponentSender<Self>) {
+    fn open_hit(&mut self, idx: i32, beside: bool) {
         let Ok(idx) = usize::try_from(idx) else {
             return;
         };
@@ -1306,7 +1368,11 @@ impl App {
                 let Some(at) = at else {
                     return;
                 };
-                self.go(at, true);
+                if beside {
+                    self.go_beside(at);
+                } else {
+                    self.go(at, true);
+                }
             }
             LibraryKind::Commentary => {
                 let Some(at) = at else {
@@ -1314,16 +1380,16 @@ impl App {
                 };
                 self.go(at, true);
                 if module == "TSK" {
-                    self.ensure_tsk(sender);
+                    self.ensure_tsk();
                 } else {
-                    self.ensure_mhc(sender);
+                    self.ensure_mhc();
                 }
             }
             LibraryKind::Dictionary | LibraryKind::Topic => {
                 let Some(headword) = headword.as_deref() else {
                     return;
                 };
-                self.open_library(&module, Some(headword), sender);
+                self.open_library(&module, Some(headword));
             }
         }
     }
@@ -1336,23 +1402,56 @@ impl App {
     }
 
     fn go(&mut self, at: Ref, highlight: bool) {
-        self.history.navigate(at);
-        self.at = at;
-        self.refresh_chapter(highlight);
+        let id = match self.workspace.focused_passage_id() {
+            Some(id) => id,
+            None => {
+                let opened = self.workspace.open_passage(at);
+                self.spawn_passage(opened.id, at);
+                opened.id
+            }
+        };
+        self.apply_passage_ref(id, at, highlight, true);
+    }
+
+    fn go_beside(&mut self, at: Ref) {
+        let from = self
+            .workspace
+            .focused_passage_id()
+            .unwrap_or_else(|| self.workspace.focused());
+        let opened = self.workspace.open_passage_beside(from, at);
+        self.spawn_passage(opened.id, at);
+        self.save_state();
+    }
+
+    fn apply_passage_ref(&mut self, id: TabId, at: Ref, highlight: bool, record_history: bool) {
+        if record_history {
+            if let Some(p) = self.passage_mut(id) {
+                p.history.navigate(at);
+            }
+        }
+        if let Some(p) = self.passage_mut(id) {
+            p.at = at;
+        }
+        self.workspace.navigate_passage(id, at);
+        self.reload_passage(id, highlight);
+        self.refresh_followers();
         self.sync_pickers();
+        self.save_state();
     }
 
     fn save_state(&self) {
         config::save_state(&config::State::from_ref(
-            self.at,
+            self.at(),
             self.font_size,
             self.paragraphs,
         ));
     }
 
     fn sync_study_actions(&self) {
-        self.mhc_action.set_state(&self.mhc.is_some().to_variant());
-        self.tsk_action.set_state(&self.tsk.is_some().to_variant());
+        self.mhc_action
+            .set_state(&self.workspace.has_mhc().to_variant());
+        self.tsk_action
+            .set_state(&self.workspace.has_tsk().to_variant());
     }
 
     fn apply_font(&self) {
@@ -1363,21 +1462,19 @@ impl App {
     }
 
     fn copy_from_selection_or_current(&self) {
-        if let Some((from, to)) = self.selected_verse_range() {
-            self.copy_verse_range(from, to);
+        let Some(p) = self.focused_passage() else {
+            return;
+        };
+        if let Some((from, to)) = p.selected_verse_range() {
+            self.copy_verse_range(p.at, from, to);
             return;
         }
-        self.copy_verse_range(self.at.verse, self.at.verse);
+        self.copy_verse_range(p.at, p.at.verse, p.at.verse);
     }
 
-    fn selected_verse_range(&self) -> Option<(u8, u8)> {
-        let (start, end) = self.buffer.selection_bounds()?;
-        layout::verses_in_selection(&self.layout.verse_start, start.offset(), end.offset())
-    }
-
-    fn copy_verse_range(&self, from: u8, to: u8) {
+    fn copy_verse_range(&self, at: Ref, from: u8, to: u8) {
         let Some(conn) = &self.conn else { return };
-        let Ok(chapter) = bible_app_db::chapter(conn, self.at.book, self.at.chapter) else {
+        let Ok(chapter) = bible_app_db::chapter(conn, at.book, at.chapter) else {
             return;
         };
         let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
@@ -1394,263 +1491,242 @@ impl App {
         }
     }
 
-    fn xref_at(&self, offset: i32) -> Option<Ref> {
-        self.layout
-            .xrefs
-            .iter()
-            .find(|l| l.span.contains(offset))
-            .map(|l| l.at)
-    }
-
-    fn mhc_at(&self, offset: i32) -> Option<u8> {
-        self.layout
-            .mhc
-            .iter()
-            .find(|m| m.span.contains(offset))
-            .map(|m| m.verse)
-    }
-
-    fn tsk_at(&self, offset: i32) -> Option<&layout::TskMark> {
-        self.layout.tsk.iter().find(|m| m.span.contains(offset))
-    }
-
-    fn note_at(&self, offset: i32) -> Option<&layout::NoteMark> {
-        self.layout.notes.iter().find(|n| n.span.contains(offset))
-    }
-
-    fn ensure_mhc(&mut self, sender: &ComponentSender<Self>) {
-        if self.mhc.is_none() && self.error.is_none() {
-            let widgets = mhc::open(sender.input_sender().clone(), self.at, &self.books);
-            self.mhc = Some(widgets);
-        }
-        self.refresh_mhc();
-    }
-
-    fn ensure_tsk(&mut self, sender: &ComponentSender<Self>) {
-        if self.tsk.is_none() && self.error.is_none() {
-            let widgets = tsk::open(sender.input_sender().clone(), self.at, &self.books);
-            self.tsk = Some(widgets);
-        }
-        self.refresh_tsk();
-    }
-
-    fn refresh_chapter(&mut self, highlight: bool) {
-        let Some(conn) = &self.conn else {
-            return;
-        };
-        let verses = match bible_app_db::chapter(conn, self.at.book, self.at.chapter) {
-            Ok(verses) if !verses.is_empty() => verses,
-            Ok(_) => {
-                self.layout = ChapterLayout {
-                    text: "No verses in this chapter.".into(),
-                    ..ChapterLayout::default()
-                };
-                self.buffer.set_text(&self.layout.text);
-                self.xref_tips.borrow_mut().clear();
-                self.save_state();
-                return;
+    fn handle_click(&mut self, id: TabId, offset: i32) {
+        let tsk_hit = self.passage(id).and_then(|p| {
+            p.tsk_at(offset)
+                .map(|m| (m.span.start, m.heading.clone(), m.dests.clone()))
+        });
+        if let Some((start, heading, dests)) = tsk_hit {
+            if let Some(p) = self.passage(id) {
+                p.strongs_popover.popdown();
+                tsk::present_phrase(
+                    &p.tsk_popover,
+                    &p.view,
+                    start,
+                    &heading,
+                    &dests,
+                    &self.books,
+                    self.msg_tx.clone(),
+                );
             }
-            Err(e) => {
-                self.layout = ChapterLayout {
-                    text: e.to_string(),
-                    ..ChapterLayout::default()
-                };
-                self.buffer.set_text(&self.layout.text);
-                self.xref_tips.borrow_mut().clear();
-                self.save_state();
-                return;
-            }
-        };
-        let tsk_rows = bible_app_db::chapter_resources(conn, "TSK", self.at.book, self.at.chapter)
-            .unwrap_or_default();
-        let tsk_notes: Vec<(u8, &str)> = tsk_rows
-            .iter()
-            .map(|r| (r.verse, r.text.as_str()))
-            .collect();
-        let mhc_starts =
-            bible_app_db::chapter_resource_verses(conn, "MHC", self.at.book, self.at.chapter)
-                .unwrap_or_default();
-        let words =
-            bible_app_db::chapter_words(conn, self.at.book, self.at.chapter).unwrap_or_default();
-        self.layout = layout::layout_chapter(
-            &verses,
-            &self.books,
-            &tsk_notes,
-            &mhc_starts,
-            &words,
-            &[],
-            layout::LayoutOpts {
-                interlinear: false,
-                paragraphs: self.paragraphs,
-            },
-        );
-        self.strongs_popover.popdown();
-        self.tsk_popover.popdown();
-        self.apply_layout_tags();
-        self.chapter_marks = self
-            .user
-            .as_ref()
-            .and_then(|u| user_db::chapter_marks(u, self.at.book, self.at.chapter).ok())
-            .unwrap_or_default();
-        marks::apply_tags(&self.buffer, &self.layout, &self.chapter_marks);
-        self.fill_xref_tips(conn);
-        self.save_state();
-        if highlight {
-            self.highlight_verse(self.at.verse);
-        } else {
-            self.apply_current_verse_tag(self.at.verse);
-            self.scroll_to_top();
-        }
-        self.refresh_mhc();
-        self.refresh_tsk();
-    }
-
-    fn apply_layout_tags(&self) {
-        self.buffer.set_text(&self.layout.text);
-        for span in &self.layout.verse_nums {
-            self.apply_tag("verse-num", *span);
-        }
-        for mark in &self.layout.notes {
-            self.apply_tag("note-mark", mark.span);
-        }
-        for span in &self.layout.apparatus {
-            self.apply_tag("apparatus", *span);
-        }
-        for span in &self.layout.italics {
-            self.apply_tag("italic", *span);
-        }
-        for link in &self.layout.xrefs {
-            self.apply_tag("xref", link.span);
-        }
-        for mark in &self.layout.mhc {
-            self.apply_tag("mhc-num", mark.span);
-        }
-        for mark in &self.layout.tsk {
-            self.apply_tag("tsk-sup", mark.span);
-        }
-        for word in &self.layout.words {
-            self.apply_tag("strongs", word.span);
-            if let Some(span) = word.lemma_span {
-                self.apply_tag("lemma", span);
-            }
-        }
-    }
-
-    fn apply_tag(&self, name: &str, span: layout::Span) {
-        let Some(tag) = self.buffer.tag_table().lookup(name) else {
-            return;
-        };
-        if span.end <= span.start {
             return;
         }
-        let s = self.buffer.iter_at_offset(span.start);
-        let e = self.buffer.iter_at_offset(span.end);
-        self.buffer.apply_tag(&tag, &s, &e);
-    }
-
-    fn fill_xref_tips(&self, conn: &Connection) {
-        let mut tips = Vec::new();
-        for mark in &self.layout.tsk {
-            let dests: Vec<bible_app_db::Xref> = mark
-                .dests
-                .iter()
-                .map(|d| bible_app_db::Xref {
-                    book: d.book,
-                    chapter: d.chapter,
-                    verse: d.verse,
-                })
-                .collect();
-            let (line, _, hidden) = layout::format_xref_line(&dests, &self.books);
-            let extra = if hidden > 0 {
-                format!(" · {hidden} more")
-            } else {
-                String::new()
+        if let Some(at) = self.passage(id).and_then(|p| p.xref_at(offset)) {
+            self.apply_passage_ref(id, at, true, true);
+            return;
+        }
+        if let Some(verse) = self.passage(id).and_then(|p| p.mhc_at(offset)) {
+            let at = Ref {
+                verse,
+                ..self.passage(id).map(|p| p.at).unwrap_or_else(|| self.at())
             };
-            let text = if line.is_empty() {
-                mark.heading.clone()
-            } else {
-                format!("{}\n{line}{extra}", mark.heading)
-            };
-            tips.push((mark.span.start, mark.span.end, text));
+            self.apply_passage_ref(id, at, false, false);
+            if let Some(p) = self.passage_mut(id) {
+                p.select_verse(verse);
+            }
+            self.ensure_mhc();
+            return;
         }
-        for link in &self.layout.xrefs {
-            let preview =
-                match bible_app_db::get_verse(conn, link.at.book, link.at.chapter, link.at.verse) {
-                    Ok(v) => {
-                        let (stored, _) = layout::split_notes(&v.text);
-                        let (text, _) = layout::strip_supplied(&stored);
-                        format!("{}\n{}", nav::format_ref(&self.books, link.at), text)
-                    }
-                    Err(_) => nav::format_ref(&self.books, link.at),
-                };
-            tips.push((link.span.start, link.span.end, preview));
+        let note = self
+            .passage(id)
+            .and_then(|p| p.note_at(offset).map(|n| (n.span.start, n.text.clone())));
+        if let Some((start, text)) = note {
+            if let Some(p) = self.passage(id) {
+                strongs::present_text(&p.strongs_popover, &p.view, start, &text);
+            }
+            return;
         }
-        for (span, (verse, _)) in self
-            .layout
-            .verse_nums
-            .iter()
-            .zip(self.layout.verse_start.iter())
+        let word = self
+            .passage(id)
+            .and_then(|p| layout::word_at_offset(&p.layout.words, offset).cloned());
+        if word.is_some() {
+            if let Some(verse) = self
+                .passage(id)
+                .and_then(|p| layout::verse_at_offset(&p.layout.verse_start, offset))
+            {
+                self.select_verse(id, verse);
+            }
+            self.open_strongs(id, offset);
+            return;
+        }
+        if let Some(verse) = self
+            .passage(id)
+            .and_then(|p| layout::verse_at_offset(&p.layout.verse_start, offset))
         {
-            let mut parts = Vec::new();
-            if self.layout.mhc.iter().any(|m| m.verse == *verse) {
-                parts.push("Open Matthew Henry".to_string());
+            if let Some(p) = self.passage(id) {
+                p.strongs_popover.popdown();
             }
-            if let Some(m) = self.chapter_marks.get(verse) {
-                if m.bookmark {
-                    parts.push("Bookmarked".into());
-                }
-                if m.highlight.is_some() {
-                    parts.push("Highlighted".into());
-                }
-                if m.note {
-                    parts.push("Has a note".into());
-                }
-            }
-            if !parts.is_empty() {
-                tips.push((span.start, span.end, parts.join(" · ")));
-            }
-        }
-        for mark in &self.layout.notes {
-            tips.push((mark.span.start, mark.span.end, mark.text.clone()));
-        }
-        for word in &self.layout.words {
-            tips.push((
-                word.span.start,
-                word.span.end,
-                "Click for Strong's and dictionaries".into(),
-            ));
-        }
-        *self.xref_tips.borrow_mut() = tips;
-    }
-
-    fn refresh_mhc(&self) {
-        let Some(widgets) = &self.mhc else { return };
-        let Some(conn) = &self.conn else { return };
-        mhc::fill(widgets, conn, &self.books, self.at);
-    }
-
-    fn refresh_tsk(&mut self) {
-        let Some(conn) = &self.conn else { return };
-        let books = self.books.clone();
-        let at = self.at;
-        if let Some(widgets) = &mut self.tsk {
-            tsk::fill(widgets, conn, &books, at);
+            self.select_verse(id, verse);
         }
     }
 
-    fn select_verse(&mut self, verse: u8) {
-        if self.at.verse != verse {
-            self.at.verse = verse;
+    fn select_verse(&mut self, id: TabId, verse: u8) {
+        let changed = self
+            .passage_mut(id)
+            .map(|p| p.select_verse(verse))
+            .unwrap_or(false);
+        if changed {
+            self.workspace.set_passage_verse(id, verse);
+            self.refresh_followers();
             self.save_state();
-            self.refresh_mhc();
-            self.refresh_tsk();
         }
-        self.apply_current_verse_tag(verse);
     }
 
-    fn open_strongs(&mut self, offset: i32, sender: &ComponentSender<Self>) {
-        let Some(word) = layout::word_at_offset(&self.layout.words, offset) else {
+    fn ensure_mhc(&mut self) {
+        if self.error.is_some() {
             return;
+        }
+        let at = self.at();
+        let opened = self.workspace.open_mhc(at);
+        if opened.created {
+            let widgets = mhc::build();
+            if let Some(conn) = &self.conn {
+                mhc::fill(&widgets, conn, &self.books, at);
+            }
+            let root = widgets.root.clone();
+            self.add_page(opened.id, &root, "Matthew Henry", TabContent::Mhc(widgets));
+            self.move_tab_beside(opened.id);
+        } else {
+            self.select_tab(opened.id);
+            self.fill_mhc(opened.id, at);
+        }
+        self.sync_tab_title(opened.id);
+    }
+
+    fn ensure_tsk(&mut self) {
+        if self.error.is_some() {
+            return;
+        }
+        let at = self.at();
+        let opened = self.workspace.open_tsk(at);
+        if opened.created {
+            let mut widgets = tsk::build(self.msg_tx.clone());
+            if let Some(conn) = &self.conn {
+                tsk::fill(&mut widgets, conn, &self.books, at, self.msg_tx.clone());
+            }
+            let root = widgets.root.clone();
+            self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
+            self.move_tab_beside(opened.id);
+        } else {
+            self.select_tab(opened.id);
+            self.fill_tsk(opened.id, at);
+        }
+        self.sync_tab_title(opened.id);
+    }
+
+    fn open_library(&mut self, module: &str, headword: Option<&str>) {
+        if self.error.is_some() {
+            return;
+        }
+        let opened = self
+            .workspace
+            .open_library(module.to_string(), headword.map(str::to_string));
+        if opened.created {
+            let mut widgets = dict::build(self.msg_tx.clone());
+            if let Some(conn) = &self.conn {
+                dict::load_modules(&mut widgets, conn);
+            }
+            if let (Some(conn), Some(head)) = (&self.conn, headword) {
+                dict::open_headword(&mut widgets, conn, module, head);
+            } else {
+                dict::select_module(&mut widgets, module);
+            }
+            let title = dict::tab_title(&widgets);
+            let root = widgets.root.clone();
+            self.add_page(opened.id, &root, &title, TabContent::Library(widgets));
+            self.move_tab_beside(opened.id);
+        } else if let Some(TabContent::Library(widgets)) =
+            self.hosted.get_mut(&opened.id).map(|h| &mut h.content)
+        {
+            if let (Some(conn), Some(head)) = (&self.conn, headword) {
+                dict::open_headword(widgets, conn, module, head);
+            } else {
+                dict::select_module(widgets, module);
+            }
+            let title = dict::tab_title(widgets);
+            if let Some(h) = self.hosted.get(&opened.id) {
+                h.page.set_title(&title);
+            }
+            self.select_tab(opened.id);
+        }
+    }
+
+    fn open_occurrences(&mut self, code: &str) {
+        if self.error.is_some() {
+            return;
+        }
+        let opened = self.workspace.open_occurrences(code.to_string());
+        if opened.created {
+            let mut widgets = occurrences::build(self.msg_tx.clone());
+            if let Some(conn) = &self.conn {
+                occurrences::fill(&mut widgets, conn, &self.books, code);
+            }
+            let title = format!("{code} in the KJV");
+            let root = widgets.root.clone();
+            self.add_page(opened.id, &root, &title, TabContent::Occurrences(widgets));
+            self.move_tab_beside(opened.id);
+        } else if let Some(TabContent::Occurrences(widgets)) =
+            self.hosted.get_mut(&opened.id).map(|h| &mut h.content)
+        {
+            if let Some(conn) = &self.conn {
+                occurrences::fill(widgets, conn, &self.books, code);
+            }
+            if let Some(h) = self.hosted.get(&opened.id) {
+                h.page.set_title(&format!("{code} in the KJV"));
+            }
+            self.select_tab(opened.id);
+        }
+    }
+
+    fn ensure_marks(&mut self, page: &str) {
+        if self.error.is_some() || self.user.is_none() {
+            return;
+        }
+        let opened = self.workspace.open_marks(MarksPage::from_str(page));
+        if opened.created {
+            let mut widgets = marks::build(self.msg_tx.clone());
+            if let Some(user) = &self.user {
+                marks::fill(&mut widgets, user, &self.books);
+            }
+            marks::show_page(&widgets, page);
+            let title = MarksPage::from_str(page).as_str();
+            let title = if title == "notes" {
+                "Notes"
+            } else {
+                "Bookmarks"
+            };
+            let root = widgets.root.clone();
+            self.add_page(opened.id, &root, title, TabContent::Marks(widgets));
+            self.move_tab_beside(opened.id);
+        } else if let Some(TabContent::Marks(widgets)) =
+            self.hosted.get_mut(&opened.id).map(|h| &mut h.content)
+        {
+            marks::show_page(widgets, page);
+            if let Some(user) = &self.user {
+                marks::fill(widgets, user, &self.books);
+            }
+            if let Some(h) = self.hosted.get(&opened.id) {
+                h.page.set_title(if page == "notes" {
+                    "Notes"
+                } else {
+                    "Bookmarks"
+                });
+            }
+            self.select_tab(opened.id);
+        }
+    }
+
+    fn open_strongs(&mut self, id: TabId, offset: i32) {
+        let (word, surface) = {
+            let Some(p) = self.passage(id) else { return };
+            let Some(word) = layout::word_at_offset(&p.layout.words, offset).cloned() else {
+                return;
+            };
+            let mut surface = layout::token_at(&p.layout.text, offset);
+            if surface.is_empty() {
+                surface = layout::word_surface(&p.layout.text, word.span);
+            }
+            (word, surface)
         };
         let Some(conn) = &self.conn else { return };
         let defs: Vec<_> = word
@@ -1659,193 +1735,424 @@ impl App {
             .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
             .collect();
         let counts = strongs_counts(conn, &defs);
-        let mut surface = layout::token_at(&self.layout.text, offset);
-        if surface.is_empty() {
-            surface = layout::word_surface(&self.layout.text, word.span);
-        }
         let dict = bible_app_db::lookup_clicked_word(conn, &surface).unwrap_or_default();
         if defs.is_empty() && dict.is_empty() {
             return;
         }
-        self.strongs_at = word.span.start;
-        self.tsk_popover.popdown();
-        strongs::present(
-            &self.strongs_popover,
-            &self.chapter_view,
-            self.strongs_at,
-            &defs,
-            &counts,
-            &dict,
-            sender.input_sender().clone(),
-        );
+        let tx = self.msg_tx.clone();
+        if let Some(TabContent::Passage(p)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+            p.strongs_at = word.span.start;
+            p.tsk_popover.popdown();
+            strongs::present(
+                &p.strongs_popover,
+                &p.view,
+                p.strongs_at,
+                &defs,
+                &counts,
+                &dict,
+                tx,
+            );
+        }
     }
 
-    fn open_strongs_code(&mut self, code: &str, sender: &ComponentSender<Self>) {
+    fn open_strongs_code(&mut self, code: &str) {
+        let Some(id) = self.workspace.focused_passage_id() else {
+            return;
+        };
         let Some(conn) = &self.conn else { return };
         let Some(def) = bible_app_db::lookup_strongs(conn, code).ok().flatten() else {
             return;
         };
         let counts = strongs_counts(conn, std::slice::from_ref(&def));
-        self.tsk_popover.popdown();
-        strongs::present(
-            &self.strongs_popover,
-            &self.chapter_view,
-            self.strongs_at,
-            &[def],
-            &counts,
-            &bible_app_db::ClickedDict::default(),
-            sender.input_sender().clone(),
-        );
+        if let Some(p) = self.passage(id) {
+            p.tsk_popover.popdown();
+            strongs::present(
+                &p.strongs_popover,
+                &p.view,
+                p.strongs_at,
+                &[def],
+                &counts,
+                &bible_app_db::ClickedDict::default(),
+                self.msg_tx.clone(),
+            );
+        }
     }
 
-    fn open_occurrences(&mut self, code: &str, sender: &ComponentSender<Self>) {
-        if self.error.is_some() {
-            return;
+    fn fill_mhc(&mut self, id: TabId, at: Ref) {
+        let Some(conn) = &self.conn else { return };
+        if let Some(TabContent::Mhc(w)) = self.hosted.get(&id).map(|h| &h.content) {
+            mhc::fill(w, conn, &self.books, at);
         }
-        if self.occurrences.is_none() {
-            let widgets = occurrences::open(sender.input_sender().clone());
-            self.occurrences = Some(widgets);
+        if let Some(h) = self.hosted.get(&id) {
+            h.page.set_tooltip(&nav::format_ref(&self.books, at));
         }
-        if let Some(widgets) = &mut self.occurrences {
-            if let Some(conn) = &self.conn {
-                occurrences::fill(widgets, conn, &self.books, code);
+    }
+
+    fn fill_tsk(&mut self, id: TabId, at: Ref) {
+        let Some(conn) = &self.conn else { return };
+        let tx = self.msg_tx.clone();
+        if let Some(TabContent::Tsk(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+            tsk::fill(w, conn, &self.books, at, tx);
+        }
+        if let Some(h) = self.hosted.get(&id) {
+            h.page.set_tooltip(&nav::format_ref(&self.books, at));
+        }
+    }
+
+    fn refresh_followers(&mut self) {
+        let following: Vec<(TabId, TabKind)> = self
+            .workspace
+            .tabs()
+            .iter()
+            .filter(|t| t.kind.follows_verse())
+            .map(|t| (t.id, t.kind.clone()))
+            .collect();
+        for (id, kind) in following {
+            match kind {
+                TabKind::Mhc { at, .. } => self.fill_mhc(id, at),
+                TabKind::Tsk { at, .. } => self.fill_tsk(id, at),
+                _ => {}
             }
-            widgets.window.present();
         }
     }
 
-    fn open_library(
+    fn reload_passage(&mut self, id: TabId, highlight: bool) {
+        let paragraphs = self.paragraphs;
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        if let Some(TabContent::Passage(p)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+            p.load(
+                &passage::ChapterCtx {
+                    conn,
+                    books: &self.books,
+                    user: self.user.as_ref(),
+                    paragraphs,
+                },
+                highlight,
+            );
+        }
+        self.sync_tab_title(id);
+    }
+
+    fn reload_all_passages(&mut self, highlight: bool) {
+        let ids: Vec<TabId> = self
+            .hosted
+            .iter()
+            .filter_map(|(id, h)| match h.content {
+                TabContent::Passage(_) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            self.reload_passage(id, highlight);
+        }
+    }
+
+    fn spawn_passage(&mut self, id: TabId, at: Ref) {
+        let p = PassageView::new(at, &self.actions);
+        p.wire(id, self.msg_tx.clone());
+        let title = nav::format_chapter(&self.books, at.book, at.chapter);
+        let root = p.root.clone();
+        self.add_page(id, &root, &title, TabContent::Passage(Box::new(p)));
+        self.reload_passage(id, false);
+    }
+
+    fn add_page(
         &mut self,
-        module: &str,
-        headword: Option<&str>,
-        sender: &ComponentSender<Self>,
+        id: TabId,
+        child: &impl IsA<gtk::Widget>,
+        title: &str,
+        content: TabContent,
     ) {
-        if self.error.is_some() {
-            return;
-        }
-        if self.dict.is_none() {
-            let mut widgets = dict::open(sender.input_sender().clone());
-            if let Some(conn) = &self.conn {
-                dict::load_modules(&mut widgets, conn);
+        let Some(shell) = &self.shell else { return };
+        let pane = self.workspace.tab(id).map(|t| t.pane).unwrap_or(Pane::Left);
+        let view = shell.host(pane).view.clone();
+        let page = view.append(child);
+        page.set_keyword(&id.keyword());
+        page.set_title(title);
+        if let Some(at) = self.workspace.tab(id).and_then(|t| t.kind.at()) {
+            if !self.workspace.tab(id).is_some_and(|t| t.kind.is_passage()) {
+                page.set_tooltip(&nav::format_ref(&self.books, at));
             }
-            self.dict = Some(widgets);
         }
-        if let Some(widgets) = &mut self.dict {
-            if let (Some(conn), Some(head)) = (&self.conn, headword) {
-                dict::open_headword(widgets, conn, module, head);
-            } else {
-                dict::select_module(widgets, module);
+        self.hosted.insert(id, HostedTab { page, content });
+        if let Some(h) = self.hosted.get(&id) {
+            view.set_selected_page(&h.page);
+        }
+        self.sync_shell();
+    }
+
+    fn sync_tab_title(&self, id: TabId) {
+        let Some(tab) = self.workspace.tab(id) else {
+            return;
+        };
+        let Some(hosted) = self.hosted.get(&id) else {
+            return;
+        };
+        let title = match &tab.kind {
+            TabKind::Passage { at } => nav::format_chapter(&self.books, at.book, at.chapter),
+            TabKind::Mhc { .. } => "Matthew Henry".into(),
+            TabKind::Tsk { .. } => "TSK".into(),
+            TabKind::Library { .. } => match &hosted.content {
+                TabContent::Library(w) => dict::tab_title(w),
+                _ => "Library".into(),
+            },
+            TabKind::Marks { page } => match page {
+                MarksPage::Notes => "Notes".into(),
+                MarksPage::Bookmarks => "Bookmarks".into(),
+            },
+            TabKind::Occurrences { code } => format!("{code} in the KJV"),
+        };
+        hosted.page.set_title(&title);
+        if let Some(at) = tab.kind.at() {
+            if !tab.kind.is_passage() {
+                hosted.page.set_tooltip(&nav::format_ref(&self.books, at));
             }
-            widgets.window.present();
         }
     }
 
-    fn highlight_verse(&self, verse: u8) {
-        self.apply_current_verse_tag(verse);
-        let Some((_, offset)) = self.layout.verse_start.iter().find(|(v, _)| *v == verse) else {
-            return;
-        };
-        let offset = *offset;
-        let view = self.chapter_view.clone();
-        let buffer = self.buffer.clone();
-        glib::idle_add_local_once(move || {
-            let mut iter = buffer.iter_at_offset(offset);
-            view.scroll_to_iter(&mut iter, 0.15, true, 0.0, 0.2);
-        });
+    fn sync_open_tab_title(&self) {
+        if let Some(id) = self
+            .workspace
+            .find_kind(|k| matches!(k, TabKind::Library { .. }))
+        {
+            self.sync_tab_title(id);
+        }
     }
 
-    fn apply_current_verse_tag(&self, verse: u8) {
-        let Some(tag) = self.buffer.tag_table().lookup("current-verse") else {
+    fn select_tab(&self, id: TabId) {
+        let Some(hosted) = self.hosted.get(&id) else {
             return;
         };
-        let start = self.buffer.start_iter();
-        let end = self.buffer.end_iter();
-        self.buffer.remove_tag(&tag, &start, &end);
-        let Some(span) = marks::verse_num_span(&self.layout, verse) else {
-            return;
-        };
-        self.apply_tag("current-verse", span);
+        if let Some(view) = self.view_holding(id) {
+            view.set_selected_page(&hosted.page);
+            if let Some(win) = view.root().and_downcast::<gtk::Window>() {
+                win.present();
+            }
+        }
     }
 
-    fn load_chapter_marks(&mut self) {
-        self.chapter_marks = self
-            .user
-            .as_ref()
-            .and_then(|u| user_db::chapter_marks(u, self.at.book, self.at.chapter).ok())
-            .unwrap_or_default();
+    fn focus_tab(&mut self, id: TabId) {
+        self.workspace.focus(id);
+        self.select_tab(id);
+        self.sync_pickers();
+    }
+
+    fn request_close(&self, id: TabId) {
+        let Some(hosted) = self.hosted.get(&id) else {
+            return;
+        };
+        if let Some(view) = self.view_holding(id) {
+            view.close_page(&hosted.page);
+        }
+    }
+
+    fn forget_tab(&mut self, id: TabId) {
+        if self.hosted.remove(&id).is_none() {
+            return;
+        }
+        match self.workspace.close(id) {
+            CloseOutcome::Closed => {}
+            CloseOutcome::Replaced { id: new_id, at } => {
+                self.spawn_passage(new_id, at);
+            }
+        }
+        self.collapse_empty_panes();
+        self.sync_shell();
+        self.sync_pickers();
+    }
+
+    fn view_holding(&self, id: TabId) -> Option<adw::TabView> {
+        let page = &self.hosted.get(&id)?.page;
+        let mut views = Vec::new();
+        if let Some(shell) = &self.shell {
+            views.push(shell.left.view.clone());
+            views.push(shell.right.view.clone());
+        }
+        for host in self.detached.borrow().iter() {
+            views.push(host.view.clone());
+        }
+        views
+            .into_iter()
+            .find(|view| (0..view.n_pages()).any(|i| view.nth_page(i) == *page))
+    }
+
+    fn sync_shell(&self) {
+        if let Some(shell) = &self.shell {
+            shell.sync_split();
+        }
+    }
+
+    fn collapse_empty_panes(&self) {
+        let Some(shell) = &self.shell else { return };
+        if shell.left.view.n_pages() == 0 && shell.right.view.n_pages() > 0 {
+            while shell.right.view.n_pages() > 0 {
+                let page = shell.right.view.nth_page(0);
+                let pos = shell.left.view.n_pages();
+                shell.right.view.transfer_page(&page, &shell.left.view, pos);
+            }
+        }
+        shell.sync_split();
+    }
+
+    fn detach_tab(&mut self, id: TabId) {
+        let Some(from) = self.view_holding(id) else {
+            return;
+        };
+        let Some(hosted) = self.hosted.get(&id) else {
+            return;
+        };
+        if let Some(shell) = &self.shell {
+            if from != shell.left.view && from != shell.right.view {
+                return;
+            }
+        }
+        let title = hosted.page.title().to_string();
+        let host = shell::open_detached(&title);
+        if let Some(shell) = &self.shell {
+            let mains = MainViews {
+                left: shell.left.view.clone(),
+                right: shell.right.view.clone(),
+            };
+            host.window.insert_action_group("win", Some(&self.actions));
+            wire_tab_view(
+                &host.view,
+                mains,
+                self.msg_tx.clone(),
+                self.detached.clone(),
+                self.actions.clone(),
+                &shell::tab_menu_model(),
+            );
+        }
+        from.transfer_page(&hosted.page, &host.view, 0);
+        self.detached.borrow_mut().push(host);
+        self.workspace.detach(id);
+        self.collapse_empty_panes();
+        self.sync_shell();
+    }
+
+    fn move_tab_beside(&mut self, id: TabId) {
+        if !self.workspace.move_beside(id) {
+            return;
+        }
+        let Some(tab) = self.workspace.tab(id) else {
+            return;
+        };
+        let dest_pane = tab.pane;
+        let Some(shell) = &self.shell else { return };
+        let dest = shell.host(dest_pane).view.clone();
+        let Some(from) = self.view_holding(id) else {
+            return;
+        };
+        if from != dest {
+            if let Some(hosted) = self.hosted.get(&id) {
+                dest.set_visible(true);
+                from.transfer_page(&hosted.page, &dest, dest.n_pages());
+            }
+        }
+        self.select_tab(id);
+        self.sync_shell();
+    }
+
+    fn popdown_passage_popovers(&self) {
+        for h in self.hosted.values() {
+            if let TabContent::Passage(p) = &h.content {
+                p.popdown();
+            }
+        }
     }
 
     fn reload_user_marks(&mut self, refresh_lists: bool) {
-        self.load_chapter_marks();
-        marks::apply_tags(&self.buffer, &self.layout, &self.chapter_marks);
-        if let Some(conn) = &self.conn {
-            self.fill_xref_tips(conn);
+        let ids: Vec<TabId> = self
+            .hosted
+            .iter()
+            .filter_map(|(id, h)| match h.content {
+                TabContent::Passage(_) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            if let Some(TabContent::Passage(p)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+                p.reload_marks(self.user.as_ref(), &self.books, self.conn.as_ref());
+            }
         }
         if refresh_lists {
-            if let (Some(widgets), Some(user)) = (&mut self.marks, &self.user) {
-                marks::refresh_lists(widgets, user, &self.books);
+            if let Some(id) = self
+                .workspace
+                .find_kind(|k| matches!(k, TabKind::Marks { .. }))
+            {
+                if let (Some(TabContent::Marks(widgets)), Some(user)) = (
+                    self.hosted.get_mut(&id).map(|h| &mut h.content),
+                    self.user.as_ref(),
+                ) {
+                    marks::refresh_lists(widgets, user, &self.books);
+                }
             }
         }
     }
 
     fn toggle_bookmark(&mut self) {
+        let at = self.at();
         if let Some(user) = &self.user {
-            let _ = user_db::toggle_bookmark(user, self.at);
+            let _ = user_db::toggle_bookmark(user, at);
         }
         self.reload_user_marks(true);
     }
 
     fn set_highlight(&mut self, color: &str) {
+        let at = self.at();
         let color = if color.is_empty() { None } else { Some(color) };
         if let Some(user) = &self.user {
-            let _ = user_db::set_highlight(user, self.at, color);
+            let _ = user_db::set_highlight(user, at, color);
         }
         self.reload_user_marks(false);
     }
 
-    fn add_note(&mut self, sender: &ComponentSender<Self>) {
-        self.ensure_marks(sender, "notes");
+    fn add_note(&mut self) {
+        self.ensure_marks("notes");
+        let at = self.at();
         let text = self
             .user
             .as_ref()
-            .and_then(|u| user_db::get_note(u, self.at).ok().flatten())
+            .and_then(|u| user_db::get_note(u, at).ok().flatten())
             .unwrap_or_default();
-        if let Some(w) = &mut self.marks {
-            marks::edit_note(w, &self.books, self.at, &text);
+        if let Some(id) = self
+            .workspace
+            .find_kind(|k| matches!(k, TabKind::Marks { .. }))
+        {
+            if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+                marks::edit_note(w, &self.books, at, &text);
+            }
         }
     }
 
-    fn ensure_marks(&mut self, sender: &ComponentSender<Self>, page: &str) {
-        if self.error.is_some() || self.user.is_none() {
-            return;
-        }
-        if self.marks.is_none() {
-            self.marks = Some(marks::open(sender.input_sender().clone()));
-        }
-        if let (Some(widgets), Some(user)) = (&mut self.marks, &self.user) {
-            marks::show_page(widgets, page);
-            marks::fill(widgets, user, &self.books);
-            widgets.window.present();
-        }
-    }
-
-    fn show_verse_menu(&mut self, offset: i32, x: i32, y: i32) {
+    fn show_verse_menu(&mut self, id: TabId, offset: i32, x: i32, y: i32) {
         if self.error.is_some() {
             return;
         }
-        self.tsk_popover.popdown();
-        self.strongs_popover.popdown();
-        if let Some(verse) = layout::verse_at_offset(&self.layout.verse_start, offset) {
-            self.select_verse(verse);
+        self.focus_tab(id);
+        if let Some(p) = self.passage(id) {
+            p.tsk_popover.popdown();
+            p.strongs_popover.popdown();
         }
-        let mark = self.chapter_marks.get(&self.at.verse);
+        if let Some(verse) = self
+            .passage(id)
+            .and_then(|p| layout::verse_at_offset(&p.layout.verse_start, offset))
+        {
+            self.select_verse(id, verse);
+        }
+        let Some(p) = self.passage_mut(id) else {
+            return;
+        };
+        let mark = p.chapter_marks.get(&p.at.verse);
         let bookmarked = mark.is_some_and(|m| m.bookmark);
         let has_note = mark.is_some_and(|m| m.note);
-        self.verse_menu
+        p.verse_menu
             .set_menu_model(Some(&marks::verse_menu_model(bookmarked, has_note)));
-        self.verse_menu
+        p.verse_menu
             .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
-        self.verse_menu.popup();
+        p.verse_menu.popup();
     }
 
     fn export_notes(&self, sender: &ComponentSender<Self>) {
@@ -1863,7 +2170,9 @@ impl App {
         filters.append(&filter);
         dialog.set_filters(Some(&filters));
         dialog.set_default_filter(Some(&filter));
-        let parent = self.chapter_view.root().and_downcast::<gtk::Window>();
+        let parent = self
+            .focused_passage()
+            .and_then(|p| p.view.root().and_downcast::<gtk::Window>());
         let sender = sender.clone();
         dialog.save(parent.as_ref(), None::<&gio::Cancellable>, move |result| {
             if let Ok(file) = result {
@@ -1890,30 +2199,22 @@ impl App {
     fn alert(&self, title: &str, body: &str) {
         let dlg = adw::AlertDialog::new(Some(title), Some(body));
         dlg.add_response("ok", "OK");
-        let parent = self.chapter_view.root().and_downcast::<gtk::Window>();
+        let parent = self
+            .focused_passage()
+            .and_then(|p| p.view.root().and_downcast::<gtk::Window>());
         dlg.present(parent.as_ref());
     }
 
-    fn scroll_to_top(&self) {
-        let start = self.buffer.start_iter();
-        self.buffer.place_cursor(&start);
-        let view = self.chapter_view.clone();
-        glib::idle_add_local_once(move || {
-            let buffer = view.buffer();
-            let mut iter = buffer.start_iter();
-            view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.0);
-        });
-    }
-
     fn sync_pickers(&self) {
+        let at = self.at();
         self.picker_syncing.set(true);
-        picker::select_book(&self.book_dropdown, &self.books, self.at.book);
+        picker::select_book(&self.book_dropdown, &self.books, at.book);
         let n = self
             .conn
             .as_ref()
-            .and_then(|c| bible_app_db::max_chapter(c, self.at.book).ok())
+            .and_then(|c| bible_app_db::max_chapter(c, at.book).ok())
             .unwrap_or(1);
-        picker::sync_chapters(&self.chapter_dropdown, n, self.at.chapter);
+        picker::sync_chapters(&self.chapter_dropdown, n, at.chapter);
         self.picker_syncing.set(false);
     }
 }
@@ -1998,6 +2299,87 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     menu
 }
 
+fn wire_tab_view(
+    view: &adw::TabView,
+    mains: MainViews,
+    sender: relm4::Sender<Msg>,
+    detached: Rc<RefCell<Vec<DetachedHost>>>,
+    actions: gio::SimpleActionGroup,
+    menu: &gio::Menu,
+) {
+    view.set_menu_model(Some(menu));
+    let send = sender.clone();
+    view.connect_setup_menu(move |_, page| {
+        let id = page.and_then(|p| p.keyword().as_deref().and_then(TabId::from_keyword));
+        send.emit(Msg::SetupTabMenu(id));
+    });
+    let send = sender.clone();
+    view.connect_selected_page_notify(move |view| {
+        if let Some(page) = view.selected_page() {
+            if let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) {
+                send.emit(Msg::TabSelected(id));
+            }
+        }
+    });
+    let send = sender.clone();
+    let mains_close = mains.clone();
+    view.connect_page_detached(move |view, page, _| {
+        if view.is_transferring_page() {
+            return;
+        }
+        if let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) {
+            send.emit(Msg::TabClosed(id));
+        }
+        let is_main = view == &mains_close.left || view == &mains_close.right;
+        if !is_main && view.n_pages() == 0 {
+            if let Some(win) = view.root().and_downcast::<gtk::Window>() {
+                glib::idle_add_local_once(move || {
+                    win.close();
+                });
+            }
+        }
+    });
+    let send = sender.clone();
+    let mains_attach = mains.clone();
+    view.connect_page_attached(move |view, page, _| {
+        let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) else {
+            return;
+        };
+        let (pane, detached_flag) = if view == &mains_attach.left {
+            (Pane::Left, false)
+        } else if view == &mains_attach.right {
+            (Pane::Right, false)
+        } else {
+            (Pane::Left, true)
+        };
+        send.emit(Msg::TabAttached {
+            id,
+            pane,
+            detached: detached_flag,
+        });
+    });
+    let send = sender.clone();
+    let detached_c = detached.clone();
+    let mains_create = mains;
+    let menu = menu.clone();
+    let actions_c = actions;
+    view.connect_create_window(move |_| {
+        let host = shell::open_detached("bible-app");
+        host.window.insert_action_group("win", Some(&actions_c));
+        wire_tab_view(
+            &host.view,
+            mains_create.clone(),
+            send.clone(),
+            detached_c.clone(),
+            actions_c.clone(),
+            &menu,
+        );
+        let view = host.view.clone();
+        detached_c.borrow_mut().push(host);
+        Some(view)
+    });
+}
+
 relm4::new_action_group!(WindowActionGroup, "win");
 relm4::new_stateful_action!(ParagraphsAction, WindowActionGroup, "paragraphs", (), bool);
 relm4::new_stateless_action!(CopyVerseAction, WindowActionGroup, "copy-verse");
@@ -2010,3 +2392,6 @@ relm4::new_stateless_action!(NotesAction, WindowActionGroup, "notes");
 relm4::new_stateless_action!(ExportNotesAction, WindowActionGroup, "export-notes");
 relm4::new_stateless_action!(ToggleBookmarkAction, WindowActionGroup, "toggle-bookmark");
 relm4::new_stateless_action!(AddNoteAction, WindowActionGroup, "add-note");
+relm4::new_stateless_action!(DetachTabAction, WindowActionGroup, "tab-detach");
+relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-beside");
+relm4::new_stateful_action!(FollowTabAction, WindowActionGroup, "tab-follow", (), bool);
