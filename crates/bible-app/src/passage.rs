@@ -374,7 +374,7 @@ impl PassageView {
             tips.push((
                 word.span.start,
                 word.span.end,
-                "Click for Strong's, dictionaries, and topics".into(),
+                "Click for Strong's, lexicons, dictionaries, and topics".into(),
             ));
         }
         *self.xref_tips.borrow_mut() = tips;

@@ -513,7 +513,11 @@ impl SimpleComponent for App {
 
         let dict_modules = conn
             .as_ref()
-            .and_then(|c| bible_app_db::dictionary_modules(c).ok())
+            .map(|c| {
+                let mut modules = bible_app_db::lexicon_modules(c).unwrap_or_default();
+                modules.extend(bible_app_db::dictionary_modules(c).unwrap_or_default());
+                modules
+            })
             .unwrap_or_default();
         let dict_action = gio::SimpleAction::new("open-dict", Some(glib::VariantTy::STRING));
         dict_action.set_enabled(error.is_none() && !dict_modules.is_empty());
@@ -1385,7 +1389,7 @@ impl App {
                     self.ensure_mhc();
                 }
             }
-            LibraryKind::Dictionary | LibraryKind::Topic => {
+            LibraryKind::Dictionary | LibraryKind::Topic | LibraryKind::Lexicon => {
                 let Some(headword) = headword.as_deref() else {
                     return;
                 };
@@ -1735,7 +1739,8 @@ impl App {
             .filter_map(|c| bible_app_db::lookup_strongs(conn, c).ok().flatten())
             .collect();
         let counts = strongs_counts(conn, &defs);
-        let dict = bible_app_db::lookup_clicked_word(conn, &surface).unwrap_or_default();
+        let mut dict = bible_app_db::lookup_clicked_word(conn, &surface).unwrap_or_default();
+        dict.lexicons = bible_app_db::lookup_lexicons_for_defs(conn, &defs).unwrap_or_default();
         if defs.is_empty() && dict.is_empty() {
             return;
         }
@@ -1764,6 +1769,11 @@ impl App {
             return;
         };
         let counts = strongs_counts(conn, std::slice::from_ref(&def));
+        let dict = bible_app_db::ClickedDict {
+            lexicons: bible_app_db::lookup_lexicons_for_defs(conn, std::slice::from_ref(&def))
+                .unwrap_or_default(),
+            ..Default::default()
+        };
         if let Some(p) = self.passage(id) {
             p.tsk_popover.popdown();
             strongs::present(
@@ -1772,7 +1782,7 @@ impl App {
                 p.strongs_at,
                 &[def],
                 &counts,
-                &bible_app_db::ClickedDict::default(),
+                &dict,
                 self.msg_tx.clone(),
             );
         }
@@ -2269,6 +2279,7 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     commentary.append(Some("Matthew Henry"), Some("win.mhc"));
     commentary.append(Some("Treasury of Scripture Knowledge"), Some("win.tsk"));
     let dictionaries = gio::Menu::new();
+    let lexicons = gio::Menu::new();
     let topics = gio::Menu::new();
     for module in modules {
         let action = format!(
@@ -2277,6 +2288,8 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
         );
         if module.kind == "dictionary" {
             dictionaries.append(Some(module.title.as_str()), Some(action.as_str()));
+        } else if module.kind == "lexicon" {
+            lexicons.append(Some(module.title.as_str()), Some(action.as_str()));
         } else {
             topics.append(Some(module.title.as_str()), Some(action.as_str()));
         }
@@ -2289,6 +2302,9 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
 
     let study = gio::Menu::new();
     study.append_submenu(Some("Commentary"), &commentary);
+    if lexicons.n_items() > 0 {
+        study.append_submenu(Some("Lexicon"), &lexicons);
+    }
     if dictionaries.n_items() > 0 {
         study.append_submenu(Some("Dictionary"), &dictionaries);
     }

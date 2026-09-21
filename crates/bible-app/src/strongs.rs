@@ -34,6 +34,11 @@ pub fn present(
         );
         pages += 1;
     }
+    for (module, entries) in group_lexicons(&dict.lexicons) {
+        let name = lexicon_tab_label(module);
+        stack.add_titled(&lexicon_page(&entries, sender.clone()), Some(module), &name);
+        pages += 1;
+    }
     for entry in &dict.bible {
         let name = dict_tab_label(entry);
         stack.add_titled(
@@ -90,6 +95,8 @@ fn dict_tab_label(entry: &DictEntry) -> String {
         "ATSD" => "ATS".into(),
         "Nave" => "Nave".into(),
         "Torrey" => "Torrey".into(),
+        "BDB" => "BDB".into(),
+        "Thayer" => "Thayer".into(),
         _ => entry
             .title
             .split_whitespace()
@@ -97,6 +104,29 @@ fn dict_tab_label(entry: &DictEntry) -> String {
             .unwrap_or("Dictionary")
             .to_string(),
     }
+}
+
+fn lexicon_tab_label(module: &str) -> String {
+    match module {
+        "BDB" => "BDB".into(),
+        "Thayer" => "Thayer".into(),
+        other => other.to_string(),
+    }
+}
+
+fn group_lexicons(entries: &[DictEntry]) -> Vec<(&str, Vec<&DictEntry>)> {
+    let mut groups: Vec<(&str, Vec<&DictEntry>)> = Vec::new();
+    for entry in entries {
+        if let Some((_, items)) = groups
+            .iter_mut()
+            .find(|(module, _)| *module == entry.module)
+        {
+            items.push(entry);
+        } else {
+            groups.push((entry.module.as_str(), vec![entry]));
+        }
+    }
+    groups
 }
 
 fn library_button(
@@ -207,6 +237,38 @@ fn occurrences_button(
         sender.emit(super::app::Msg::OpenStrongsOccurrences(code.clone()));
     });
     btn
+}
+
+fn lexicon_page(entries: &[&DictEntry], sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_width_request(300);
+
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+        append_dict_entry(&body, entry);
+        body.append(&library_button(
+            sender.clone(),
+            &entry.module,
+            &entry.headword,
+        ));
+    }
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(80);
+    scroll.set_max_content_height(320);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_child(Some(&body));
+
+    let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    wrap.append(&scroll);
+    wrap
 }
 
 fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
@@ -425,5 +487,37 @@ mod tests {
         };
         assert_eq!(dict_tab_label(&nave), "Nave");
         assert_eq!(dict_tab_label(&torrey), "Torrey");
+    }
+
+    fn entry(module: &str, headword: &str) -> DictEntry {
+        DictEntry {
+            module: module.into(),
+            title: module.into(),
+            headword: headword.into(),
+            text: "def".into(),
+        }
+    }
+
+    #[test]
+    fn lexicon_tabs_are_bdb_then_thayer() {
+        let entries = vec![
+            entry("BDB", "H430"),
+            entry("Thayer", "G26"),
+            entry("BDB", "H433"),
+        ];
+        let groups = group_lexicons(&entries);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|(m, items)| (
+                    *m,
+                    items
+                        .iter()
+                        .map(|e| e.headword.as_str())
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("BDB", vec!["H430", "H433"]), ("Thayer", vec!["G26"]),]
+        );
     }
 }

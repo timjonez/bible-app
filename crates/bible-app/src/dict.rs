@@ -165,7 +165,8 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
 }
 
 pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
-    let mut modules = bible_app_db::dictionary_modules(conn).unwrap_or_default();
+    let mut modules = bible_app_db::lexicon_modules(conn).unwrap_or_default();
+    modules.extend(bible_app_db::dictionary_modules(conn).unwrap_or_default());
     if !modules.iter().any(|m| m.id == bible_app_db::STRONGS_MODULE) {
         modules.insert(
             0,

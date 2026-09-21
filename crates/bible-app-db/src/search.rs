@@ -57,6 +57,7 @@ pub enum LibraryKind {
     Commentary,
     Dictionary,
     Topic,
+    Lexicon,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,10 +202,23 @@ pub fn rebuild_entries_fts(conn: &Connection) -> Result<(), DbError> {
         );
         DELETE FROM entries_fts;
         INSERT INTO entries_fts (headword, text, module, i)
-        SELECT headword, text, module, i FROM entries;
+        SELECT e.headword, e.text, e.module, e.i
+        FROM entries e
+        JOIN modules m ON m.id = e.module
+        WHERE m.kind != 'lexicon';
         "#,
     )?;
     Ok(())
+}
+
+fn indexed_entry_count(conn: &Connection) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM entries e
+         JOIN modules m ON m.id = e.module
+         WHERE m.kind != 'lexicon'",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn ensure_entries_fts(conn: &Connection) -> Result<(), DbError> {
@@ -219,7 +233,7 @@ pub fn ensure_entries_fts(conn: &Connection) -> Result<(), DbError> {
         );
         "#,
     )?;
-    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
+    let rows = indexed_entry_count(conn)?;
     let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM entries_fts", [], |r| r.get(0))?;
     if rows != indexed {
         rebuild_entries_fts(conn)?;
@@ -341,10 +355,10 @@ fn search_entry_kind(
     let Some(match_q) = match_query(query) else {
         return Ok(Vec::new());
     };
-    let library_kind = if kind == "topic" {
-        LibraryKind::Topic
-    } else {
-        LibraryKind::Dictionary
+    let library_kind = match kind {
+        "topic" => LibraryKind::Topic,
+        "lexicon" => LibraryKind::Lexicon,
+        _ => LibraryKind::Dictionary,
     };
     let limit = limit.max(1) as i64;
     let exact = query.trim();
@@ -390,6 +404,7 @@ fn search_all(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Librar
         search_commentary(conn, query, limit)?,
         search_entry_kind(conn, query, "dictionary", limit)?,
         search_entry_kind(conn, query, "topic", limit)?,
+        search_entry_kind(conn, query, "lexicon", limit)?,
     ];
     Ok(take_round_robin(groups, limit))
 }
