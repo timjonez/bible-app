@@ -36,6 +36,8 @@ pub struct PassageView {
     pub verse_menu: gtk::PopoverMenu,
     pub chapter_marks: HashMap<u8, user_db::VerseMarks>,
     pub strongs_at: i32,
+    /// Buffer selection captured when the verse menu opens.
+    pub menu_sel: Option<(i32, i32)>,
 }
 
 impl PassageView {
@@ -94,6 +96,7 @@ impl PassageView {
             verse_menu,
             chapter_marks: HashMap::new(),
             strongs_at: 0,
+            menu_sel: None,
         }
     }
 
@@ -356,7 +359,7 @@ impl PassageView {
                 if m.bookmark {
                     parts.push("Bookmarked".into());
                 }
-                if m.highlight.is_some() {
+                if m.highlight().is_some() {
                     parts.push("Highlighted".into());
                 }
                 if m.note {
@@ -454,6 +457,26 @@ impl PassageView {
     pub fn selected_verse_range(&self) -> Option<(u8, u8)> {
         let (start, end) = self.buffer.selection_bounds()?;
         layout::verses_in_selection(&self.layout.verse_start, start.offset(), end.offset())
+    }
+
+    pub fn capture_menu_sel(&mut self) {
+        self.menu_sel = self
+            .buffer
+            .selection_bounds()
+            .map(|(s, e)| (s.offset(), e.offset()))
+            .filter(|(s, e)| e > s);
+    }
+
+    pub fn selected_highlight_spans(&self) -> Vec<(u8, i32, i32)> {
+        let (start, end) = if let Some(sel) = self.menu_sel {
+            sel
+        } else {
+            let Some((s, e)) = self.buffer.selection_bounds() else {
+                return Vec::new();
+            };
+            (s.offset(), e.offset())
+        };
+        layout::selection_highlights(&self.layout, start, end)
     }
 
     pub fn reload_marks(

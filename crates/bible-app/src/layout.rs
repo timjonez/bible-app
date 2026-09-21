@@ -899,6 +899,52 @@ pub fn verse_range(verse_start: &[(u8, i32)], verse: u8, text_end: i32) -> Optio
     (end > start).then_some(Span { start, end })
 }
 
+/// Number plus body of `verse`, stopping before the gap that leads into the next verse.
+pub fn verse_text_span(layout: &ChapterLayout, verse: u8) -> Option<Span> {
+    let start = layout.verse_start.iter().find(|(v, _)| *v == verse)?.1;
+    let end = layout.verse_end.iter().find(|(v, _)| *v == verse)?.1;
+    (end > start).then_some(Span { start, end })
+}
+
+/// `end < 0` means the whole verse (number plus body).
+pub const WHOLE_VERSE: i32 = -1;
+
+/// Clip a buffer selection to per-verse ranges stored relative to each verse start.
+pub fn selection_highlights(layout: &ChapterLayout, start: i32, end: i32) -> Vec<(u8, i32, i32)> {
+    if end <= start {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for &(verse, vstart) in &layout.verse_start {
+        let Some(&(_, vend)) = layout.verse_end.iter().find(|(v, _)| *v == verse) else {
+            continue;
+        };
+        let s = start.max(vstart);
+        let e = end.min(vend);
+        if e > s {
+            out.push((verse, s - vstart, e - vstart));
+        }
+    }
+    out
+}
+
+/// Buffer span for a stored highlight: whole verse when `end < 0`, else offsets from verse start.
+pub fn highlight_paint_span(
+    layout: &ChapterLayout,
+    verse: u8,
+    start: i32,
+    end: i32,
+) -> Option<Span> {
+    if end < 0 {
+        return verse_text_span(layout, verse);
+    }
+    let vstart = layout.verse_start.iter().find(|(v, _)| *v == verse)?.1;
+    let vend = layout.verse_end.iter().find(|(v, _)| *v == verse)?.1;
+    let s = vstart.saturating_add(start.max(0));
+    let e = vend.min(vstart.saturating_add(end));
+    (e > s).then_some(Span { start: s, end: e })
+}
+
 pub fn word_at_offset(words: &[WordSpan], offset: i32) -> Option<&WordSpan> {
     words
         .iter()
@@ -1673,6 +1719,89 @@ God creates heaven and earth.
         assert_eq!(last.start, s3);
         assert_eq!(last.end, text_end);
         assert!(!last.contains(text_end));
+    }
+
+    #[test]
+    fn verse_text_span_covers_the_words() {
+        let verses = vec![
+            verse(1, "First verse", true),
+            verse(2, "Second verse", false),
+            verse(3, "Third verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        let span = verse_text_span(&layout, 2).unwrap();
+        let text = span_text(&layout.text, span);
+        assert!(
+            text.starts_with('2') && text.contains("Second verse"),
+            "{text}"
+        );
+        assert!(!text.contains("First verse"), "{text}");
+        assert!(!text.contains("Third verse"), "{text}");
+        let body = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
+        assert!(span.contains(body));
+        assert_eq!(span_text(&layout.text, layout.verse_nums[1]), "2");
+        assert!(span.contains(layout.verse_nums[1].start));
+        let s3 = layout.verse_start[2].1;
+        assert!(!span.contains(s3));
+        assert!(span.end <= s3);
+    }
+
+    #[test]
+    fn verse_text_span_covers_paragraph_words() {
+        let verses = vec![
+            verse(1, "First verse", false),
+            verse(2, "Second verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], para_opts());
+        let first = verse_text_span(&layout, 1).unwrap();
+        let first_text = span_text(&layout.text, first);
+        assert!(first_text.contains("First verse"), "{first_text}");
+        assert!(!first_text.contains("Second verse"), "{first_text}");
+        let second = verse_text_span(&layout, 2).unwrap();
+        let second_text = span_text(&layout.text, second);
+        assert!(second_text.contains("Second verse"), "{second_text}");
+        assert!(!second_text.contains("First verse"), "{second_text}");
+        assert!(!first.contains(layout.verse_start[1].1));
+    }
+
+    #[test]
+    fn selection_highlights_only_the_selected_words() {
+        let verses = vec![
+            verse(1, "First verse", true),
+            verse(2, "Second verse", false),
+            verse(3, "Third verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        let body = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
+        let start = body;
+        let end = body + "Second".chars().count() as i32;
+        let spans = selection_highlights(&layout, start, end);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].0, 2);
+        let paint = highlight_paint_span(&layout, spans[0].0, spans[0].1, spans[0].2).unwrap();
+        assert_eq!(span_text(&layout.text, paint), "Second");
+        let whole = highlight_paint_span(&layout, 2, 0, WHOLE_VERSE).unwrap();
+        assert_eq!(whole, verse_text_span(&layout, 2).unwrap());
+        assert!(span_text(&layout.text, whole).contains("Second verse"));
+    }
+
+    #[test]
+    fn selection_highlights_clips_each_paragraph_verse() {
+        let verses = vec![
+            verse(1, "First verse", false),
+            verse(2, "Second verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], para_opts());
+        let v1_end = layout.verse_end.iter().find(|(v, _)| *v == 1).unwrap().1;
+        let v2_body = layout.verse_body.iter().find(|(v, _)| *v == 2).unwrap().1;
+        let start = v1_end - "verse".chars().count() as i32;
+        let end = v2_body + "Second".chars().count() as i32;
+        let spans = selection_highlights(&layout, start, end);
+        assert_eq!(spans.len(), 2);
+        let first = highlight_paint_span(&layout, spans[0].0, spans[0].1, spans[0].2).unwrap();
+        let second = highlight_paint_span(&layout, spans[1].0, spans[1].1, spans[1].2).unwrap();
+        assert_eq!(span_text(&layout.text, first), "verse");
+        assert_eq!(span_text(&layout.text, second), "2 Second");
     }
 
     #[test]
