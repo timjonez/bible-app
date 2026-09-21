@@ -363,6 +363,65 @@ pub fn parse_strongs_code(code: &str) -> Option<(i32, String)> {
 }
 
 pub const STRONGS_MODULE: &str = "Strongs";
+pub const BDB_MODULE: &str = "BDB";
+pub const THAYER_MODULE: &str = "Thayer";
+
+/// BDB for Hebrew Strong's codes, Thayer for Greek.
+pub fn lexicon_module_for_lang(lang: &str) -> Option<&'static str> {
+    if lang.eq_ignore_ascii_case("H") {
+        Some(BDB_MODULE)
+    } else if lang.eq_ignore_ascii_case("G") {
+        Some(THAYER_MODULE)
+    } else {
+        None
+    }
+}
+
+pub fn strongs_code(def: &StrongDef) -> String {
+    format!("{}{}", def.lang, def.num)
+}
+
+pub fn lookup_lexicon(
+    conn: &Connection,
+    module: &str,
+    code: &str,
+) -> Result<Option<DictEntry>, DbError> {
+    let Some((num, lang)) = parse_strongs_code(code) else {
+        return Ok(None);
+    };
+    let expected = lexicon_module_for_lang(&lang);
+    if expected.is_none_or(|want| want != module) {
+        return Ok(None);
+    }
+    lookup_in_module(conn, module, &format!("{lang}{num}"))
+}
+
+/// BDB entries for Hebrew codes, then Thayer for Greek, in `defs` order.
+pub fn lookup_lexicons_for_defs(
+    conn: &Connection,
+    defs: &[StrongDef],
+) -> Result<Vec<DictEntry>, DbError> {
+    let mut out = Vec::new();
+    for module in [BDB_MODULE, THAYER_MODULE] {
+        let mut seen = std::collections::HashSet::new();
+        for def in defs {
+            let Some(want) = lexicon_module_for_lang(&def.lang) else {
+                continue;
+            };
+            if want != module {
+                continue;
+            }
+            let code = strongs_code(def);
+            if !seen.insert(code.clone()) {
+                continue;
+            }
+            if let Some(entry) = lookup_lexicon(conn, module, &code)? {
+                out.push(entry);
+            }
+        }
+    }
+    Ok(out)
+}
 
 pub fn search_strongs(conn: &Connection, query: &str, limit: i32) -> Result<Vec<DictHit>, DbError> {
     let pattern = like_prefix(query);
@@ -456,6 +515,22 @@ pub struct DictModule {
     pub id: String,
     pub title: String,
     pub kind: String,
+}
+
+pub fn lexicon_modules(conn: &Connection) -> Result<Vec<DictModule>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, kind FROM modules
+         WHERE kind = 'lexicon'
+         ORDER BY CASE id WHEN 'BDB' THEN 0 WHEN 'Thayer' THEN 1 ELSE 2 END, title",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DictModule {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            kind: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn dictionary_modules(conn: &Connection) -> Result<Vec<DictModule>, DbError> {
@@ -558,11 +633,12 @@ pub fn dict_lookup_keys(word: &str) -> Vec<String> {
 pub struct ClickedDict {
     pub bible: Vec<DictEntry>,
     pub english: Option<DictEntry>,
+    pub lexicons: Vec<DictEntry>,
 }
 
 impl ClickedDict {
     pub fn is_empty(&self) -> bool {
-        self.bible.is_empty() && self.english.is_none()
+        self.bible.is_empty() && self.english.is_none() && self.lexicons.is_empty()
     }
 }
 
@@ -580,6 +656,7 @@ pub fn lookup_clicked_word(conn: &Connection, word: &str) -> Result<ClickedDict,
     Ok(ClickedDict {
         bible,
         english: lookup_in_module(conn, "Webster", word)?,
+        lexicons: Vec::new(),
     })
 }
 
@@ -1053,5 +1130,131 @@ mod tests {
             .english
             .as_ref()
             .is_some_and(|e| e.text.contains("go before")));
+    }
+
+    fn seed_lexicons(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license) VALUES
+                ('BDB', 'lexicon', 'Brown-Driver-Briggs Hebrew Lexicon', 'CC BY 4.0'),
+                ('Thayer', 'lexicon', 'Thayer''s Greek-English Lexicon', 'CC0-1.0');
+            INSERT INTO entries (module, i, headword, text) VALUES
+                ('BDB', 430, 'H430', 'elohim; God'),
+                ('Thayer', 26, 'G26', 'agape; love');
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lookup_lexicon_by_strongs_code() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        seed_lexicons(&conn);
+        let bdb = lookup_lexicon(&conn, BDB_MODULE, "H430").unwrap().unwrap();
+        assert_eq!(bdb.module, "BDB");
+        assert_eq!(bdb.headword, "H430");
+        assert!(bdb.text.contains("elohim"));
+        let thayer = lookup_lexicon(&conn, THAYER_MODULE, "G26")
+            .unwrap()
+            .unwrap();
+        assert_eq!(thayer.module, "Thayer");
+        assert_eq!(thayer.headword, "G26");
+        assert!(thayer.text.contains("agape"));
+        assert!(lookup_lexicon(&conn, BDB_MODULE, "G26").unwrap().is_none());
+        assert!(lookup_lexicon(&conn, THAYER_MODULE, "H430")
+            .unwrap()
+            .is_none());
+        assert_eq!(lexicon_modules(&conn).unwrap()[0].id, "BDB");
+        assert_eq!(lexicon_modules(&conn).unwrap()[1].id, "Thayer");
+    }
+
+    #[test]
+    fn word_click_lexicons_follow_lang() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        seed_lexicons(&conn);
+        assert_eq!(lexicon_module_for_lang("H"), Some(BDB_MODULE));
+        assert_eq!(lexicon_module_for_lang("G"), Some(THAYER_MODULE));
+        let hebrew = StrongDef {
+            num: 430,
+            lang: "H".into(),
+            lemma: "elohiym".into(),
+            pronunciation: String::new(),
+            definition: "God".into(),
+        };
+        let greek = StrongDef {
+            num: 26,
+            lang: "G".into(),
+            lemma: "agape".into(),
+            pronunciation: String::new(),
+            definition: "love".into(),
+        };
+        let h_tabs = lookup_lexicons_for_defs(&conn, std::slice::from_ref(&hebrew)).unwrap();
+        assert_eq!(
+            h_tabs.iter().map(|e| e.module.as_str()).collect::<Vec<_>>(),
+            vec!["BDB"]
+        );
+        assert!(!h_tabs.iter().any(|e| e.module == "Thayer"));
+        let g_tabs = lookup_lexicons_for_defs(&conn, std::slice::from_ref(&greek)).unwrap();
+        assert_eq!(
+            g_tabs.iter().map(|e| e.module.as_str()).collect::<Vec<_>>(),
+            vec!["Thayer"]
+        );
+        assert!(!g_tabs.iter().any(|e| e.module == "BDB"));
+        let both = lookup_lexicons_for_defs(&conn, &[hebrew, greek]).unwrap();
+        assert_eq!(
+            both.iter().map(|e| e.module.as_str()).collect::<Vec<_>>(),
+            vec!["BDB", "Thayer"]
+        );
+    }
+
+    #[test]
+    fn real_sqlite_bdb_thayer_if_imported() {
+        let Some(path) = shipped_sqlite() else {
+            eprintln!("skipping: unpacked bible-app.sqlite not found");
+            return;
+        };
+        let conn = open(&path).unwrap();
+        let ids: Vec<String> = lexicon_modules(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        if ids.is_empty() {
+            eprintln!("skipping: BDB/Thayer modules not imported");
+            return;
+        }
+        assert!(ids.contains(&"BDB".into()), "{ids:?}");
+        assert!(ids.contains(&"Thayer".into()), "{ids:?}");
+        let bdb = lookup_lexicon(&conn, BDB_MODULE, "H430").unwrap().unwrap();
+        assert!(
+            bdb.text.to_ascii_lowercase().contains("god")
+                || bdb.text.contains("אֱלֹהִים")
+                || bdb.text.contains("Elohim")
+                || bdb.text.contains("elohim"),
+            "BDB H430 missing God sense: {}",
+            bdb.text
+        );
+        assert!(!bdb.text.contains('<'), "HTML leaked into BDB text");
+        let thayer = lookup_lexicon(&conn, THAYER_MODULE, "G26")
+            .unwrap()
+            .unwrap();
+        assert!(
+            thayer.text.to_ascii_lowercase().contains("love") || thayer.text.contains("ἀγάπη"),
+            "Thayer G26 missing love sense: {}",
+            thayer.text
+        );
+        assert!(!thayer.text.contains('<'), "HTML leaked into Thayer text");
+        let hebrew = StrongDef {
+            num: 430,
+            lang: "H".into(),
+            lemma: String::new(),
+            pronunciation: String::new(),
+            definition: String::new(),
+        };
+        let tabs = lookup_lexicons_for_defs(&conn, std::slice::from_ref(&hebrew)).unwrap();
+        assert_eq!(tabs[0].module, "BDB");
+        assert!(!tabs.iter().any(|e| e.module == "Thayer"));
     }
 }

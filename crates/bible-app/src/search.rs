@@ -74,6 +74,8 @@ pub fn source_label(module: &str) -> &str {
         "Webster" => "Webster",
         "Nave" => "Nave",
         "Torrey" => "Torrey",
+        "BDB" => "BDB",
+        "Thayer" => "Thayer",
         other => other,
     }
 }
@@ -93,10 +95,12 @@ pub fn caption(hit: &LibraryHit, books: &[Book]) -> String {
             Some(at) => format!("{source} · {}", nav::format_ref(books, at)),
             None => source.to_string(),
         },
-        LibraryKind::Dictionary | LibraryKind::Topic => match hit.headword.as_deref() {
-            Some(head) if !head.is_empty() => format!("{source} · {head}"),
-            _ => source.to_string(),
-        },
+        LibraryKind::Dictionary | LibraryKind::Topic | LibraryKind::Lexicon => {
+            match hit.headword.as_deref() {
+                Some(head) if !head.is_empty() => format!("{source} · {head}"),
+                _ => source.to_string(),
+            }
+        }
     }
 }
 
