@@ -557,28 +557,38 @@ pub fn dict_lookup_keys(word: &str) -> Vec<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClickedDict {
     pub bible: Vec<DictEntry>,
+    pub topics: Vec<DictEntry>,
     pub english: Option<DictEntry>,
 }
 
 impl ClickedDict {
     pub fn is_empty(&self) -> bool {
-        self.bible.is_empty() && self.english.is_none()
+        self.bible.is_empty() && self.topics.is_empty() && self.english.is_none()
     }
 }
 
-/// Every matching Bible dictionary, plus Webster 1828.
+/// Every matching Bible dictionary and topic, plus Webster 1828.
 pub fn lookup_clicked_word(conn: &Connection, word: &str) -> Result<ClickedDict, DbError> {
     let mut bible = Vec::new();
+    let mut topics = Vec::new();
     for module in dictionary_modules(conn)? {
-        if module.kind != "dictionary" || module.id == "Webster" {
-            continue;
-        }
-        if let Some(entry) = lookup_in_module(conn, &module.id, word)? {
-            bible.push(entry);
+        match module.kind.as_str() {
+            "dictionary" if module.id != "Webster" => {
+                if let Some(entry) = lookup_in_module(conn, &module.id, word)? {
+                    bible.push(entry);
+                }
+            }
+            "topic" => {
+                if let Some(entry) = lookup_in_module(conn, &module.id, word)? {
+                    topics.push(entry);
+                }
+            }
+            _ => {}
         }
     }
     Ok(ClickedDict {
         bible,
+        topics,
         english: lookup_in_module(conn, "Webster", word)?,
     })
 }
@@ -1030,6 +1040,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Easton", "easton sense"), ("Smith", "smith sense")]
         );
+        assert!(god.topics.is_empty());
         assert_eq!(
             god.english.as_ref().map(|e| e.text.as_str()),
             Some("english sense")
@@ -1043,8 +1054,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Easton", "Smith"]
         );
+        assert!(possessive.topics.is_empty());
         let prevent = lookup_clicked_word(&conn, "prevent").unwrap();
         assert!(prevent.bible.is_empty());
+        assert!(prevent.topics.is_empty());
         assert_eq!(
             prevent.english.as_ref().map(|e| e.module.as_str()),
             Some("Webster")
@@ -1053,5 +1066,73 @@ mod tests {
             .english
             .as_ref()
             .is_some_and(|e| e.text.contains("go before")));
+    }
+
+    #[test]
+    fn lookup_returns_topics_separately() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license) VALUES
+                ('Webster', 'dictionary', 'Webster''s 1828 Dictionary', 'MIT'),
+                ('Easton', 'dictionary', 'Easton''s Bible Dictionary', 'public-domain'),
+                ('Nave', 'topic', 'Nave''s Topical Bible', 'public-domain'),
+                ('Torrey', 'topic', 'Torrey''s Topical Textbook', 'public-domain');
+            INSERT INTO entries (module, i, headword, text) VALUES
+                ('Webster', 0, 'God', 'english sense'),
+                ('Easton', 0, 'God', 'easton sense'),
+                ('Nave', 0, 'God', 'nave topic'),
+                ('Torrey', 0, 'God', 'torrey topic'),
+                ('Easton', 1, 'Faith', 'easton faith'),
+                ('Webster', 1, 'Faith', 'english faith');
+            "#,
+        )
+        .unwrap();
+        let god = lookup_clicked_word(&conn, "God").unwrap();
+        assert_eq!(
+            god.bible
+                .iter()
+                .map(|e| (e.module.as_str(), e.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("Easton", "easton sense")]
+        );
+        assert_eq!(
+            god.topics
+                .iter()
+                .map(|e| (e.module.as_str(), e.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("Nave", "nave topic"), ("Torrey", "torrey topic")]
+        );
+        assert_eq!(
+            god.english.as_ref().map(|e| e.text.as_str()),
+            Some("english sense")
+        );
+        assert!(!god.is_empty());
+        let possessive = lookup_clicked_word(&conn, "God's").unwrap();
+        assert_eq!(
+            possessive
+                .topics
+                .iter()
+                .map(|e| e.module.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Nave", "Torrey"]
+        );
+        let faith = lookup_clicked_word(&conn, "Faith").unwrap();
+        assert_eq!(
+            faith
+                .bible
+                .iter()
+                .map(|e| e.module.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Easton"]
+        );
+        assert!(faith.topics.is_empty());
+        assert_eq!(
+            faith.english.as_ref().map(|e| e.module.as_str()),
+            Some("Webster")
+        );
+        let miss = lookup_clicked_word(&conn, "xyzzy").unwrap();
+        assert!(miss.is_empty());
     }
 }
