@@ -1083,11 +1083,7 @@ mod tests {
             "verse mode uses a single line break, not a blank line: {}",
             layout.text
         );
-        assert!(
-            !layout.text.contains("spake\n\n2"),
-            "{}",
-            layout.text
-        );
+        assert!(!layout.text.contains("spake\n\n2"), "{}", layout.text);
         assert!(
             layout.text.contains("2 Speak to the children"),
             "{}",
@@ -1104,7 +1100,6 @@ mod tests {
             layout.text
         );
     }
-
 
     #[test]
     fn paragraphs_join_non_break_verses_with_a_space() {

@@ -96,7 +96,7 @@ fn library_button(
     let btn = gtk::Button::with_label("Open in library");
     btn.set_halign(gtk::Align::Start);
     btn.add_css_class("pill");
-    btn.set_tooltip_text(Some("Open this word in the library window"));
+    btn.set_tooltip_text(Some("Open this word in the library"));
     let module = module.to_string();
     let headword = headword.to_string();
     btn.connect_clicked(move |_| {

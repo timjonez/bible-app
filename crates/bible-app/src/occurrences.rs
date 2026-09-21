@@ -2,27 +2,22 @@ use crate::layout;
 use crate::nav::{self, Ref};
 use adw::prelude::*;
 use bible_app_db::{Book, Occurrence};
-use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
 
 pub struct OccWidgets {
-    pub window: adw::ApplicationWindow,
-    pub title: adw::WindowTitle,
+    pub root: gtk::Widget,
+    pub heading: gtk::Label,
     pub status: gtk::Label,
     pub list: gtk::ListBox,
     pub hits: Vec<Occurrence>,
 }
 
-pub fn open(sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
-    let app = relm4::main_adw_application();
-    let window = adw::ApplicationWindow::new(&app);
-    window.set_title(Some("Strong's in the KJV"));
-    window.set_default_size(520, 720);
-
-    let title = adw::WindowTitle::new("Strong's in the KJV", "");
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title));
+pub fn build(sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
+    let heading = gtk::Label::new(Some("Strong's in the KJV"));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
 
     let status = gtk::Label::new(None);
     status.set_xalign(0.0);
@@ -48,22 +43,13 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
     body.set_margin_end(12);
     body.set_margin_top(8);
     body.set_margin_bottom(8);
+    body.append(&heading);
     body.append(&status);
     body.append(&list_scroll);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&body));
-    window.set_content(Some(&toolbar));
-
-    window.connect_close_request(move |_| {
-        sender.emit(super::app::Msg::OccurrencesClosed);
-        glib::Propagation::Proceed
-    });
-    window.present();
     OccWidgets {
-        window,
-        title,
+        root: body.upcast(),
+        heading,
         status,
         list,
         hits: Vec::new(),
@@ -72,17 +58,11 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
 
 pub fn fill(widgets: &mut OccWidgets, conn: &Connection, books: &[Book], code: &str) {
     let heading = format!("{code} in the KJV");
-    widgets.title.set_title(&heading);
-    widgets.window.set_title(Some(&heading));
+    widgets.heading.set_label(&heading);
 
     let total = bible_app_db::strongs_occurrence_count(conn, code).unwrap_or(0);
     widgets.hits = bible_app_db::strongs_occurrences(conn, code, bible_app_db::DEFAULT_LIMIT)
         .unwrap_or_default();
-    widgets.title.set_subtitle(&status_line(
-        widgets.hits.len(),
-        total,
-        bible_app_db::DEFAULT_LIMIT,
-    ));
     widgets.status.set_text(&status_line(
         widgets.hits.len(),
         total,

@@ -1,26 +1,21 @@
 use crate::nav::{self, Ref};
 use adw::prelude::*;
 use bible_app_db::Book;
-use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
 
 pub struct MhcWidgets {
-    pub window: adw::ApplicationWindow,
-    pub title: adw::WindowTitle,
+    pub root: gtk::Widget,
+    pub heading: gtk::Label,
     pub buffer: gtk::TextBuffer,
 }
 
-pub fn open(sender: relm4::Sender<super::app::Msg>, at: Ref, books: &[Book]) -> MhcWidgets {
-    let app = relm4::main_adw_application();
-    let window = adw::ApplicationWindow::new(&app);
-    window.set_title(Some("Matthew Henry"));
-    window.set_default_size(520, 720);
-
-    let subtitle = nav::format_ref(books, at);
-    let title = adw::WindowTitle::new("Matthew Henry", &subtitle);
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title));
+pub fn build() -> MhcWidgets {
+    let heading = gtk::Label::new(None);
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    heading.set_wrap_mode(gtk::pango::WrapMode::WordChar);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let view = gtk::TextView::new();
@@ -32,6 +27,8 @@ pub fn open(sender: relm4::Sender<super::app::Msg>, at: Ref, books: &[Book]) -> 
     view.set_right_margin(20);
     view.set_top_margin(16);
     view.set_bottom_margin(16);
+    view.set_hexpand(true);
+    view.set_vexpand(true);
     view.set_accessible_role(gtk::AccessibleRole::Document);
 
     let scroll = gtk::ScrolledWindow::new();
@@ -39,25 +36,23 @@ pub fn open(sender: relm4::Sender<super::app::Msg>, at: Ref, books: &[Book]) -> 
     scroll.set_vexpand(true);
     scroll.set_child(Some(&view));
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&scroll));
-    window.set_content(Some(&toolbar));
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.append(&heading);
+    body.append(&scroll);
 
-    window.connect_close_request(move |_| {
-        sender.emit(super::app::Msg::MhcClosed);
-        glib::Propagation::Proceed
-    });
-    window.present();
     MhcWidgets {
-        window,
-        title,
+        root: body.upcast(),
+        heading,
         buffer,
     }
 }
 
 pub fn fill(widgets: &MhcWidgets, conn: &Connection, books: &[Book], at: Ref) {
-    widgets.title.set_subtitle(&nav::format_ref(books, at));
+    widgets.heading.set_label(&nav::format_ref(books, at));
     match bible_app_db::resource_covering(conn, "MHC", at.book, at.chapter, at.verse) {
         Ok(Some(res)) => {
             let covering = nav::format_ref(
@@ -70,8 +65,8 @@ pub fn fill(widgets: &MhcWidgets, conn: &Connection, books: &[Book], at: Ref) {
             );
             if res.verse != at.verse {
                 widgets
-                    .title
-                    .set_subtitle(&format!("{} · from {covering}", nav::format_ref(books, at)));
+                    .heading
+                    .set_label(&format!("{} · from {covering}", nav::format_ref(books, at)));
             }
             widgets.buffer.set_text(&res.text);
         }

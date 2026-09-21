@@ -4,7 +4,6 @@ use crate::user_db::{self, Bookmark, Note, VerseMarks};
 use adw::prelude::*;
 use bible_app_db::Book;
 use gtk::gio;
-use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
 use std::cell::Cell;
@@ -28,7 +27,7 @@ const USER_TAG_NAMES: &[&str] = &[
 ];
 
 pub struct MarksWidgets {
-    pub window: adw::ApplicationWindow,
+    pub root: gtk::Widget,
     pub stack: adw::ViewStack,
     pub bookmark_list: gtk::ListBox,
     pub bookmarks: Vec<Bookmark>,
@@ -136,19 +135,14 @@ pub fn verse_menu_model(bookmarked: bool, has_note: bool) -> gio::Menu {
     menu
 }
 
-pub fn open(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
-    let app = relm4::main_adw_application();
-    let window = adw::ApplicationWindow::new(&app);
-    window.set_title(Some("Marks"));
-    window.set_default_size(520, 720);
-
+pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     let stack = adw::ViewStack::new();
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
     let switcher = adw::ViewSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
-
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&switcher));
+    switcher.set_halign(gtk::Align::Center);
 
     let bookmark_list = gtk::ListBox::new();
     bookmark_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -278,18 +272,16 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     stack.add_titled(&bookmarks_page, Some("bookmarks"), "Bookmarks");
     stack.add_titled(&notes_page, Some("notes"), "Notes");
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&stack));
-    window.set_content(Some(&toolbar));
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(8);
+    body.set_margin_end(8);
+    body.set_margin_top(8);
+    body.set_margin_bottom(8);
+    body.append(&switcher);
+    body.append(&stack);
 
-    window.connect_close_request(move |_| {
-        sender.emit(super::app::Msg::MarksClosed);
-        glib::Propagation::Proceed
-    });
-    window.present();
     MarksWidgets {
-        window,
+        root: body.upcast(),
         stack,
         bookmark_list,
         bookmarks: Vec::new(),

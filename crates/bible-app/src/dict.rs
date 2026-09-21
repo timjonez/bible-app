@@ -8,8 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub struct DictWidgets {
-    pub window: adw::ApplicationWindow,
-    pub title: adw::WindowTitle,
+    pub root: gtk::Widget,
+    pub heading: gtk::Label,
     pub search: gtk::SearchEntry,
     pub popover: gtk::Popover,
     pub list: gtk::ListBox,
@@ -23,15 +23,11 @@ pub struct DictWidgets {
     syncing: Rc<Cell<bool>>,
 }
 
-pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
-    let app = relm4::main_adw_application();
-    let window = adw::ApplicationWindow::new(&app);
-    window.set_title(Some("Library"));
-    window.set_default_size(560, 740);
-
-    let title = adw::WindowTitle::new("Library", "");
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title));
+pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
+    let heading = gtk::Label::new(Some("Library"));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
 
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search a headword"));
@@ -139,30 +135,21 @@ pub fn open(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     body.set_margin_end(12);
     body.set_margin_top(8);
     body.set_margin_bottom(8);
+    body.append(&heading);
     body.append(&search);
     body.append(&see_kjv);
     body.append(&text_scroll);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&body));
-    window.set_content(Some(&toolbar));
-
     install_css();
 
     let popover_destroy = popover.clone();
-    window.connect_destroy(move |_| {
+    body.connect_destroy(move |_| {
         popover_destroy.unparent();
     });
-    window.connect_close_request(move |_| {
-        sender.emit(super::app::Msg::DictClosed);
-        glib::Propagation::Proceed
-    });
-    window.present();
-    search.grab_focus();
+
     DictWidgets {
-        window,
-        title,
+        root: body.upcast(),
+        heading,
         search,
         popover,
         list,
@@ -195,9 +182,7 @@ pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
 pub fn select_module(widgets: &mut DictWidgets, id: &str) {
     widgets.module_id = Some(id.to_string());
     if let Some(m) = widgets.modules.iter().find(|m| m.id == id) {
-        widgets.title.set_title(&m.title);
-        widgets.title.set_subtitle("");
-        widgets.window.set_title(Some(&m.title));
+        widgets.heading.set_label(&m.title);
     }
     widgets.syncing.set(true);
     widgets.search.set_text("");
@@ -215,6 +200,15 @@ pub fn select_module(widgets: &mut DictWidgets, id: &str) {
 
 pub fn current_module(widgets: &DictWidgets) -> Option<&str> {
     widgets.module_id.as_deref()
+}
+
+pub fn tab_title(widgets: &DictWidgets) -> String {
+    widgets
+        .module_id
+        .as_deref()
+        .and_then(|id| widgets.modules.iter().find(|m| m.id == id))
+        .map(|m| m.title.clone())
+        .unwrap_or_else(|| "Library".into())
 }
 
 pub fn open_headword(widgets: &mut DictWidgets, conn: &Connection, module: &str, headword: &str) {
