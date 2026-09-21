@@ -2111,10 +2111,19 @@ impl App {
     }
 
     fn set_highlight(&mut self, color: &str) {
-        let at = self.at();
+        let Some(p) = self.focused_passage() else {
+            return;
+        };
+        let at = p.at;
+        let spans = p.selected_highlight_spans();
+        let spans = if spans.is_empty() {
+            vec![(at.verse, 0, user_db::WHOLE_VERSE)]
+        } else {
+            spans
+        };
         let color = if color.is_empty() { None } else { Some(color) };
         if let Some(user) = &self.user {
-            let _ = user_db::set_highlight(user, at, color);
+            let _ = user_db::apply_highlights(user, at.book, at.chapter, &spans, color);
         }
         self.reload_user_marks(false);
     }
@@ -2142,7 +2151,8 @@ impl App {
             return;
         }
         self.focus_tab(id);
-        if let Some(p) = self.passage(id) {
+        if let Some(p) = self.passage_mut(id) {
+            p.capture_menu_sel();
             p.tsk_popover.popdown();
             p.strongs_popover.popdown();
         }

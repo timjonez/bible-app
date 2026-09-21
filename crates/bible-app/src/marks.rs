@@ -81,17 +81,21 @@ pub fn apply_tags(
         }
     }
     for (verse, mark) in marks {
-        let Some(span) = verse_num_span(layout, *verse) else {
+        for hl in &mark.highlights {
+            if let Some(span) =
+                layout::highlight_paint_span(layout, *verse, hl.start, hl.end)
+            {
+                apply_tag(buffer, &format!("hl-{}", hl.color), span);
+            }
+        }
+        let Some(num) = verse_num_span(layout, *verse) else {
             continue;
         };
-        if let Some(color) = &mark.highlight {
-            apply_tag(buffer, &format!("hl-{color}"), span);
-        }
         if mark.bookmark {
-            apply_tag(buffer, "user-bookmark", span);
+            apply_tag(buffer, "user-bookmark", num);
         }
         if mark.note {
-            apply_tag(buffer, "user-note", span);
+            apply_tag(buffer, "user-note", num);
         }
     }
 }

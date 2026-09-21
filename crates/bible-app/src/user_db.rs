@@ -10,15 +10,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const APP_DIR: &str = "bible-app";
 const USER_DB_NAME: &str = "user.sqlite";
 
-pub const USER_SCHEMA_VERSION: i32 = 1;
+pub const USER_SCHEMA_VERSION: i32 = 2;
 pub const DEFAULT_HIGHLIGHT: &str = "gold";
 pub const HIGHLIGHT_COLORS: &[&str] = &["gold", "green", "blue", "rose"];
+pub const WHOLE_VERSE: i32 = layout::WHOLE_VERSE;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighlightMark {
+    pub start: i32,
+    pub end: i32,
+    pub color: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerseMarks {
     pub bookmark: bool,
     pub note: bool,
-    pub highlight: Option<String>,
+    pub highlights: Vec<HighlightMark>,
+}
+
+impl VerseMarks {
+    pub fn highlight(&self) -> Option<&str> {
+        self.highlights.first().map(|h| h.color.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,19 +147,95 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (book, chapter, verse)
         );
 
-        CREATE TABLE IF NOT EXISTS highlights (
-            book       INTEGER NOT NULL,
-            chapter    INTEGER NOT NULL,
-            verse      INTEGER NOT NULL,
-            color      TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY (book, chapter, verse)
-        );
         "#,
     )?;
+    migrate_highlights(conn)?;
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
         [USER_SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
+fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect()
+}
+
+fn migrate_highlights(conn: &Connection) -> rusqlite::Result<()> {
+    let cols = table_columns(conn, "highlights")?;
+    if cols.is_empty() {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS highlights (
+                id         INTEGER PRIMARY KEY,
+                book       INTEGER NOT NULL,
+                chapter    INTEGER NOT NULL,
+                verse      INTEGER NOT NULL,
+                start      INTEGER NOT NULL,
+                end        INTEGER NOT NULL,
+                color      TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_highlights_ref
+                ON highlights (book, chapter, verse);
+            "#,
+        )?;
+        return Ok(());
+    }
+    if cols.iter().any(|c| c == "start") {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE highlights_v2 (
+            id         INTEGER PRIMARY KEY,
+            book       INTEGER NOT NULL,
+            chapter    INTEGER NOT NULL,
+            verse      INTEGER NOT NULL,
+            start      INTEGER NOT NULL,
+            end        INTEGER NOT NULL,
+            color      TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        INSERT INTO highlights_v2 (book, chapter, verse, start, end, color, created_at)
+        SELECT book, chapter, verse, 0, -1, color, created_at FROM highlights;
+        DROP TABLE highlights;
+        ALTER TABLE highlights_v2 RENAME TO highlights;
+        CREATE INDEX IF NOT EXISTS idx_highlights_ref
+            ON highlights (book, chapter, verse);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn effective_end(end: i32) -> i32 {
+    if end < 0 {
+        i32::MAX
+    } else {
+        end
+    }
+}
+
+fn delete_overlapping(
+    conn: &Connection,
+    at: Ref,
+    start: i32,
+    end: i32,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM highlights
+         WHERE book = ?1 AND chapter = ?2 AND verse = ?3
+           AND start < ?4
+           AND CASE WHEN end < 0 THEN 2147483647 ELSE end END > ?5",
+        rusqlite::params![
+            at.book,
+            at.chapter,
+            at.verse,
+            effective_end(end),
+            start
+        ],
     )?;
     Ok(())
 }
@@ -256,47 +346,69 @@ pub fn list_notes(conn: &Connection) -> rusqlite::Result<Vec<Note>> {
     rows.collect()
 }
 
+#[cfg(test)]
 pub fn get_highlight(conn: &Connection, at: Ref) -> rusqlite::Result<Option<String>> {
     conn.query_row(
-        "SELECT color FROM highlights WHERE book = ?1 AND chapter = ?2 AND verse = ?3",
+        "SELECT color FROM highlights
+         WHERE book = ?1 AND chapter = ?2 AND verse = ?3
+         ORDER BY id
+         LIMIT 1",
         [at.book, at.chapter, at.verse],
         |row| row.get(0),
     )
     .optional()
 }
 
+#[cfg(test)]
 pub fn set_highlight(
     conn: &Connection,
     at: Ref,
     color: Option<&str>,
 ) -> rusqlite::Result<Option<String>> {
+    apply_highlights(
+        conn,
+        at.book,
+        at.chapter,
+        &[(at.verse, 0, WHOLE_VERSE)],
+        color,
+    )?;
+    get_highlight(conn, at)
+}
+
+pub fn apply_highlights(
+    conn: &Connection,
+    book: u8,
+    chapter: u8,
+    spans: &[(u8, i32, i32)],
+    color: Option<&str>,
+) -> rusqlite::Result<()> {
+    if spans.is_empty() {
+        return Ok(());
+    }
     let parsed = match color {
         None => None,
         Some(s) if s.trim().is_empty() || s.eq_ignore_ascii_case("none") => None,
         Some(s) => match parse_color(s) {
             Some(c) => Some(c),
-            None => return get_highlight(conn, at),
+            None => return Ok(()),
         },
     };
-    match parsed {
-        None => {
+    for &(verse, start, end) in spans {
+        let at = Ref {
+            book,
+            chapter,
+            verse,
+        };
+        delete_overlapping(conn, at, start, end)?;
+        if let Some(color) = parsed {
             conn.execute(
-                "DELETE FROM highlights WHERE book = ?1 AND chapter = ?2 AND verse = ?3",
-                [at.book, at.chapter, at.verse],
+                "INSERT INTO highlights (book, chapter, verse, start, end, color, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![at.book, at.chapter, at.verse, start, end, color, now_unix()],
             )?;
-            Ok(None)
-        }
-        Some(color) => {
-            conn.execute(
-                "INSERT INTO highlights (book, chapter, verse, color, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(book, chapter, verse) DO UPDATE SET
-                    color = excluded.color",
-                rusqlite::params![at.book, at.chapter, at.verse, color, now_unix()],
-            )?;
-            Ok(Some(color.to_string()))
         }
     }
+    Ok(())
 }
 
 pub fn delete_bookmark(conn: &Connection, at: Ref) -> rusqlite::Result<()> {
@@ -329,14 +441,26 @@ pub fn chapter_marks(
         }
     }
     {
-        let mut stmt =
-            conn.prepare("SELECT verse, color FROM highlights WHERE book = ?1 AND chapter = ?2")?;
+        let mut stmt = conn.prepare(
+            "SELECT verse, start, end, color FROM highlights
+             WHERE book = ?1 AND chapter = ?2
+             ORDER BY id",
+        )?;
         let rows = stmt.query_map([book, chapter], |row| {
-            Ok((row.get::<_, u8>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, u8>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         for row in rows {
-            let (verse, color) = row?;
-            map.entry(verse).or_default().highlight = Some(color);
+            let (verse, start, end, color) = row?;
+            map.entry(verse).or_default().highlights.push(HighlightMark {
+                start,
+                end,
+                color,
+            });
         }
     }
     Ok(map)
@@ -358,7 +482,11 @@ pub fn export_entries(conn: &Connection) -> rusqlite::Result<Vec<ExportEntry>> {
          ) AS v
          LEFT JOIN bookmarks AS b
             ON b.book = v.book AND b.chapter = v.chapter AND b.verse = v.verse
-         LEFT JOIN highlights AS h
+         LEFT JOIN (
+            SELECT book, chapter, verse, MIN(color) AS color
+            FROM highlights
+            GROUP BY book, chapter, verse
+         ) AS h
             ON h.book = v.book AND h.chapter = v.chapter AND h.verse = v.verse
          LEFT JOIN notes AS n
             ON n.book = v.book AND n.chapter = v.chapter AND n.verse = v.verse
@@ -599,6 +727,54 @@ mod tests {
     }
 
     #[test]
+    fn highlight_ranges_on_one_verse() {
+        let conn = open_memory().unwrap();
+        apply_highlights(&conn, 1, 1, &[(1, 2, 6)], Some("gold")).unwrap();
+        apply_highlights(&conn, 1, 1, &[(1, 10, 14)], Some("blue")).unwrap();
+        let marks = chapter_marks(&conn, 1, 1).unwrap();
+        assert_eq!(marks[&1].highlights.len(), 2);
+        assert_eq!(marks[&1].highlights[0].color, "gold");
+        assert_eq!(marks[&1].highlights[0].start, 2);
+        assert_eq!(marks[&1].highlights[1].color, "blue");
+        apply_highlights(&conn, 1, 1, &[(1, 4, 12)], Some("green")).unwrap();
+        let marks = chapter_marks(&conn, 1, 1).unwrap();
+        assert_eq!(marks[&1].highlights.len(), 1);
+        assert_eq!(marks[&1].highlight(), Some("green"));
+        apply_highlights(&conn, 1, 1, &[(1, 4, 12)], Some("none")).unwrap();
+        assert!(chapter_marks(&conn, 1, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_v1_highlights_to_whole_verse_range() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE highlights (
+                book INTEGER NOT NULL,
+                chapter INTEGER NOT NULL,
+                verse INTEGER NOT NULL,
+                color TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (book, chapter, verse)
+            );
+            INSERT INTO highlights (book, chapter, verse, color, created_at)
+            VALUES (1, 1, 1, 'gold', 0);
+            "#,
+        )
+        .unwrap();
+        init_schema(&conn).unwrap();
+        let marks = chapter_marks(&conn, 1, 1).unwrap();
+        assert_eq!(marks[&1].highlight(), Some("gold"));
+        assert_eq!(marks[&1].highlights[0].start, 0);
+        assert_eq!(marks[&1].highlights[0].end, WHOLE_VERSE);
+        apply_highlights(&conn, 1, 1, &[(1, 3, 8)], Some("rose")).unwrap();
+        let marks = chapter_marks(&conn, 1, 1).unwrap();
+        assert_eq!(marks[&1].highlights.len(), 1);
+        assert_eq!(marks[&1].highlight(), Some("rose"));
+        assert_eq!(marks[&1].highlights[0].start, 3);
+    }
+
+    #[test]
     fn chapter_marks_merge_three_tables() {
         let conn = open_memory().unwrap();
         toggle_bookmark(&conn, at(1, 1, 1)).unwrap();
@@ -609,9 +785,10 @@ mod tests {
         assert_eq!(marks.len(), 2);
         assert!(marks[&1].bookmark);
         assert!(marks[&1].note);
-        assert!(marks[&1].highlight.is_none());
+        assert!(marks[&1].highlight().is_none());
         assert!(!marks[&2].bookmark);
-        assert_eq!(marks[&2].highlight.as_deref(), Some("rose"));
+        assert_eq!(marks[&2].highlight(), Some("rose"));
+        assert_eq!(marks[&2].highlights[0].end, WHOLE_VERSE);
         assert!(!marks.contains_key(&3));
     }
 
