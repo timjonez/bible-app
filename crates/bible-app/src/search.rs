@@ -334,6 +334,15 @@ impl SearchRange {
         }
     }
 
+    /// Passage range is a verse-search control. Commentary is not the
+    /// current chapter, and dictionaries and topics are not passages.
+    pub fn applies(scope: SearchScope) -> bool {
+        matches!(
+            scope,
+            SearchScope::Kjv | SearchScope::Notes | SearchScope::All
+        )
+    }
+
     pub fn from_index(index: u32) -> Self {
         Self::ALL.get(index as usize).copied().unwrap_or(Self::All)
     }
@@ -400,7 +409,12 @@ pub fn plan(
             return Plan::Ready(Prepared {
                 compiled,
                 scope,
-                filter: bounds(range, current, slash_book, slash_chapter),
+                filter: bounds(
+                    effective_range(range, scope),
+                    current,
+                    slash_book,
+                    slash_chapter,
+                ),
                 chip,
                 current_book: current.book,
                 db_path: std::path::PathBuf::new(),
@@ -423,7 +437,12 @@ pub fn plan(
     Plan::Ready(Prepared {
         compiled,
         scope,
-        filter: bounds(range, current, slash_book, slash_chapter),
+        filter: bounds(
+            effective_range(range, scope),
+            current,
+            slash_book,
+            slash_chapter,
+        ),
         chip,
         current_book: current.book,
         db_path: std::path::PathBuf::new(),
@@ -447,6 +466,14 @@ fn slash_target(query: &str, books: &[Book], current: Ref) -> (Option<u8>, Optio
         (Some(at.book), Some(at.chapter), right.to_string())
     } else {
         (Some(at.book), None, right.to_string())
+    }
+}
+
+fn effective_range(range: SearchRange, scope: SearchScope) -> SearchRange {
+    if SearchRange::applies(scope) {
+        range
+    } else {
+        SearchRange::All
     }
 }
 
@@ -746,8 +773,7 @@ fn append_notes(prepared: &Prepared, page: &mut LibraryPage) {
     ) else {
         return;
     };
-    page.hits
-        .extend(note_hits(&found.hits));
+    page.hits.extend(note_hits(&found.hits));
 }
 
 fn note_hits(hits: &[crate::user_db::NoteHit]) -> Vec<LibraryHit> {
@@ -990,6 +1016,51 @@ mod tests {
         };
         assert_eq!(reference_text(&verse, &books, SearchScope::Kjv), "1:1");
         assert_eq!(group_label(&verse, &books, SearchScope::Kjv), "Genesis");
+    }
+
+    #[test]
+    fn commentary_does_not_use_the_verse_range() {
+        assert!(SearchRange::applies(SearchScope::Kjv));
+        assert!(SearchRange::applies(SearchScope::Notes));
+        assert!(SearchRange::applies(SearchScope::All));
+        assert!(!SearchRange::applies(SearchScope::Commentary));
+        assert!(!SearchRange::applies(SearchScope::Dictionaries));
+        assert!(!SearchRange::applies(SearchScope::Topics));
+        let books = books();
+        let current = Ref {
+            book: 4,
+            chapter: 1,
+            verse: 1,
+        };
+        match plan(
+            "moses",
+            &books,
+            current,
+            MatchMode::Phrase,
+            SearchRange::ThisChapter,
+            BookChip::AllBooks,
+            SearchScope::Commentary,
+        ) {
+            Plan::Ready(prepared) => {
+                assert_eq!(prepared.filter, VerseFilter::all());
+            }
+            other => panic!("expected a commentary search, got {other:?}"),
+        }
+        match plan(
+            "moses",
+            &books,
+            current,
+            MatchMode::Phrase,
+            SearchRange::ThisChapter,
+            BookChip::AllBooks,
+            SearchScope::Kjv,
+        ) {
+            Plan::Ready(prepared) => {
+                assert_eq!(prepared.filter.book, Some(4));
+                assert_eq!(prepared.filter.chapter, Some(1));
+            }
+            other => panic!("expected a verse search, got {other:?}"),
+        }
     }
 
     #[test]

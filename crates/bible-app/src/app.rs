@@ -76,6 +76,7 @@ pub struct App {
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
     search_chips: gtk::Box,
+    search_range_dd: gtk::DropDown,
     dict_modules: Vec<DictModule>,
     font_size: i32,
     paragraphs: bool,
@@ -701,6 +702,7 @@ impl SimpleComponent for App {
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
             search_chips: search_chips.clone(),
+            search_range_dd: search_range_dd.clone(),
             dict_modules,
             font_size,
             paragraphs,
@@ -1120,6 +1122,7 @@ impl SimpleComponent for App {
                 if self.search_scope != scope {
                     self.search_scope = scope;
                     self.search_chip = search::BookChip::Auto;
+                    self.sync_range_menu();
                     self.schedule_search(false);
                 }
             }
@@ -1697,6 +1700,11 @@ impl App {
             append,
         );
         self.search_hold.set(false);
+    }
+
+    fn sync_range_menu(&self) {
+        self.search_range_dd
+            .set_visible(search::SearchRange::applies(self.search_scope));
     }
 
     fn refill_chips(&self) {
