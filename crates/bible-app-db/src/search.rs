@@ -627,7 +627,6 @@ fn verse_hits(
         LIMIT ?9
         "#,
     )?;
-    let tokens = compiled.tokens.clone();
     let rows = stmt.query_map(
         rusqlite::params![
             compiled.fts,
@@ -646,7 +645,7 @@ fn verse_hits(
                 book: row.get(0)?,
                 chapter: row.get(1)?,
                 verse: row.get(2)?,
-                snippet: window_snippet(&strip_trailing_notes(&text), &tokens, 96),
+                snippet: plain_line(&strip_trailing_notes(&text)),
                 text,
             })
         },
@@ -716,6 +715,10 @@ fn strip_trailing_notes(text: &str) -> String {
         end = open;
     }
     text[..end].trim().to_string()
+}
+
+fn plain_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn window_snippet(text: &str, tokens: &[String], width: usize) -> String {

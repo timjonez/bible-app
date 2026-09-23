@@ -239,24 +239,29 @@ pub fn row(
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    box_.set_hexpand(true);
     box_.set_margin_start(12);
     box_.set_margin_end(12);
-    box_.set_margin_top(4);
-    box_.set_margin_bottom(4);
+    box_.set_margin_top(6);
+    box_.set_margin_bottom(6);
 
     let reference = reference_text(hit, books, scope);
     let title = gtk::Label::new(Some(&reference));
     title.set_xalign(0.0);
-    title.set_width_chars(14);
+    title.set_yalign(0.0);
+    title.set_width_chars(8);
     title.add_css_class("caption");
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let snippet = gtk::Label::new(None);
     snippet.set_markup(&emphasize(&hit.snippet, tokens));
     snippet.set_xalign(0.0);
+    snippet.set_yalign(0.0);
     snippet.set_hexpand(true);
+    snippet.set_wrap(true);
+    snippet.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    snippet.set_lines(3);
     snippet.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    snippet.set_single_line_mode(true);
 
     box_.append(&title);
     box_.append(&snippet);
@@ -617,7 +622,7 @@ fn strongs_outcome(
                 chapter: Some(hit.chapter),
                 verse: Some(hit.verse),
                 headword: None,
-                snippet: bible_app_db::window_snippet(&body, &[], 96),
+                snippet: body.split_whitespace().collect::<Vec<_>>().join(" "),
             }
         })
         .collect();
@@ -713,7 +718,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
         hits
     };
     Outcome {
-        hits: note_hits(&hits, &prepared.compiled.tokens),
+        hits: note_hits(&hits),
         total,
         by_book,
         tokens: prepared.compiled.tokens.clone(),
@@ -742,10 +747,10 @@ fn append_notes(prepared: &Prepared, page: &mut LibraryPage) {
         return;
     };
     page.hits
-        .extend(note_hits(&found.hits, &prepared.compiled.tokens));
+        .extend(note_hits(&found.hits));
 }
 
-fn note_hits(hits: &[crate::user_db::NoteHit], tokens: &[String]) -> Vec<LibraryHit> {
+fn note_hits(hits: &[crate::user_db::NoteHit]) -> Vec<LibraryHit> {
     hits.iter()
         .map(|hit| LibraryHit {
             kind: LibraryKind::Note,
@@ -755,7 +760,7 @@ fn note_hits(hits: &[crate::user_db::NoteHit], tokens: &[String]) -> Vec<Library
             chapter: Some(hit.chapter),
             verse: Some(hit.verse),
             headword: None,
-            snippet: bible_app_db::window_snippet(&hit.text, tokens, 96),
+            snippet: hit.text.split_whitespace().collect::<Vec<_>>().join(" "),
         })
         .collect()
 }

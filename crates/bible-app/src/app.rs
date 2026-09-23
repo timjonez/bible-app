@@ -307,7 +307,7 @@ impl SimpleComponent for App {
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_width_request: 420,
+                            set_width_request: 560,
                             set_spacing: 8,
                             set_margin_start: 12,
                             set_margin_end: 12,
@@ -1171,10 +1171,10 @@ impl SimpleComponent for App {
                     .selected_row()
                     .map(|r| r.index())
                     .unwrap_or(0);
-                self.open_hit(idx, false);
+                self.open_hit(idx, false, true);
             }
             Msg::OpenHit(idx) => {
-                self.open_hit(idx, false);
+                self.open_hit(idx, false, false);
             }
             Msg::OpenHitBeside(idx) => {
                 let idx = if idx < 0 {
@@ -1185,7 +1185,7 @@ impl SimpleComponent for App {
                 } else {
                     idx
                 };
-                self.open_hit(idx, true);
+                self.open_hit(idx, true, true);
             }
             Msg::ToggleMhc => {
                 if let Some(id) = self.workspace.find_kind(|k| k.is_mhc()) {
@@ -1808,7 +1808,7 @@ impl App {
         }
     }
 
-    fn open_hit(&mut self, idx: i32, beside: bool) {
+    fn open_hit(&mut self, idx: i32, beside: bool, dismiss: bool) {
         let Ok(idx) = usize::try_from(idx) else {
             return;
         };
@@ -1826,14 +1826,18 @@ impl App {
                 strongs: self.search_strongs.clone(),
             });
         }
-        self.search_origin = None;
-        self.search_open = false;
+        if dismiss {
+            self.search_origin = None;
+            self.search_open = false;
+        }
         match kind {
             LibraryKind::Verse | LibraryKind::Note => {
                 let Some(at) = at else {
                     return;
                 };
-                if beside {
+                if !dismiss {
+                    self.preview_at(at);
+                } else if beside {
                     self.go_beside(at);
                 } else {
                     self.go(at, true);
@@ -1843,7 +1847,11 @@ impl App {
                 let Some(at) = at else {
                     return;
                 };
-                self.go(at, true);
+                if dismiss {
+                    self.go(at, true);
+                } else {
+                    self.preview_at(at);
+                }
                 if module == "TSK" {
                     self.ensure_tsk();
                 } else {
