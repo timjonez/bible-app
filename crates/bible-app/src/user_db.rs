@@ -147,9 +147,18 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (book, chapter, verse)
         );
 
+        CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+            text,
+            book UNINDEXED,
+            chapter UNINDEXED,
+            verse UNINDEXED,
+            tokenize = 'unicode61'
+        );
+
         "#,
     )?;
     migrate_highlights(conn)?;
+    ensure_notes_fts(conn)?;
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
         [USER_SCHEMA_VERSION.to_string()],
@@ -218,24 +227,13 @@ fn effective_end(end: i32) -> i32 {
     }
 }
 
-fn delete_overlapping(
-    conn: &Connection,
-    at: Ref,
-    start: i32,
-    end: i32,
-) -> rusqlite::Result<()> {
+fn delete_overlapping(conn: &Connection, at: Ref, start: i32, end: i32) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM highlights
          WHERE book = ?1 AND chapter = ?2 AND verse = ?3
            AND start < ?4
            AND CASE WHEN end < 0 THEN 2147483647 ELSE end END > ?5",
-        rusqlite::params![
-            at.book,
-            at.chapter,
-            at.verse,
-            effective_end(end),
-            start
-        ],
+        rusqlite::params![at.book, at.chapter, at.verse, effective_end(end), start],
     )?;
     Ok(())
 }
@@ -317,12 +315,135 @@ pub fn upsert_note(conn: &Connection, at: Ref, text: &str) -> rusqlite::Result<(
             updated_at = excluded.updated_at",
         rusqlite::params![at.book, at.chapter, at.verse, text, now_unix()],
     )?;
+    replace_note_fts(conn, at, text)?;
     Ok(())
 }
 
 pub fn delete_note(conn: &Connection, at: Ref) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM notes WHERE book = ?1 AND chapter = ?2 AND verse = ?3",
+        [at.book, at.chapter, at.verse],
+    )?;
+    delete_note_fts(conn, at)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteHit {
+    pub book: u8,
+    pub chapter: u8,
+    pub verse: u8,
+    pub text: String,
+}
+
+pub struct NotePage {
+    pub hits: Vec<NoteHit>,
+    pub total: i64,
+    pub by_book: Vec<(u8, i64)>,
+}
+
+pub fn search_notes(
+    conn: &Connection,
+    fts: &str,
+    book_min: u8,
+    book_max: u8,
+    book: Option<u8>,
+    chapter: Option<u8>,
+    limit: usize,
+) -> rusqlite::Result<NotePage> {
+    if fts.trim().is_empty() {
+        return Ok(NotePage {
+            hits: Vec::new(),
+            total: 0,
+            by_book: Vec::new(),
+        });
+    }
+    let book_n = i64::from(book.unwrap_or(0));
+    let chapter_n = i64::from(chapter.unwrap_or(0));
+    let mut count_stmt = conn.prepare(
+        r#"
+        SELECT book, count(*)
+        FROM notes_fts
+        WHERE notes_fts MATCH ?1
+          AND book BETWEEN ?2 AND ?3
+          AND (?4 = 0 OR chapter = ?4)
+        GROUP BY book
+        ORDER BY book
+        "#,
+    )?;
+    let by_book = count_stmt
+        .query_map(
+            rusqlite::params![fts, book_min, book_max, chapter_n],
+            |row| Ok((row.get::<_, u8>(0)?, row.get::<_, i64>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let total: i64 = if book.is_some() {
+        by_book
+            .iter()
+            .find(|(id, _)| Some(*id) == book)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    } else {
+        by_book.iter().map(|(_, n)| *n).sum()
+    };
+    let limit = limit.max(1) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT book, chapter, verse, text
+        FROM notes_fts
+        WHERE notes_fts MATCH ?1
+          AND book BETWEEN ?2 AND ?3
+          AND (?4 = 0 OR book = ?4)
+          AND (?5 = 0 OR chapter = ?5)
+        ORDER BY book, chapter, verse
+        LIMIT ?6
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![fts, book_min, book_max, book_n, chapter_n, limit],
+        |row| {
+            Ok(NoteHit {
+                book: row.get(0)?,
+                chapter: row.get(1)?,
+                verse: row.get(2)?,
+                text: row.get(3)?,
+            })
+        },
+    )?;
+    Ok(NotePage {
+        hits: rows.collect::<Result<Vec<_>, _>>()?,
+        total,
+        by_book,
+    })
+}
+
+fn ensure_notes_fts(conn: &Connection) -> rusqlite::Result<()> {
+    let notes: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
+    let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM notes_fts", [], |row| row.get(0))?;
+    if notes == indexed {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM notes_fts", [])?;
+    conn.execute(
+        "INSERT INTO notes_fts (text, book, chapter, verse)
+         SELECT text, book, chapter, verse FROM notes",
+        [],
+    )?;
+    Ok(())
+}
+
+fn replace_note_fts(conn: &Connection, at: Ref, text: &str) -> rusqlite::Result<()> {
+    delete_note_fts(conn, at)?;
+    conn.execute(
+        "INSERT INTO notes_fts (text, book, chapter, verse) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![text, at.book, at.chapter, at.verse],
+    )?;
+    Ok(())
+}
+
+fn delete_note_fts(conn: &Connection, at: Ref) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM notes_fts WHERE book = ?1 AND chapter = ?2 AND verse = ?3",
         [at.book, at.chapter, at.verse],
     )?;
     Ok(())
@@ -456,11 +577,10 @@ pub fn chapter_marks(
         })?;
         for row in rows {
             let (verse, start, end, color) = row?;
-            map.entry(verse).or_default().highlights.push(HighlightMark {
-                start,
-                end,
-                color,
-            });
+            map.entry(verse)
+                .or_default()
+                .highlights
+                .push(HighlightMark { start, end, color });
         }
     }
     Ok(map)
@@ -816,6 +936,25 @@ mod tests {
         let genesis = md.find("## Genesis 1:1").unwrap();
         let exodus = md.find("## Exodus 1:1").unwrap();
         assert!(genesis < exodus);
+    }
+
+    #[test]
+    fn note_search_finds_saved_text() {
+        let user = open_memory().unwrap();
+        upsert_note(&user, at(43, 3, 16), "a note about everlasting life").unwrap();
+        upsert_note(&user, at(1, 1, 1), "creation").unwrap();
+        let page = search_notes(&user, "everlasting", 1, 66, None, None, 20).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(
+            (page.hits[0].book, page.hits[0].chapter, page.hits[0].verse),
+            (43, 3, 16)
+        );
+        assert_eq!(page.by_book, vec![(43, 1)]);
+        delete_note(&user, at(43, 3, 16)).unwrap();
+        let page = search_notes(&user, "everlasting", 1, 66, None, None, 20).unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.hits.is_empty());
     }
 
     #[test]

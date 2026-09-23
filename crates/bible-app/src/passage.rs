@@ -430,6 +430,32 @@ impl PassageView {
         });
     }
 
+    pub fn paint_search(&self, verse: u8, tokens: &[String], strongs: Option<&str>) {
+        let Some(tag) = self.buffer.tag_table().lookup("search-hit") else {
+            return;
+        };
+        let start = self.buffer.start_iter();
+        let end = self.buffer.end_iter();
+        self.buffer.remove_tag(&tag, &start, &end);
+        if let Some(code) = strongs {
+            for word in &self.layout.words {
+                if word.codes.iter().any(|c| c.eq_ignore_ascii_case(code)) {
+                    self.apply_tag("search-hit", word.span);
+                }
+            }
+            return;
+        }
+        let Some(&(_, body)) = self.layout.verse_body.iter().find(|(v, _)| *v == verse) else {
+            return;
+        };
+        let Some(&(_, vend)) = self.layout.verse_end.iter().find(|(v, _)| *v == verse) else {
+            return;
+        };
+        for span in token_spans(&self.layout.text, body, vend, tokens) {
+            self.apply_tag("search-hit", span);
+        }
+    }
+
     pub fn apply_current_verse_tag(&self, verse: u8) {
         let Some(tag) = self.buffer.tag_table().lookup("current-verse") else {
             return;
@@ -550,6 +576,9 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     current_verse.set_foreground(Some("#99c1f1"));
     current_verse.set_weight(700);
     buffer.tag_table().add(&current_verse);
+    let search_hit = gtk::TextTag::new(Some("search-hit"));
+    search_hit.set_background_rgba(Some(&gtk::gdk::RGBA::new(0.92, 0.72, 0.25, 0.45)));
+    buffer.tag_table().add(&search_hit);
     marks::install_tags(buffer);
     current_verse.set_priority(0);
     apparatus.set_priority(0);
@@ -561,4 +590,43 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     mhc_tag.set_priority(2);
     tsk_sup.set_priority(2);
     note_mark.set_priority(2);
+    search_hit.set_priority(3);
+}
+
+fn token_spans(text: &str, start: i32, end: i32, tokens: &[String]) -> Vec<layout::Span> {
+    let chars: Vec<char> = text.chars().collect();
+    let start = start.max(0) as usize;
+    let end = (end.max(0) as usize).min(chars.len());
+    if start >= end {
+        return Vec::new();
+    }
+    let slice: String = chars[start..end].iter().collect();
+    let lower = slice.to_lowercase();
+    let mut spans = Vec::new();
+    for token in tokens {
+        let needle = token.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(&needle) {
+            let pos = from + rel;
+            let before = lower[..pos].chars().next_back();
+            let after = lower[pos + needle.len()..].chars().next();
+            if before.is_none_or(|c| !c.is_ascii_alphanumeric())
+                && after.is_none_or(|c| !c.is_ascii_alphanumeric())
+                && lower.is_char_boundary(pos)
+                && lower.is_char_boundary(pos + needle.len())
+            {
+                let char_at = lower[..pos].chars().count();
+                let char_end = char_at + needle.chars().count();
+                spans.push(layout::Span {
+                    start: (start + char_at) as i32,
+                    end: (start + char_end) as i32,
+                });
+            }
+            from = pos + needle.len().max(1);
+        }
+    }
+    spans
 }

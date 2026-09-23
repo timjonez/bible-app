@@ -5,11 +5,15 @@ use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use thiserror::Error;
 
-pub use occurrences::{strongs_occurrence_count, strongs_occurrences, Occurrence};
+pub use occurrences::{
+    strongs_occurrence_count, strongs_occurrences, strongs_page, Occurrence, StrongsWindow,
+};
 pub use search::{
-    ensure_entries_fts, ensure_resources_fts, ensure_verses_fts, match_query, rebuild_entries_fts,
-    rebuild_resources_fts, rebuild_verses_fts, search_library, search_verses, LibraryHit,
-    LibraryKind, SearchHit, SearchScope, DEFAULT_LIMIT,
+    compile_query, ensure_entries_fts, ensure_resources_fts, ensure_verses_fts, match_query,
+    rebuild_entries_fts, rebuild_resources_fts, rebuild_verses_fts, search_filtered,
+    search_library, search_verse_page, search_verses, window_snippet, BookCount, CompiledQuery,
+    LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchHit, SearchScope, VerseFilter,
+    DEFAULT_LIMIT,
 };
 
 pub const SCHEMA_VERSION: i32 = 6;

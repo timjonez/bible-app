@@ -21,6 +21,8 @@ pub struct State {
     pub interlinear: bool,
     #[serde(default = "default_true")]
     pub paragraphs: bool,
+    #[serde(default)]
+    pub search_mode: u32,
 }
 
 fn default_font_size() -> i32 {
@@ -40,6 +42,7 @@ impl Default for State {
             font_size: layout::DEFAULT_FONT,
             interlinear: false,
             paragraphs: true,
+            search_mode: 0,
         }
     }
 }
@@ -63,6 +66,7 @@ impl State {
             font_size,
             interlinear: false,
             paragraphs,
+            search_mode: 0,
         }
     }
 }

@@ -18,7 +18,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Alt+Left / Alt+Right: previous / next chapter
 - History back / forward (header icons, Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward)
 - Ctrl+L then type `John 3:16` and Enter (Shift+Enter opens that passage beside the current one)
-- Ctrl+F searches the KJV by default without leaving the chapter; a scope menu in the overlay also searches commentary (MHC/TSK), dictionaries, and topics. Enter on a KJV hit jumps to that verse in the focused passage; Shift+Enter opens it beside. Commentary opens the MHC or TSK tab; dictionary and topic hits open the library tab
+- Ctrl+F opens a results list beside the chapter. A phrase is the default; the match menu also offers all words, any word, and a prefix such as `lov*`. `H430` lists King James verses for that Strong's number, `John 3:16` offers Go to, and `John/light` limits the search to that book. Book chips and a range menu narrow a long hit list. The scope menu covers the KJV, commentary, dictionaries, topics, notes, and the whole library. Arrow keys preview a hit in the chapter. Enter stays there. Esc returns. Shift+Enter opens a verse beside the current one
 - Tabs hold KJV passages and study views (Matthew Henry, TSK, library, bookmarks/notes, Strong’s occurrences). The tab bar stays hidden until a second tab or a split is open
 - Split (one at a time) shows two views side by side — two passages, or a passage plus MHC. Open beside from a TSK destination, a search hit, Ctrl+L, or the tab menu
 - Detach a tab into its own window from the tab menu (Open in a window), or drag a tab out

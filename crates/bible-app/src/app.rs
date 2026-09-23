@@ -14,7 +14,7 @@ use crate::tsk;
 use crate::user_db;
 use crate::workspace::{CloseOutcome, MarksPage, Pane, TabId, TabKind, Workspace};
 use adw::prelude::*;
-use bible_app_db::{self, Book, DictModule, LibraryHit, LibraryKind, SearchScope};
+use bible_app_db::{self, Book, DictModule, LibraryHit, LibraryKind, MatchMode, SearchScope};
 use gtk::gio;
 use gtk::glib;
 use relm4::actions::{RelmAction, RelmActionGroup};
@@ -57,10 +57,25 @@ pub struct App {
     search_open: bool,
     search_query: String,
     search_scope: SearchScope,
+    search_mode: MatchMode,
+    search_range: search::SearchRange,
+    search_chip: search::BookChip,
     search_hits: Vec<LibraryHit>,
     search_status: String,
+    search_total: i64,
+    search_tokens: Vec<String>,
+    search_strongs: Option<String>,
+    search_chosen: Option<u8>,
+    search_book_counts: Vec<bible_app_db::BookCount>,
+    search_origin: Option<Ref>,
+    search_mark: Option<SearchMark>,
+    search_gen: Rc<Cell<u64>>,
+    search_hold: Rc<Cell<bool>>,
+    search_groups: Rc<RefCell<Vec<String>>>,
+    search_db_path: Option<PathBuf>,
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
+    search_chips: gtk::Box,
     dict_modules: Vec<DictModule>,
     font_size: i32,
     paragraphs: bool,
@@ -81,6 +96,13 @@ pub struct App {
     copy_offset: Rc<Cell<i32>>,
 }
 
+#[derive(Clone, Debug)]
+struct SearchMark {
+    at: Ref,
+    tokens: Vec<String>,
+    strongs: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum Msg {
     SelectBookIndex(u32),
@@ -92,6 +114,12 @@ pub enum Msg {
     SetSearch(bool),
     Search(String),
     SetSearchScope(SearchScope),
+    SetSearchMode(MatchMode),
+    SetSearchRange(search::SearchRange),
+    SelectSearchBook(Option<u8>),
+    SearchReady(u64, search::Outcome),
+    SearchMore,
+    PreviewHit(i32),
     SearchActivate,
     OpenHit(i32),
     OpenHitBeside(i32),
@@ -274,111 +302,128 @@ impl SimpleComponent for App {
                         set_description: model.error.as_deref(),
                     }
                 } else {
-                    gtk::Overlay {
-                        add_overlay = &gtk::Revealer {
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Horizontal,
+
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_width_request: 420,
+                            set_spacing: 8,
+                            set_margin_start: 12,
+                            set_margin_end: 12,
+                            set_margin_top: 12,
+                            set_margin_bottom: 12,
+                            add_css_class: "search-pane",
                             #[watch]
-                            set_reveal_child: model.search_open,
-                            set_transition_type: gtk::RevealerTransitionType::SlideDown,
-                            set_halign: gtk::Align::Fill,
-                            set_valign: gtk::Align::Start,
-                            set_hexpand: true,
+                            set_visible: model.search_open,
 
                             gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                add_css_class: "background",
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 8,
 
-                                adw::Clamp {
-                                    set_maximum_size: 720,
-                                    set_tightening_threshold: 480,
-
-                                    gtk::Box {
-                                        set_orientation: gtk::Orientation::Vertical,
-                                        set_spacing: 8,
-                                        set_margin_start: 16,
-                                        set_margin_end: 16,
-                                        set_margin_top: 12,
-                                        set_margin_bottom: 12,
-
-                                        gtk::Box {
-                                            set_orientation: gtk::Orientation::Horizontal,
-                                            set_spacing: 8,
-
-                                            #[local_ref]
-                                            search_entry -> gtk::SearchEntry {
-                                                #[watch]
-                                                set_placeholder_text: Some(search::placeholder(model.search_scope)),
-                                                #[watch]
-                                                set_tooltip_text: Some("Enter jumps in the current passage. Shift+Enter opens beside."),
-                                                set_hexpand: true,
-                                                connect_search_changed[sender] => move |entry| {
-                                                    sender.input(Msg::Search(entry.text().to_string()));
-                                                },
-                                                connect_activate => Msg::SearchActivate,
-                                                connect_stop_search => Msg::SetSearch(false),
-                                            },
-
-                                            #[local_ref]
-                                            search_scope -> gtk::DropDown {
-                                                set_tooltip_text: Some("Search in"),
-                                                set_valign: gtk::Align::Center,
-                                                set_hexpand: false,
-                                            }
-                                        },
-
-                                        gtk::Label {
-                                            #[watch]
-                                            set_label: &model.search_status,
-                                            set_xalign: 0.0,
-                                            set_wrap: true,
-                                            add_css_class: "dim-label",
-                                        },
-
-                                        gtk::Label {
-                                            #[watch]
-                                            set_label: search::empty_description(
-                                                &model.search_query,
-                                                model.search_scope,
-                                            )
-                                            .unwrap_or(""),
-                                            #[watch]
-                                            set_visible: search::empty_description(
-                                                &model.search_query,
-                                                model.search_scope,
-                                            )
-                                            .is_some(),
-                                            set_xalign: 0.0,
-                                            set_wrap: true,
-                                            add_css_class: "dim-label",
-                                        },
-
-                                        gtk::ScrolledWindow {
-                                            #[watch]
-                                            set_visible: !model.search_hits.is_empty(),
-                                            set_hexpand: true,
-                                            set_propagate_natural_height: true,
-                                            set_max_content_height: 360,
-                                            set_policy: (
-                                                gtk::PolicyType::Never,
-                                                gtk::PolicyType::Automatic,
-                                            ),
-
-                                            #[local_ref]
-                                            search_list -> gtk::ListBox {
-                                                set_selection_mode: gtk::SelectionMode::Single,
-                                                add_css_class: "boxed-list",
-                                                set_accessible_role: gtk::AccessibleRole::List,
-                                                connect_row_activated[sender] => move |_, row| {
-                                                    sender.input(Msg::OpenHit(row.index()));
-                                                }
-                                            }
-                                        }
-                                    }
+                                #[local_ref]
+                                search_entry -> gtk::SearchEntry {
+                                    #[watch]
+                                    set_placeholder_text: Some(search::placeholder(model.search_scope)),
+                                    set_tooltip_text: Some("Enter stays on the verse. Esc returns. Shift+Enter opens beside."),
+                                    set_hexpand: true,
+                                    connect_search_changed[sender] => move |entry| {
+                                        sender.input(Msg::Search(entry.text().to_string()));
+                                    },
+                                    connect_activate => Msg::SearchActivate,
+                                    connect_stop_search => Msg::SetSearch(false),
                                 },
 
-                                gtk::Separator {
+                                #[local_ref]
+                                search_scope -> gtk::DropDown {
+                                    set_tooltip_text: Some("Search in"),
+                                    set_valign: gtk::Align::Center,
+                                    set_hexpand: false,
+                                }
+                            },
+
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 8,
+
+                                #[local_ref]
+                                search_mode_dd -> gtk::DropDown {
+                                    set_tooltip_text: Some("Match"),
+                                    set_hexpand: true,
+                                },
+
+                                #[local_ref]
+                                search_range_dd -> gtk::DropDown {
+                                    set_tooltip_text: Some("Range"),
+                                    set_hexpand: true,
+                                }
+                            },
+
+                            gtk::Label {
+                                #[watch]
+                                set_label: &model.search_status,
+                                set_xalign: 0.0,
+                                set_wrap: true,
+                                add_css_class: "dim-label",
+                            },
+
+                            gtk::Label {
+                                #[watch]
+                                set_label: search::empty_description(
+                                    &model.search_query,
+                                    model.search_scope,
+                                )
+                                .unwrap_or(""),
+                                #[watch]
+                                set_visible: search::empty_description(
+                                    &model.search_query,
+                                    model.search_scope,
+                                )
+                                .is_some(),
+                                set_xalign: 0.0,
+                                set_wrap: true,
+                                add_css_class: "dim-label",
+                            },
+
+                            gtk::ScrolledWindow {
+                                set_policy: (
+                                    gtk::PolicyType::Automatic,
+                                    gtk::PolicyType::Never,
+                                ),
+                                set_propagate_natural_height: true,
+
+                                #[local_ref]
+                                search_chips -> gtk::Box {
                                     set_orientation: gtk::Orientation::Horizontal,
+                                    set_spacing: 6,
+                                }
+                            },
+
+                            gtk::ScrolledWindow {
+                                #[watch]
+                                set_visible: !model.search_hits.is_empty(),
+                                set_hexpand: true,
+                                set_vexpand: true,
+                                set_policy: (
+                                    gtk::PolicyType::Never,
+                                    gtk::PolicyType::Automatic,
+                                ),
+
+                                #[local_ref]
+                                search_list -> gtk::ListBox {
+                                    set_selection_mode: gtk::SelectionMode::Single,
+                                    set_accessible_role: gtk::AccessibleRole::List,
+                                    connect_row_activated[sender] => move |_, row| {
+                                        sender.input(Msg::OpenHit(row.index()));
+                                    }
                                 }
                             }
+                        },
+
+                        gtk::Separator {
+                            set_orientation: gtk::Orientation::Vertical,
+                            #[watch]
+                            set_visible: model.search_open,
                         },
 
                         #[local_ref]
@@ -406,11 +451,21 @@ impl SimpleComponent for App {
         chapter_dropdown.update_property(&[gtk::accessible::Property::Label("Chapter")]);
         let search_list = gtk::ListBox::new();
         let search_entry = gtk::SearchEntry::new();
+        let search_chips = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let scope_labels = SearchScope::ALL.map(SearchScope::label);
         let search_scope = gtk::DropDown::from_strings(&scope_labels);
         search_scope.set_selected(SearchScope::Kjv.index());
         search_scope.set_enable_search(false);
         search_scope.update_property(&[gtk::accessible::Property::Label("Search in")]);
+        let mode_labels = MatchMode::ALL.map(MatchMode::label);
+        let search_mode_dd = gtk::DropDown::from_strings(&mode_labels);
+        search_mode_dd.set_enable_search(false);
+        search_mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
+        let range_labels = search::SearchRange::ALL.map(search::SearchRange::label);
+        let search_range_dd = gtk::DropDown::from_strings(&range_labels);
+        search_range_dd.set_selected(search::SearchRange::All.index());
+        search_range_dd.set_enable_search(false);
+        search_range_dd.update_property(&[gtk::accessible::Property::Label("Range")]);
         let workspace_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
         workspace_host.set_hexpand(true);
         workspace_host.set_vexpand(true);
@@ -423,23 +478,34 @@ impl SimpleComponent for App {
             );
         }
 
-        let (conn, books, at, font_size, paragraphs, error) = match load_library() {
-            Ok((conn, books, at, font_size, paragraphs)) => {
-                (Some(conn), books, at, font_size, paragraphs, None)
-            }
-            Err(e) => (
-                None,
-                Vec::new(),
-                Ref {
-                    book: 1,
-                    chapter: 1,
-                    verse: 1,
-                },
-                layout::DEFAULT_FONT,
-                true,
-                Some(e),
-            ),
-        };
+        let (conn, search_db_path, books, at, font_size, paragraphs, search_mode, error) =
+            match load_library() {
+                Ok((conn, path, books, at, font_size, paragraphs, mode)) => (
+                    Some(conn),
+                    Some(path),
+                    books,
+                    at,
+                    font_size,
+                    paragraphs,
+                    mode,
+                    None,
+                ),
+                Err(e) => (
+                    None,
+                    None,
+                    Vec::new(),
+                    Ref {
+                        book: 1,
+                        chapter: 1,
+                        verse: 1,
+                    },
+                    layout::DEFAULT_FONT,
+                    true,
+                    MatchMode::Phrase,
+                    Some(e),
+                ),
+            };
+        search_mode_dd.set_selected(search_mode.index());
 
         let goto_entry = gtk::Entry::new();
         goto_entry.set_placeholder_text(Some("John 3:16"));
@@ -616,10 +682,25 @@ impl SimpleComponent for App {
             search_open: false,
             search_query: String::new(),
             search_scope: SearchScope::Kjv,
+            search_mode,
+            search_range: search::SearchRange::All,
+            search_chip: search::BookChip::Auto,
             search_hits: Vec::new(),
-            search_status: search::status("", 0, bible_app_db::DEFAULT_LIMIT, SearchScope::Kjv),
+            search_status: search::status("", 0, 0, SearchScope::Kjv),
+            search_total: 0,
+            search_tokens: Vec::new(),
+            search_strongs: None,
+            search_chosen: None,
+            search_book_counts: Vec::new(),
+            search_origin: None,
+            search_mark: None,
+            search_gen: Rc::new(Cell::new(0)),
+            search_hold: Rc::new(Cell::new(false)),
+            search_groups: Rc::new(RefCell::new(Vec::new())),
+            search_db_path,
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
+            search_chips: search_chips.clone(),
             dict_modules,
             font_size,
             paragraphs,
@@ -824,6 +905,84 @@ impl SimpleComponent for App {
             }
             scope_sender.input(Msg::SetSearchScope(SearchScope::from_index(pos)));
         });
+        let mode_sender = sender.clone();
+        search_mode_dd.connect_selected_notify(move |dd| {
+            let pos = dd.selected();
+            if pos == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            mode_sender.input(Msg::SetSearchMode(MatchMode::from_index(pos)));
+        });
+        let range_sender = sender.clone();
+        search_range_dd.connect_selected_notify(move |dd| {
+            let pos = dd.selected();
+            if pos == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            range_sender.input(Msg::SetSearchRange(search::SearchRange::from_index(pos)));
+        });
+
+        let groups = model.search_groups.clone();
+        model.search_list.set_header_func(move |row, before| {
+            let groups = groups.borrow();
+            let idx = row.index();
+            if idx < 0 {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let Some(group) = groups.get(idx as usize) else {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            };
+            let prev = before.and_then(|b| {
+                let prev_idx = b.index();
+                (prev_idx >= 0)
+                    .then(|| groups.get(prev_idx as usize))
+                    .flatten()
+            });
+            if prev.is_some_and(|p| p == group) {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let label = gtk::Label::new(Some(group));
+            label.set_xalign(0.0);
+            label.add_css_class("heading");
+            label.set_margin_top(10);
+            label.set_margin_bottom(2);
+            label.set_margin_start(12);
+            row.set_header(Some(&label));
+        });
+        let preview_sender = sender.clone();
+        let preview_hold = model.search_hold.clone();
+        model.search_list.connect_row_selected(move |_, row| {
+            if preview_hold.get() {
+                return;
+            }
+            let Some(row) = row else { return };
+            preview_sender.input(Msg::PreviewHit(row.index()));
+        });
+        if let Some(scroll) = model
+            .search_list
+            .parent()
+            .and_downcast::<gtk::ScrolledWindow>()
+        {
+            let more = sender.clone();
+            scroll.connect_edge_reached(move |_, pos| {
+                if pos == gtk::PositionType::Bottom {
+                    more.input(Msg::SearchMore);
+                }
+            });
+        }
+        let list_esc = gtk::EventControllerKey::new();
+        let esc_sender = sender.clone();
+        list_esc.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Escape {
+                esc_sender.input(Msg::SetSearch(false));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        model.search_list.add_controller(list_esc);
 
         let book_sender = sender.clone();
         let book_syncing = model.picker_syncing.clone();
@@ -941,19 +1100,70 @@ impl SimpleComponent for App {
                     }
                     return;
                 }
-                self.search_open = open;
                 if open {
+                    self.search_origin = Some(self.at());
+                    self.search_open = true;
                     self.focus_search();
+                    if !self.search_query.trim().is_empty() {
+                        self.schedule_search(false);
+                    }
+                } else {
+                    self.close_search(true);
                 }
             }
             Msg::Search(query) => {
-                self.run_search(query);
+                self.search_query = query;
+                self.search_chip = search::BookChip::Auto;
+                self.schedule_search(false);
             }
             Msg::SetSearchScope(scope) => {
                 if self.search_scope != scope {
                     self.search_scope = scope;
-                    self.run_search(self.search_query.clone());
+                    self.search_chip = search::BookChip::Auto;
+                    self.schedule_search(false);
                 }
+            }
+            Msg::SetSearchMode(mode) => {
+                if self.search_mode != mode {
+                    self.search_mode = mode;
+                    self.search_chip = search::BookChip::Auto;
+                    self.save_state();
+                    self.schedule_search(false);
+                }
+            }
+            Msg::SetSearchRange(range) => {
+                if self.search_range != range {
+                    self.search_range = range;
+                    self.search_chip = search::BookChip::Auto;
+                    self.schedule_search(false);
+                }
+            }
+            Msg::SelectSearchBook(book) => {
+                self.search_chip = match book {
+                    Some(id) => search::BookChip::Book(id),
+                    None => search::BookChip::AllBooks,
+                };
+                self.schedule_search(false);
+            }
+            Msg::SearchReady(gen, outcome) => {
+                if gen != self.search_gen.get() {
+                    return;
+                }
+                self.apply_outcome(outcome);
+            }
+            Msg::SearchMore => {
+                let shown = self
+                    .search_hits
+                    .iter()
+                    .filter(|hit| search::hit_ref(hit).is_some())
+                    .count() as i64;
+                if self.search_query.trim().is_empty() || shown >= self.search_total {
+                    return;
+                }
+                self.schedule_search(true);
+            }
+            Msg::PreviewHit(idx) => {
+                self.preview_hit(idx);
             }
             Msg::SearchActivate => {
                 let idx = self
@@ -1334,25 +1544,268 @@ impl App {
         }
     }
 
-    fn run_search(&mut self, query: String) {
-        self.search_query = query;
-        self.search_hits = match &self.conn {
-            Some(conn) if !self.search_query.trim().is_empty() => bible_app_db::search_library(
-                conn,
-                &self.search_query,
-                self.search_scope,
-                bible_app_db::DEFAULT_LIMIT,
-            )
-            .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        self.search_status = search::status(
-            &self.search_query,
-            self.search_hits.len(),
-            bible_app_db::DEFAULT_LIMIT,
+    fn schedule_search(&mut self, append: bool) {
+        let next = self.search_gen.get().saturating_add(1);
+        self.search_gen.set(next);
+        let query = self.search_query.clone();
+        let plan = search::plan(
+            &query,
+            &self.books,
+            self.search_origin.unwrap_or_else(|| self.at()),
+            self.search_mode,
+            self.search_range,
+            self.search_chip,
             self.search_scope,
         );
-        search::refill_list(&self.search_list, &self.search_hits, &self.books);
+        match plan {
+            search::Plan::Idle => {
+                self.clear_search_results();
+                self.search_status = search::status("", 0, 0, self.search_scope);
+            }
+            search::Plan::Short => {
+                self.clear_search_results();
+                self.search_status = search::short_status().into();
+            }
+            search::Plan::Goto(at) => {
+                self.search_hits = vec![search::goto_hit(at, &self.books)];
+                self.search_total = 1;
+                self.search_tokens.clear();
+                self.search_strongs = None;
+                self.search_book_counts.clear();
+                self.search_chosen = None;
+                self.search_status = format!("Go to {}", nav::format_ref(&self.books, at));
+                self.refill_hits(false);
+                self.refill_chips();
+            }
+            search::Plan::Ready(mut prepared) => {
+                prepared.db_path = self.search_db_path.clone().unwrap_or_default();
+                prepared.user_path = user_db::user_db_path();
+                let after = if append {
+                    self.search_hits.iter().rev().find_map(|hit| {
+                        let at = search::hit_ref(hit)?;
+                        Some((at.book, at.chapter, at.verse))
+                    })
+                } else {
+                    None
+                };
+                let gen = next;
+                let gen_cell = self.search_gen.clone();
+                let tx = self.msg_tx.clone();
+                glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                    if gen_cell.get() != gen {
+                        return;
+                    }
+                    std::thread::spawn(move || {
+                        let outcome = search::execute(&prepared, after, append);
+                        glib::MainContext::default().invoke(move || {
+                            tx.emit(Msg::SearchReady(gen, outcome));
+                        });
+                    });
+                });
+            }
+        }
+    }
+
+    fn clear_search_results(&mut self) {
+        self.search_hits.clear();
+        self.search_total = 0;
+        self.search_tokens.clear();
+        self.search_strongs = None;
+        self.search_book_counts.clear();
+        self.search_chosen = None;
+        self.refill_hits(false);
+        self.refill_chips();
+    }
+
+    fn apply_outcome(&mut self, outcome: search::Outcome) {
+        let append = outcome.append;
+        if append {
+            self.search_hits.extend(outcome.hits);
+        } else {
+            self.search_hits = outcome.hits;
+            self.search_book_counts = outcome.by_book;
+            self.search_chosen = outcome.chosen_book;
+        }
+        self.search_total = outcome.total;
+        self.search_tokens = outcome.tokens;
+        self.search_strongs = outcome.strongs;
+        self.maybe_lexicon_row();
+        let shown = self
+            .search_hits
+            .iter()
+            .filter(|hit| search::hit_ref(hit).is_some())
+            .count();
+        self.search_status = search::status(
+            &self.search_query,
+            shown,
+            self.search_total,
+            self.search_scope,
+        );
+        self.refill_hits(append);
+        if !append {
+            self.refill_chips();
+            if let Some(row) = self.search_list.selected_row() {
+                self.preview_hit(row.index());
+            }
+        }
+    }
+
+    fn maybe_lexicon_row(&mut self) {
+        let Some(code) = self.search_strongs.clone() else {
+            return;
+        };
+        if self
+            .search_hits
+            .iter()
+            .any(|hit| hit.kind == LibraryKind::Lexicon)
+        {
+            return;
+        }
+        let shown = self
+            .search_hits
+            .iter()
+            .filter(|hit| search::hit_ref(hit).is_some())
+            .count() as i64;
+        if shown < self.search_total {
+            return;
+        }
+        let module = if code.starts_with('G') {
+            "Thayer"
+        } else {
+            "BDB"
+        };
+        if self.dict_modules.iter().any(|m| m.id == module) {
+            self.search_hits.push(search::lexicon_hit(&code, module));
+        }
+    }
+
+    fn refill_hits(&mut self, append: bool) {
+        let hits = if append {
+            let previous = self.search_groups.borrow().len();
+            self.search_hits[previous.min(self.search_hits.len())..].to_vec()
+        } else {
+            self.search_hits.clone()
+        };
+        self.search_hold.set(true);
+        search::refill_list(
+            &self.search_list,
+            &hits,
+            &self.books,
+            self.search_scope,
+            &self.search_tokens,
+            &self.search_groups,
+            append,
+        );
+        self.search_hold.set(false);
+    }
+
+    fn refill_chips(&self) {
+        while let Some(child) = self.search_chips.first_child() {
+            self.search_chips.remove(&child);
+        }
+        if !search::show_chips(self.search_scope, self.search_strongs.is_some())
+            || self.search_book_counts.len() < 2
+        {
+            return;
+        }
+        let sender = self.msg_tx.clone();
+        if self.search_chosen.is_some() {
+            let all = gtk::ToggleButton::with_label("All");
+            all.add_css_class("flat");
+            all.set_active(false);
+            let tx = sender.clone();
+            all.connect_clicked(move |btn| {
+                if btn.is_active() {
+                    tx.emit(Msg::SelectSearchBook(None));
+                }
+            });
+            self.search_chips.append(&all);
+        }
+        let mut leader: Option<gtk::ToggleButton> = None;
+        for count in &self.search_book_counts {
+            let button = gtk::ToggleButton::with_label(&search::chip_text(&self.books, count));
+            button.add_css_class("flat");
+            button.set_active(Some(count.book) == self.search_chosen);
+            if let Some(first) = &leader {
+                button.set_group(Some(first));
+            } else {
+                leader = Some(button.clone());
+            }
+            let tx = sender.clone();
+            let book = count.book;
+            button.connect_clicked(move |btn| {
+                if btn.is_active() {
+                    tx.emit(Msg::SelectSearchBook(Some(book)));
+                }
+            });
+            self.search_chips.append(&button);
+        }
+    }
+
+    fn preview_hit(&mut self, idx: i32) {
+        if self.search_hold.get() {
+            return;
+        }
+        let Ok(idx) = usize::try_from(idx) else {
+            return;
+        };
+        let Some(hit) = self.search_hits.get(idx) else {
+            return;
+        };
+        let Some(at) = search::hit_ref(hit) else {
+            return;
+        };
+        self.search_mark = Some(SearchMark {
+            at,
+            tokens: self.search_tokens.clone(),
+            strongs: self.search_strongs.clone(),
+        });
+        self.preview_at(at);
+    }
+
+    fn preview_at(&mut self, at: Ref) {
+        let id = match self.workspace.focused_passage_id() {
+            Some(id) => id,
+            None => {
+                let opened = self.workspace.open_passage(at);
+                self.spawn_passage(opened.id, at);
+                opened.id
+            }
+        };
+        let same = self
+            .passage(id)
+            .is_some_and(|p| p.at.book == at.book && p.at.chapter == at.chapter);
+        if same {
+            let mark = self.search_mark.clone();
+            if let Some(p) = self.passage_mut(id) {
+                p.at = at;
+                p.highlight_verse(at.verse);
+                if let Some(mark) = mark {
+                    p.paint_search(mark.at.verse, &mark.tokens, mark.strongs.as_deref());
+                }
+            }
+            self.workspace.navigate_passage(id, at);
+            self.refresh_followers();
+            self.sync_pickers();
+            self.sync_tab_title(id);
+            return;
+        }
+        self.apply_passage_ref(id, at, true, false);
+    }
+
+    fn close_search(&mut self, restore: bool) {
+        self.search_open = false;
+        self.search_gen.set(self.search_gen.get().saturating_add(1));
+        if restore {
+            self.search_mark = None;
+            if let Some(at) = self.search_origin.take() {
+                if let Some(id) = self.workspace.focused_passage_id() {
+                    self.apply_passage_ref(id, at, true, false);
+                }
+            }
+        } else {
+            self.search_origin = None;
+        }
     }
 
     fn open_hit(&mut self, idx: i32, beside: bool) {
@@ -1366,9 +1819,17 @@ impl App {
         let module = hit.module.clone();
         let headword = hit.headword.clone();
         let at = search::hit_ref(hit);
+        if let Some(at) = at {
+            self.search_mark = Some(SearchMark {
+                at,
+                tokens: self.search_tokens.clone(),
+                strongs: self.search_strongs.clone(),
+            });
+        }
+        self.search_origin = None;
         self.search_open = false;
         match kind {
-            LibraryKind::Verse => {
+            LibraryKind::Verse | LibraryKind::Note => {
                 let Some(at) = at else {
                     return;
                 };
@@ -1444,11 +1905,9 @@ impl App {
     }
 
     fn save_state(&self) {
-        config::save_state(&config::State::from_ref(
-            self.at(),
-            self.font_size,
-            self.paragraphs,
-        ));
+        let mut state = config::State::from_ref(self.at(), self.font_size, self.paragraphs);
+        state.search_mode = self.search_mode.index();
+        config::save_state(&state);
     }
 
     fn sync_study_actions(&self) {
@@ -1831,6 +2290,7 @@ impl App {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
+        let mark = self.search_mark.clone();
         if let Some(TabContent::Passage(p)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
             p.load(
                 &passage::ChapterCtx {
@@ -1841,6 +2301,11 @@ impl App {
                 },
                 highlight,
             );
+            if let Some(mark) = mark {
+                if p.at.book == mark.at.book && p.at.chapter == mark.at.chapter {
+                    p.paint_search(mark.at.verse, &mark.tokens, mark.strongs.as_deref());
+                }
+            }
         }
         self.sync_tab_title(id);
     }
@@ -2239,7 +2704,7 @@ impl App {
     }
 }
 
-type LoadedLibrary = (Connection, Vec<Book>, Ref, i32, bool);
+type LoadedLibrary = (Connection, PathBuf, Vec<Book>, Ref, i32, bool, MatchMode);
 
 fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<usize> {
     defs.iter()
@@ -2261,6 +2726,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
     let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
     let paragraphs = state.paragraphs;
+    let search_mode = MatchMode::from_index(state.search_mode);
     let mut at = Ref::from(state);
     if bible_app_db::chapter(&conn, at.book, at.chapter)
         .map(|v| v.is_empty())
@@ -2272,7 +2738,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
             verse: 1,
         };
     }
-    Ok((conn, books, at, font_size, paragraphs))
+    Ok((conn, path, books, at, font_size, paragraphs, search_mode))
 }
 
 fn build_app_menu(modules: &[DictModule]) -> gio::Menu {

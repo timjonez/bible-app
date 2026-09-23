@@ -63,6 +63,122 @@ pub fn strongs_occurrence_count(conn: &Connection, code: &str) -> Result<usize, 
     Ok(n as usize)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct StrongsWindow {
+    pub book_min: u8,
+    pub book_max: u8,
+    pub book: Option<u8>,
+    pub chapter: Option<u8>,
+    pub after: Option<(u8, u8, u8)>,
+    pub limit: usize,
+}
+
+/// Occurrences inside a book window, with a count per book for the window
+/// before `book` narrows the list.
+pub fn strongs_page(
+    conn: &Connection,
+    code: &str,
+    window: StrongsWindow,
+) -> Result<(Vec<Occurrence>, i64, Vec<crate::search::BookCount>), DbError> {
+    let StrongsWindow {
+        book_min,
+        book_max,
+        book,
+        chapter,
+        after,
+        limit,
+    } = window;
+    let Some(code) = canonical_code(code) else {
+        return Ok((Vec::new(), 0, Vec::new()));
+    };
+    let pattern = like_token_pattern(&code);
+    let chapter_n = i64::from(chapter.unwrap_or(0));
+    let mut count_stmt = conn.prepare(
+        r#"
+        SELECT book, COUNT(*) FROM (
+            SELECT DISTINCT book, chapter, verse
+            FROM verse_words
+            WHERE (' ' || strongs || ' ') LIKE ?1 ESCAPE '\'
+              AND book BETWEEN ?2 AND ?3
+              AND (?4 = 0 OR chapter = ?4)
+        )
+        GROUP BY book
+        ORDER BY book
+        "#,
+    )?;
+    let by_book = count_stmt
+        .query_map(
+            rusqlite::params![pattern, book_min, book_max, chapter_n],
+            |row| {
+                Ok(crate::search::BookCount {
+                    book: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let total: i64 = by_book.iter().map(|b| b.count).sum();
+    let book_n = i64::from(book.unwrap_or(0));
+    let (after_book, after_chapter, after_verse) = match after {
+        Some((b, c, v)) => (i64::from(b), i64::from(c), i64::from(v)),
+        None => (0, 0, 0),
+    };
+    let limit = limit.max(1) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT DISTINCT v.book, v.chapter, v.verse, v.text
+        FROM verse_words w
+        JOIN verses v
+          ON v.book = w.book AND v.chapter = w.chapter AND v.verse = w.verse
+        WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
+          AND v.book BETWEEN ?2 AND ?3
+          AND (?4 = 0 OR v.book = ?4)
+          AND (?5 = 0 OR v.chapter = ?5)
+          AND (
+            ?6 = 0
+            OR v.book > ?6
+            OR (v.book = ?6 AND v.chapter > ?7)
+            OR (v.book = ?6 AND v.chapter = ?7 AND v.verse > ?8)
+          )
+        ORDER BY v.book, v.chapter, v.verse
+        LIMIT ?9
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            pattern,
+            book_min,
+            book_max,
+            book_n,
+            chapter_n,
+            after_book,
+            after_chapter,
+            after_verse,
+            limit
+        ],
+        |row| {
+            let text: String = row.get(3)?;
+            Ok(Occurrence {
+                book: row.get(0)?,
+                chapter: row.get(1)?,
+                verse: row.get(2)?,
+                snippet: text,
+            })
+        },
+    )?;
+    let hits = rows.collect::<Result<Vec<_>, _>>()?;
+    let listed: i64 = if book.is_some() {
+        by_book
+            .iter()
+            .find(|b| Some(b.book) == book)
+            .map(|b| b.count)
+            .unwrap_or(0)
+    } else {
+        total
+    };
+    Ok((hits, listed, by_book))
+}
+
 fn canonical_code(code: &str) -> Option<String> {
     let (num, lang) = parse_strongs_code(code)?;
     Some(format!("{lang}{num}"))
