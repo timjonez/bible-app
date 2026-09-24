@@ -1011,6 +1011,30 @@ pub const MIN_FONT: i32 = 10;
 pub const MAX_FONT: i32 = 28;
 pub const DEFAULT_FONT: i32 = 14;
 
+/// Side padding of the chapter text, in logical pixels.
+pub const CHAPTER_MARGIN_X: i32 = 28;
+/// Reading measure, in approximate characters.
+pub const COLUMN_CHARS: i32 = 70;
+
+/// Width of a chapter column at `font_pt`, including side margins.
+///
+/// A digit is about half an em, which is close to a CSS `ch`. The result is
+/// in logical pixels so it can be applied as an `AdwLengthUnit::Sp` clamp.
+pub fn column_width_px(font_pt: i32) -> i32 {
+    let pt = font_pt.clamp(MIN_FONT, MAX_FONT);
+    let em = f64::from(pt) * (96.0 / 72.0);
+    let text = (em * 0.5 * f64::from(COLUMN_CHARS)).round() as i32;
+    text + CHAPTER_MARGIN_X * 2
+}
+
+/// Narrowest and widest column the drag handles will set, in logical pixels.
+pub const MIN_COLUMN_PX: i32 = 320;
+pub const MAX_COLUMN_PX: i32 = 2400;
+
+pub fn clamp_column_px(px: i32) -> i32 {
+    px.clamp(MIN_COLUMN_PX, MAX_COLUMN_PX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1986,5 +2010,22 @@ God creates heaven and earth.
         assert_eq!(larger_font(14), 15);
         assert_eq!(smaller_font(MIN_FONT), MIN_FONT);
         assert_eq!(larger_font(MAX_FONT), MAX_FONT);
+    }
+
+    #[test]
+    fn column_width_tracks_the_font() {
+        // 14pt em is 18.667px; half an em times 70 characters, plus margins.
+        assert_eq!(column_width_px(DEFAULT_FONT), 709);
+        assert_eq!(column_width_px(MAX_FONT), 1363);
+        assert!(column_width_px(MAX_FONT) > column_width_px(DEFAULT_FONT));
+        assert_eq!(column_width_px(MIN_FONT - 5), column_width_px(MIN_FONT));
+        assert_eq!(column_width_px(MAX_FONT + 5), column_width_px(MAX_FONT));
+    }
+
+    #[test]
+    fn column_drag_clamps_to_a_usable_range() {
+        assert_eq!(clamp_column_px(10), MIN_COLUMN_PX);
+        assert_eq!(clamp_column_px(900), 900);
+        assert_eq!(clamp_column_px(9_000), MAX_COLUMN_PX);
     }
 }

@@ -42,6 +42,7 @@ pub struct MarksWidgets {
     pub syncing: Rc<Cell<bool>>,
     pub remove_bookmark: gtk::Button,
     pub delete_note: gtk::Button,
+    pub export_notes: gtk::Button,
 }
 
 pub fn install_tags(buffer: &gtk::TextBuffer) {
@@ -82,9 +83,7 @@ pub fn apply_tags(
     }
     for (verse, mark) in marks {
         for hl in &mark.highlights {
-            if let Some(span) =
-                layout::highlight_paint_span(layout, *verse, hl.start, hl.end)
-            {
+            if let Some(span) = layout::highlight_paint_span(layout, *verse, hl.start, hl.end) {
                 apply_tag(buffer, &format!("hl-{}", hl.color), span);
             }
         }
@@ -262,11 +261,21 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
         send_del.emit(super::app::Msg::DeleteEditingNote);
     });
 
+    let export_notes = gtk::Button::with_label("Export notes…");
+    export_notes.set_halign(gtk::Align::Start);
+    export_notes.set_visible(false);
+    export_notes.set_tooltip_text(Some("Save all notes as Markdown"));
+    let send_export = sender.clone();
+    export_notes.connect_clicked(move |_| {
+        send_export.emit(super::app::Msg::ExportNotes);
+    });
+
     let notes_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     notes_page.set_margin_start(12);
     notes_page.set_margin_end(12);
     notes_page.set_margin_top(8);
     notes_page.set_margin_bottom(8);
+    notes_page.append(&export_notes);
     notes_page.append(&notes_empty);
     notes_page.append(&note_scroll);
     notes_page.append(&editor_title);
@@ -300,6 +309,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
         syncing,
         remove_bookmark,
         delete_note,
+        export_notes,
     }
 }
 
@@ -330,6 +340,7 @@ pub fn refresh_lists(widgets: &mut MarksWidgets, user: &Connection, books: &[Boo
     let has_notes = !widgets.notes.is_empty();
     widgets.note_list.set_visible(has_notes);
     widgets.notes_empty.set_visible(!has_notes);
+    widgets.export_notes.set_visible(has_notes);
 
     if let Some(at) = widgets.editing {
         if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
