@@ -10,6 +10,7 @@ use crate::picker;
 use crate::search;
 use crate::shell::{self, DetachedHost, SplitShell};
 use crate::strongs;
+use crate::theme;
 use crate::tsk;
 use crate::user_db;
 use crate::workspace::{CloseOutcome, MarksPage, Pane, TabId, TabKind, Workspace};
@@ -80,6 +81,7 @@ pub struct App {
     font_size: i32,
     paragraphs: bool,
     font_provider: gtk::CssProvider,
+    _theme_watch: theme::Watch,
     mhc_action: gio::SimpleAction,
     tsk_action: gio::SimpleAction,
     follow_action: gio::SimpleAction,
@@ -180,6 +182,7 @@ pub enum Msg {
     DetachMenuTab,
     BesideMenuTab,
     SetTabFollow(bool),
+    ThemeChanged,
 }
 
 #[relm4::component(pub)]
@@ -672,6 +675,9 @@ impl SimpleComponent for App {
         group.add_action(beside_tab);
         group.add_action(follow_tab);
 
+        let theme_tx = sender.input_sender().clone();
+        let _theme_watch = theme::install(move || theme_tx.emit(Msg::ThemeChanged));
+
         let mut model = App {
             conn,
             books,
@@ -705,6 +711,7 @@ impl SimpleComponent for App {
             font_size,
             paragraphs,
             font_provider,
+            _theme_watch,
             mhc_action: mhc_gio,
             tsk_action: tsk_gio,
             follow_action: follow_gio,
@@ -1456,6 +1463,7 @@ impl SimpleComponent for App {
                     }
                 }
             }
+            Msg::ThemeChanged => self.recolor_passages(),
         }
         self.sync_study_actions();
         let _ = sender;
@@ -1922,6 +1930,14 @@ impl App {
             "textview.chapter-view {{ font-size: {}pt; }}",
             self.font_size
         ));
+    }
+
+    fn recolor_passages(&self) {
+        for hosted in self.hosted.values() {
+            if let TabContent::Passage(passage) = &hosted.content {
+                theme::paint_buffer(&passage.buffer);
+            }
+        }
     }
 
     fn copy_from_selection_or_current(&self) {
