@@ -36,6 +36,8 @@ pub struct PassageView {
     pub tsk_popover: gtk::Popover,
     pub verse_menu: gtk::PopoverMenu,
     preferred_px: Rc<Cell<i32>>,
+    /// False while a split or the search list is open beside this chapter.
+    column_resize: Rc<Cell<bool>>,
     left_handle: gtk::Box,
     right_handle: gtk::Box,
     pub chapter_marks: HashMap<u8, user_db::VerseMarks>,
@@ -112,6 +114,7 @@ impl PassageView {
             tsk_popover,
             verse_menu,
             preferred_px,
+            column_resize: Rc::new(Cell::new(true)),
             left_handle,
             right_handle,
             chapter_marks: HashMap::new(),
@@ -128,16 +131,27 @@ impl PassageView {
         self.fit_column();
     }
 
+    /// Column-edge drags apply only while this chapter is the only view.
+    /// Beside a split or the search list the text fills the pane.
+    pub fn set_column_resize(&self, on: bool) {
+        if self.column_resize.get() == on {
+            return;
+        }
+        self.column_resize.set(on);
+        self.left_handle.set_visible(on);
+        self.right_handle.set_visible(on);
+        self.fit_column();
+    }
+
     fn fit_column(&self) {
         let pane = self.root.width();
         if pane <= 0 {
             return;
         }
-        let shown = self.preferred_px.get().clamp(1, pane);
-        let side = (pane - shown) / 2;
-        self.view.set_left_margin(side + layout::CHAPTER_MARGIN_X);
-        self.view
-            .set_right_margin(pane - shown - side + layout::CHAPTER_MARGIN_X);
+        let (left, right) =
+            layout::column_margins(pane, self.preferred_px.get(), self.column_resize.get());
+        self.view.set_left_margin(left);
+        self.view.set_right_margin(right);
         self.root.queue_allocate();
     }
 
@@ -145,15 +159,18 @@ impl PassageView {
         let row = self.root.clone();
         let view = self.view.clone();
         let preferred = self.preferred_px.clone();
+        let resize = self.column_resize.clone();
         let seen = Rc::new(Cell::new(0));
+        let seen_resize = Rc::new(Cell::new(resize.get()));
         self.root.add_tick_callback(move |_, _| {
             let pane = row.width();
-            if pane > 0 && pane != seen.get() {
+            let on = resize.get();
+            if pane > 0 && (pane != seen.get() || on != seen_resize.get()) {
                 seen.set(pane);
-                let shown = preferred.get().clamp(1, pane);
-                let side = (pane - shown) / 2;
-                view.set_left_margin(side + layout::CHAPTER_MARGIN_X);
-                view.set_right_margin(pane - shown - side + layout::CHAPTER_MARGIN_X);
+                seen_resize.set(on);
+                let (left, right) = layout::column_margins(pane, preferred.get(), on);
+                view.set_left_margin(left);
+                view.set_right_margin(right);
                 row.queue_allocate();
             }
             glib::ControlFlow::Continue
@@ -771,6 +788,30 @@ pub fn install_css() {
             }
             .column-handle:hover .column-edge {
               background-color: @accent_bg_color;
+            }
+            paned.pane-split > separator {
+              background-color: transparent;
+              background-image: linear-gradient(
+                to right,
+                transparent,
+                transparent calc(50% - 0.5px),
+                alpha(@window_fg_color, 0.35) calc(50% - 0.5px),
+                alpha(@window_fg_color, 0.35) calc(50% + 0.5px),
+                transparent calc(50% + 0.5px)
+              );
+              border: none;
+              box-shadow: none;
+              min-width: 9px;
+            }
+            paned.pane-split > separator:hover {
+              background-image: linear-gradient(
+                to right,
+                transparent,
+                transparent calc(50% - 0.5px),
+                @accent_bg_color calc(50% - 0.5px),
+                @accent_bg_color calc(50% + 0.5px),
+                transparent calc(50% + 0.5px)
+              );
             }
             "#,
         );

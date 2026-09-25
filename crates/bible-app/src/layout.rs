@@ -1035,6 +1035,23 @@ pub fn clamp_column_px(px: i32) -> i32 {
     px.clamp(MIN_COLUMN_PX, MAX_COLUMN_PX)
 }
 
+/// Left and right text margins for a chapter pane.
+///
+/// `column_resize` centers `preferred_px` in the pane. When another view is
+/// open the chapter fills the pane and the divider between the views is the
+/// resize control, so both margins stay at [`CHAPTER_MARGIN_X`].
+pub fn column_margins(pane_px: i32, preferred_px: i32, column_resize: bool) -> (i32, i32) {
+    if !column_resize || pane_px <= 0 {
+        return (CHAPTER_MARGIN_X, CHAPTER_MARGIN_X);
+    }
+    let shown = preferred_px.clamp(1, pane_px);
+    let side = (pane_px - shown) / 2;
+    (
+        side + CHAPTER_MARGIN_X,
+        pane_px - shown - side + CHAPTER_MARGIN_X,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2020,6 +2037,29 @@ God creates heaven and earth.
         assert!(column_width_px(MAX_FONT) > column_width_px(DEFAULT_FONT));
         assert_eq!(column_width_px(MIN_FONT - 5), column_width_px(MIN_FONT));
         assert_eq!(column_width_px(MAX_FONT + 5), column_width_px(MAX_FONT));
+    }
+
+    #[test]
+    fn column_margins_center_a_lone_chapter() {
+        let (left, right) = column_margins(1200, 700, true);
+        assert_eq!(left, 250 + CHAPTER_MARGIN_X);
+        assert_eq!(right, 250 + CHAPTER_MARGIN_X);
+    }
+
+    #[test]
+    fn column_margins_fill_the_pane_beside_another_view() {
+        assert_eq!(
+            column_margins(1200, 709, false),
+            (CHAPTER_MARGIN_X, CHAPTER_MARGIN_X)
+        );
+    }
+
+    #[test]
+    fn column_margins_use_the_whole_pane_when_it_is_narrower_than_the_column() {
+        assert_eq!(
+            column_margins(500, 700, true),
+            (CHAPTER_MARGIN_X, CHAPTER_MARGIN_X)
+        );
     }
 
     #[test]
