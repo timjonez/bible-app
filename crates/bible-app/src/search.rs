@@ -239,24 +239,29 @@ pub fn row(
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    box_.set_hexpand(true);
     box_.set_margin_start(12);
     box_.set_margin_end(12);
-    box_.set_margin_top(4);
-    box_.set_margin_bottom(4);
+    box_.set_margin_top(6);
+    box_.set_margin_bottom(6);
 
     let reference = reference_text(hit, books, scope);
     let title = gtk::Label::new(Some(&reference));
     title.set_xalign(0.0);
-    title.set_width_chars(14);
+    title.set_yalign(0.0);
+    title.set_width_chars(8);
     title.add_css_class("caption");
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let snippet = gtk::Label::new(None);
     snippet.set_markup(&emphasize(&hit.snippet, tokens));
     snippet.set_xalign(0.0);
+    snippet.set_yalign(0.0);
     snippet.set_hexpand(true);
+    snippet.set_wrap(true);
+    snippet.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    snippet.set_lines(3);
     snippet.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    snippet.set_single_line_mode(true);
 
     box_.append(&title);
     box_.append(&snippet);
@@ -329,6 +334,15 @@ impl SearchRange {
         }
     }
 
+    /// Passage range is a verse-search control. Commentary is not the
+    /// current chapter, and dictionaries and topics are not passages.
+    pub fn applies(scope: SearchScope) -> bool {
+        matches!(
+            scope,
+            SearchScope::Kjv | SearchScope::Notes | SearchScope::All
+        )
+    }
+
     pub fn from_index(index: u32) -> Self {
         Self::ALL.get(index as usize).copied().unwrap_or(Self::All)
     }
@@ -395,7 +409,12 @@ pub fn plan(
             return Plan::Ready(Prepared {
                 compiled,
                 scope,
-                filter: bounds(range, current, slash_book, slash_chapter),
+                filter: bounds(
+                    effective_range(range, scope),
+                    current,
+                    slash_book,
+                    slash_chapter,
+                ),
                 chip,
                 current_book: current.book,
                 db_path: std::path::PathBuf::new(),
@@ -418,7 +437,12 @@ pub fn plan(
     Plan::Ready(Prepared {
         compiled,
         scope,
-        filter: bounds(range, current, slash_book, slash_chapter),
+        filter: bounds(
+            effective_range(range, scope),
+            current,
+            slash_book,
+            slash_chapter,
+        ),
         chip,
         current_book: current.book,
         db_path: std::path::PathBuf::new(),
@@ -442,6 +466,14 @@ fn slash_target(query: &str, books: &[Book], current: Ref) -> (Option<u8>, Optio
         (Some(at.book), Some(at.chapter), right.to_string())
     } else {
         (Some(at.book), None, right.to_string())
+    }
+}
+
+fn effective_range(range: SearchRange, scope: SearchScope) -> SearchRange {
+    if SearchRange::applies(scope) {
+        range
+    } else {
+        SearchRange::All
     }
 }
 
@@ -617,7 +649,7 @@ fn strongs_outcome(
                 chapter: Some(hit.chapter),
                 verse: Some(hit.verse),
                 headword: None,
-                snippet: bible_app_db::window_snippet(&body, &[], 96),
+                snippet: body.split_whitespace().collect::<Vec<_>>().join(" "),
             }
         })
         .collect();
@@ -713,7 +745,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
         hits
     };
     Outcome {
-        hits: note_hits(&hits, &prepared.compiled.tokens),
+        hits: note_hits(&hits),
         total,
         by_book,
         tokens: prepared.compiled.tokens.clone(),
@@ -741,11 +773,10 @@ fn append_notes(prepared: &Prepared, page: &mut LibraryPage) {
     ) else {
         return;
     };
-    page.hits
-        .extend(note_hits(&found.hits, &prepared.compiled.tokens));
+    page.hits.extend(note_hits(&found.hits));
 }
 
-fn note_hits(hits: &[crate::user_db::NoteHit], tokens: &[String]) -> Vec<LibraryHit> {
+fn note_hits(hits: &[crate::user_db::NoteHit]) -> Vec<LibraryHit> {
     hits.iter()
         .map(|hit| LibraryHit {
             kind: LibraryKind::Note,
@@ -755,7 +786,7 @@ fn note_hits(hits: &[crate::user_db::NoteHit], tokens: &[String]) -> Vec<Library
             chapter: Some(hit.chapter),
             verse: Some(hit.verse),
             headword: None,
-            snippet: bible_app_db::window_snippet(&hit.text, tokens, 96),
+            snippet: hit.text.split_whitespace().collect::<Vec<_>>().join(" "),
         })
         .collect()
 }
@@ -985,6 +1016,51 @@ mod tests {
         };
         assert_eq!(reference_text(&verse, &books, SearchScope::Kjv), "1:1");
         assert_eq!(group_label(&verse, &books, SearchScope::Kjv), "Genesis");
+    }
+
+    #[test]
+    fn commentary_does_not_use_the_verse_range() {
+        assert!(SearchRange::applies(SearchScope::Kjv));
+        assert!(SearchRange::applies(SearchScope::Notes));
+        assert!(SearchRange::applies(SearchScope::All));
+        assert!(!SearchRange::applies(SearchScope::Commentary));
+        assert!(!SearchRange::applies(SearchScope::Dictionaries));
+        assert!(!SearchRange::applies(SearchScope::Topics));
+        let books = books();
+        let current = Ref {
+            book: 4,
+            chapter: 1,
+            verse: 1,
+        };
+        match plan(
+            "moses",
+            &books,
+            current,
+            MatchMode::Phrase,
+            SearchRange::ThisChapter,
+            BookChip::AllBooks,
+            SearchScope::Commentary,
+        ) {
+            Plan::Ready(prepared) => {
+                assert_eq!(prepared.filter, VerseFilter::all());
+            }
+            other => panic!("expected a commentary search, got {other:?}"),
+        }
+        match plan(
+            "moses",
+            &books,
+            current,
+            MatchMode::Phrase,
+            SearchRange::ThisChapter,
+            BookChip::AllBooks,
+            SearchScope::Kjv,
+        ) {
+            Plan::Ready(prepared) => {
+                assert_eq!(prepared.filter.book, Some(4));
+                assert_eq!(prepared.filter.chapter, Some(1));
+            }
+            other => panic!("expected a verse search, got {other:?}"),
+        }
     }
 
     #[test]

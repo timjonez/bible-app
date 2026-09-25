@@ -451,7 +451,8 @@ impl PassageView {
         let Some(&(_, vend)) = self.layout.verse_end.iter().find(|(v, _)| *v == verse) else {
             return;
         };
-        for span in token_spans(&self.layout.text, body, vend, tokens) {
+        let skip = mark_spans(&self.layout);
+        for span in token_spans(&self.layout.text, body, vend, tokens, &skip) {
             self.apply_tag("search-hit", span);
         }
     }
@@ -593,7 +594,24 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     search_hit.set_priority(3);
 }
 
-fn token_spans(text: &str, start: i32, end: i32, tokens: &[String]) -> Vec<layout::Span> {
+fn mark_spans(layout: &layout::ChapterLayout) -> Vec<layout::Span> {
+    let mut spans = Vec::new();
+    spans.extend(layout.tsk.iter().map(|m| m.span));
+    spans.extend(layout.notes.iter().map(|m| m.span));
+    spans.extend(layout.mhc.iter().map(|m| m.span));
+    spans.extend(layout.words.iter().filter_map(|w| w.lemma_span));
+    spans
+}
+
+/// Cross-reference letters and note daggers sit in the text right after a word.
+/// They are not part of the word, so a search for Moses still matches Mosesᵃ.
+fn token_spans(
+    text: &str,
+    start: i32,
+    end: i32,
+    tokens: &[String],
+    skip: &[layout::Span],
+) -> Vec<layout::Span> {
     let chars: Vec<char> = text.chars().collect();
     let start = start.max(0) as usize;
     let end = (end.max(0) as usize).min(chars.len());
@@ -602,6 +620,9 @@ fn token_spans(text: &str, start: i32, end: i32, tokens: &[String]) -> Vec<layou
     }
     let slice: String = chars[start..end].iter().collect();
     let lower = slice.to_lowercase();
+    if lower.len() != slice.len() {
+        return Vec::new();
+    }
     let mut spans = Vec::new();
     for token in tokens {
         let needle = token.to_lowercase();
@@ -611,22 +632,68 @@ fn token_spans(text: &str, start: i32, end: i32, tokens: &[String]) -> Vec<layou
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
-            let before = lower[..pos].chars().next_back();
-            let after = lower[pos + needle.len()..].chars().next();
+            let char_at = lower[..pos].chars().count();
+            let char_end = char_at + needle.chars().count();
+            let abs = (start + char_at) as i32;
+            let abs_end = (start + char_end) as i32;
+            let before = neighbor_char(&chars, abs as isize - 1, skip, false);
+            let after = neighbor_char(&chars, abs_end as isize, skip, true);
             if before.is_none_or(|c| !c.is_ascii_alphanumeric())
                 && after.is_none_or(|c| !c.is_ascii_alphanumeric())
-                && lower.is_char_boundary(pos)
-                && lower.is_char_boundary(pos + needle.len())
             {
-                let char_at = lower[..pos].chars().count();
-                let char_end = char_at + needle.chars().count();
                 spans.push(layout::Span {
-                    start: (start + char_at) as i32,
-                    end: (start + char_end) as i32,
+                    start: abs,
+                    end: abs_end,
                 });
             }
             from = pos + needle.len().max(1);
         }
     }
     spans
+}
+
+fn neighbor_char(
+    chars: &[char],
+    mut idx: isize,
+    skip: &[layout::Span],
+    forward: bool,
+) -> Option<char> {
+    loop {
+        if idx < 0 || idx as usize >= chars.len() {
+            return None;
+        }
+        let pos = idx as i32;
+        if let Some(span) = skip.iter().find(|s| s.contains(pos)) {
+            idx = if forward {
+                span.end as isize
+            } else {
+                span.start as isize - 1
+            };
+            continue;
+        }
+        return Some(chars[idx as usize]);
+    }
+}
+
+#[cfg(test)]
+mod token_span_tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_a_word_before_a_cross_reference_letter() {
+        let text = "And Mosesa feared";
+        let skip = [layout::Span { start: 9, end: 10 }];
+        let spans = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["moses".into()],
+            &skip,
+        );
+        assert_eq!(
+            spans,
+            vec![layout::Span { start: 4, end: 9 }],
+            "Moses sits at 4..9, before the superscript a"
+        );
+    }
 }

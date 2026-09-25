@@ -76,6 +76,7 @@ pub struct App {
     search_list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
     search_chips: gtk::Box,
+    search_range_dd: gtk::DropDown,
     dict_modules: Vec<DictModule>,
     font_size: i32,
     paragraphs: bool,
@@ -307,7 +308,7 @@ impl SimpleComponent for App {
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_width_request: 420,
+                            set_width_request: 560,
                             set_spacing: 8,
                             set_margin_start: 12,
                             set_margin_end: 12,
@@ -701,6 +702,7 @@ impl SimpleComponent for App {
             search_list: search_list.clone(),
             search_entry: search_entry.clone(),
             search_chips: search_chips.clone(),
+            search_range_dd: search_range_dd.clone(),
             dict_modules,
             font_size,
             paragraphs,
@@ -1120,6 +1122,7 @@ impl SimpleComponent for App {
                 if self.search_scope != scope {
                     self.search_scope = scope;
                     self.search_chip = search::BookChip::Auto;
+                    self.sync_range_menu();
                     self.schedule_search(false);
                 }
             }
@@ -1171,10 +1174,10 @@ impl SimpleComponent for App {
                     .selected_row()
                     .map(|r| r.index())
                     .unwrap_or(0);
-                self.open_hit(idx, false);
+                self.open_hit(idx, false, true);
             }
             Msg::OpenHit(idx) => {
-                self.open_hit(idx, false);
+                self.open_hit(idx, false, false);
             }
             Msg::OpenHitBeside(idx) => {
                 let idx = if idx < 0 {
@@ -1185,7 +1188,7 @@ impl SimpleComponent for App {
                 } else {
                     idx
                 };
-                self.open_hit(idx, true);
+                self.open_hit(idx, true, true);
             }
             Msg::ToggleMhc => {
                 if let Some(id) = self.workspace.find_kind(|k| k.is_mhc()) {
@@ -1699,6 +1702,11 @@ impl App {
         self.search_hold.set(false);
     }
 
+    fn sync_range_menu(&self) {
+        self.search_range_dd
+            .set_visible(search::SearchRange::applies(self.search_scope));
+    }
+
     fn refill_chips(&self) {
         while let Some(child) = self.search_chips.first_child() {
             self.search_chips.remove(&child);
@@ -1808,7 +1816,7 @@ impl App {
         }
     }
 
-    fn open_hit(&mut self, idx: i32, beside: bool) {
+    fn open_hit(&mut self, idx: i32, beside: bool, dismiss: bool) {
         let Ok(idx) = usize::try_from(idx) else {
             return;
         };
@@ -1826,14 +1834,18 @@ impl App {
                 strongs: self.search_strongs.clone(),
             });
         }
-        self.search_origin = None;
-        self.search_open = false;
+        if dismiss {
+            self.search_origin = None;
+            self.search_open = false;
+        }
         match kind {
             LibraryKind::Verse | LibraryKind::Note => {
                 let Some(at) = at else {
                     return;
                 };
-                if beside {
+                if !dismiss {
+                    self.preview_at(at);
+                } else if beside {
                     self.go_beside(at);
                 } else {
                     self.go(at, true);
@@ -1843,7 +1855,11 @@ impl App {
                 let Some(at) = at else {
                     return;
                 };
-                self.go(at, true);
+                if dismiss {
+                    self.go(at, true);
+                } else {
+                    self.preview_at(at);
+                }
                 if module == "TSK" {
                     self.ensure_tsk();
                 } else {
