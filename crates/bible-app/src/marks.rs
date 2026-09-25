@@ -10,12 +10,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-const HIGHLIGHT_TAGS: &[(&str, &str, f32)] = &[
-    ("gold", "#e5a50a", 0.32),
-    ("green", "#57e389", 0.28),
-    ("blue", "#62a0ea", 0.28),
-    ("rose", "#ed333b", 0.22),
-];
+const HIGHLIGHT_TAGS: &[&str] = &["gold", "green", "blue", "rose"];
 
 const USER_TAG_NAMES: &[&str] = &[
     "hl-gold",
@@ -46,20 +41,13 @@ pub struct MarksWidgets {
 
 pub fn install_tags(buffer: &gtk::TextBuffer) {
     let table = buffer.tag_table();
-    for (name, hex, alpha) in HIGHLIGHT_TAGS {
+    for name in HIGHLIGHT_TAGS {
         let tag = gtk::TextTag::new(Some(&format!("hl-{name}")));
-        let mut color = gtk::gdk::RGBA::parse(*hex)
-            .unwrap_or_else(|_| gtk::gdk::RGBA::new(0.9, 0.75, 0.2, *alpha));
-        color.set_alpha(*alpha);
-        tag.set_background_rgba(Some(&color));
         tag.set_priority(0);
         table.add(&tag);
     }
     let bookmark = gtk::TextTag::new(Some("user-bookmark"));
     bookmark.set_underline(gtk::pango::Underline::Low);
-    if let Ok(color) = gtk::gdk::RGBA::parse("#c64600") {
-        bookmark.set_underline_rgba(Some(&color));
-    }
     bookmark.set_priority(1);
     table.add(&bookmark);
     let note = gtk::TextTag::new(Some("user-note"));
@@ -82,9 +70,7 @@ pub fn apply_tags(
     }
     for (verse, mark) in marks {
         for hl in &mark.highlights {
-            if let Some(span) =
-                layout::highlight_paint_span(layout, *verse, hl.start, hl.end)
-            {
+            if let Some(span) = layout::highlight_paint_span(layout, *verse, hl.start, hl.end) {
                 apply_tag(buffer, &format!("hl-{}", hl.color), span);
             }
         }

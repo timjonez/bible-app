@@ -36,6 +36,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Menu → Topics → Nave, Torrey, and the other topical works
 - Bookmarks, notes, and highlights are local, verse-anchored, and exportable as Markdown. They live in `~/.local/share/bible-app/user.sqlite`, not in the shipped library database. Select words and right-click to highlight that selection; right-click a verse to bookmark or add a note. Menu → Bookmarks / Notes / Export notes…
 - Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
+- Colors follow the desktop. On Omarchy the window and the chapter use the current theme (`~/.local/state/omarchy/current/theme/colors.toml`) and update when that theme changes. `BIBLE_APP_THEME` can point at another `colors.toml`. Elsewhere the app follows the libadwaita light/dark scheme and accent color.
 
 The database includes **KJV**, **Matthew Henry**, the **Treasury of Scripture Knowledge**, **Strong’s**, **Brown-Driver-Briggs** (1906), **Thayer** (1889), **Webster’s 1828**, the public-domain Bible dictionaries (Easton, Smith, Hitchcock’s Names, American Tract Society), and topical works (Nave, Torrey, Spurgeon, and the rest of that set). Thayer is Unitarian and based on Westcott-Hort; Strong’s stays the TR/KJV gloss. See `data/README.md` for dump licenses (Open Scriptures BDB is CC BY 4.0).
 
