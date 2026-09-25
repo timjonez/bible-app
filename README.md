@@ -16,25 +16,26 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Paragraphs (default) flows consecutive verses as prose; turn it off from the menu for one verse per block. Alt+Left / Alt+Right still change chapter.
 - Header book and chapter dropdowns jump to a passage; type in the popup to search
 - Alt+Left / Alt+Right: previous / next chapter
-- History back / forward (header icons, Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward)
+- History back / forward appears in the header after you leave a passage (Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward)
 - Ctrl+L then type `John 3:16` and Enter (Shift+Enter opens that passage beside the current one)
 - Ctrl+F opens a results list beside the chapter. A phrase is the default; the match menu also offers all words, any word, and a prefix such as `lov*`. `H430` lists King James verses for that Strong's number, `John 3:16` offers Go to, and `John/light` limits the search to that book. Book chips and a range menu narrow a long hit list. The scope menu covers the KJV, commentary, dictionaries, topics, notes, and the whole library. Arrow keys preview a hit in the chapter. Enter stays there. Esc returns. Shift+Enter opens a verse beside the current one
 - Tabs hold KJV passages and study views (Matthew Henry, TSK, library, bookmarks/notes, Strong’s occurrences). The tab bar stays hidden until a second tab or a split is open
 - Split (one at a time) shows two views side by side — two passages, or a passage plus MHC. Open beside from a TSK destination, a search hit, Ctrl+L, or the tab menu
 - Detach a tab into its own window from the tab menu (Open in a window), or drag a tab out
 - Header book/chapter pickers, history, font, paragraphs, copy, and marks apply to the focused passage tab
-- Ctrl+- / Ctrl++: smaller / larger text (also in the menu)
-- Copy the current verse with citation (Ctrl+C / menu / right-click), not a header button. A chapter selection copies that verse range.
+- Ctrl+- / Ctrl++: smaller / larger text
+- Drag either edge of the chapter to set the column width. That width is remembered
+- Copy the current verse with citation (Ctrl+C / right-click), not a header button. A chapter selection copies that verse range.
 - Click a verse (number or body) to select it; MHC and TSK tabs follow that verse by default (toggle Follow verse on the tab menu). Library, notes, and occurrence lists stay put
 - Click a tagged KJV word for Strong’s first, then BDB (Hebrew) and/or Thayer (Greek) when that code is in the library, plus a tab per matching dictionary (Easton, Smith, Webster, …) and topic (Nave, Torrey, …) when the headword matches. Each tab can open that word in the library. The Strong’s tab can list every KJV verse for that number. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list. Destinations can jump in the current passage or Open beside
 - A verse number is a link when a Matthew Henry comment starts there; click it to open the Matthew Henry tab
-- Menu → Commentary opens Matthew Henry or the Treasury of Scripture Knowledge for the current verse as a tab
+- Menu opens Matthew Henry or the Treasury of Scripture Knowledge for the current verse as a tab
 - Menu → Lexicon → Brown-Driver-Briggs or Thayer; type a Strong’s code such as `H430` or `G26`
 - Menu → Dictionary → Webster’s 1828, Easton, or another dictionary; type a headword in the search bar
 - Menu → Topics → Nave, Torrey, and the other topical works
-- Bookmarks, notes, and highlights are local, verse-anchored, and exportable as Markdown. They live in `~/.local/share/bible-app/user.sqlite`, not in the shipped library database. Select words and right-click to highlight that selection; right-click a verse to bookmark or add a note. Menu → Bookmarks / Notes / Export notes…
+- Bookmarks, notes, and highlights are local, verse-anchored, and exportable as Markdown. They live in `~/.local/share/bible-app/user.sqlite`, not in the shipped library database. Select words and right-click to highlight that selection; right-click a verse to bookmark or add a note. Menu → Bookmarks / Notes. Export notes… is on the Notes page.
 - Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
 - Colors follow the desktop. On Omarchy the window and the chapter use the current theme (`~/.local/state/omarchy/current/theme/colors.toml`) and update when that theme changes. `BIBLE_APP_THEME` can point at another `colors.toml`. Elsewhere the app follows the libadwaita light/dark scheme and accent color.
 

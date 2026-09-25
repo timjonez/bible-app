@@ -23,6 +23,9 @@ pub struct State {
     pub paragraphs: bool,
     #[serde(default)]
     pub search_mode: u32,
+    /// Chapter column width in logical pixels. `0` keeps the automatic measure.
+    #[serde(default)]
+    pub column_width: i32,
 }
 
 fn default_font_size() -> i32 {
@@ -43,6 +46,7 @@ impl Default for State {
             interlinear: false,
             paragraphs: true,
             search_mode: 0,
+            column_width: 0,
         }
     }
 }
@@ -67,6 +71,7 @@ impl State {
             interlinear: false,
             paragraphs,
             search_mode: 0,
+            column_width: 0,
         }
     }
 }
@@ -217,6 +222,7 @@ mod tests {
         assert!(s.paragraphs);
         assert!(!s.interlinear);
         assert_eq!(s.font_size, layout::DEFAULT_FONT);
+        assert_eq!(s.column_width, 0);
     }
 
     #[test]

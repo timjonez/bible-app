@@ -80,6 +80,8 @@ pub struct App {
     search_range_dd: gtk::DropDown,
     dict_modules: Vec<DictModule>,
     font_size: i32,
+    /// `0` uses the automatic measure. A positive value is the dragged width.
+    column_width: i32,
     paragraphs: bool,
     font_provider: gtk::CssProvider,
     _theme_watch: theme::Watch,
@@ -151,6 +153,8 @@ pub enum Msg {
     CopyAtOffset(i32),
     FontSmaller,
     FontLarger,
+    SetColumnWidth(i32),
+    PersistColumnWidth,
     SetParagraphs(bool),
     OpenBookmarks,
     OpenNotes,
@@ -258,6 +262,8 @@ impl SimpleComponent for App {
                         },
                         gtk::Box {
                             add_css_class: "linked",
+                            #[watch]
+                            set_visible: model.has_history(),
 
                             gtk::Button {
                                 set_icon_name: "edit-undo-symbolic",
@@ -711,6 +717,7 @@ impl SimpleComponent for App {
             search_range_dd: search_range_dd.clone(),
             dict_modules,
             font_size,
+            column_width: loaded_column_width(),
             paragraphs,
             font_provider,
             _theme_watch,
@@ -731,6 +738,7 @@ impl SimpleComponent for App {
         };
         model.apply_font();
         picker::install_css();
+        passage::install_css();
         picker::fill_books(&model.book_dropdown, &model.books);
 
         let widgets = view_output!();
@@ -1321,6 +1329,15 @@ impl SimpleComponent for App {
                 self.apply_font();
                 self.save_state();
             }
+            Msg::SetColumnWidth(px) => {
+                let px = layout::clamp_column_px(px);
+                if self.column_width == px {
+                    return;
+                }
+                self.column_width = px;
+                self.apply_column();
+            }
+            Msg::PersistColumnWidth => self.save_state(),
             Msg::SetParagraphs(on) => {
                 if self.paragraphs == on {
                     return;
@@ -1487,6 +1504,10 @@ impl App {
     fn can_forward(&self) -> bool {
         self.focused_passage()
             .is_some_and(|p| p.history.can_forward())
+    }
+
+    fn has_history(&self) -> bool {
+        self.can_back() || self.can_forward()
     }
 
     fn passage(&self, id: TabId) -> Option<&PassageView> {
@@ -1931,6 +1952,7 @@ impl App {
     fn save_state(&self) {
         let mut state = config::State::from_ref(self.at(), self.font_size, self.paragraphs);
         state.search_mode = self.search_mode.index();
+        state.column_width = self.column_width;
         config::save_state(&state);
     }
 
@@ -1946,6 +1968,24 @@ impl App {
             "textview.chapter-view {{ font-size: {}pt; }}",
             self.font_size
         ));
+        self.apply_column();
+    }
+
+    fn effective_column_px(&self) -> i32 {
+        if self.column_width > 0 {
+            layout::clamp_column_px(self.column_width)
+        } else {
+            layout::column_width_px(self.font_size)
+        }
+    }
+
+    fn apply_column(&self) {
+        let px = self.effective_column_px();
+        for hosted in self.hosted.values() {
+            if let TabContent::Passage(p) = &hosted.content {
+                p.set_column_px(px);
+            }
+        }
     }
 
     fn recolor_passages(&self) {
@@ -2357,7 +2397,7 @@ impl App {
     }
 
     fn spawn_passage(&mut self, id: TabId, at: Ref) {
-        let p = PassageView::new(at, &self.actions);
+        let p = PassageView::new(at, &self.actions, self.effective_column_px());
         p.wire(id, self.msg_tx.clone());
         let title = nav::format_chapter(&self.books, at.book, at.chapter);
         let root = p.root.clone();
@@ -2736,6 +2776,15 @@ impl App {
     }
 }
 
+fn loaded_column_width() -> i32 {
+    let width = config::load_state().column_width;
+    if width > 0 {
+        layout::clamp_column_px(width)
+    } else {
+        0
+    }
+}
+
 type LoadedLibrary = (Connection, PathBuf, Vec<Book>, Ref, i32, bool, MatchMode);
 
 fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<usize> {
@@ -2777,15 +2826,11 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some("Paragraphs"), Some("win.paragraphs"));
 
-    let text = gio::Menu::new();
-    text.append(Some("Copy verse"), Some("win.copy-verse"));
-    text.append(Some("Larger text"), Some("win.font-larger"));
-    text.append(Some("Smaller text"), Some("win.font-smaller"));
-    menu.append_section(None, &text);
+    let marks = gio::Menu::new();
+    marks.append(Some("Bookmarks"), Some("win.bookmarks"));
+    marks.append(Some("Notes"), Some("win.notes"));
+    menu.append_section(None, &marks);
 
-    let commentary = gio::Menu::new();
-    commentary.append(Some("Matthew Henry"), Some("win.mhc"));
-    commentary.append(Some("Treasury of Scripture Knowledge"), Some("win.tsk"));
     let dictionaries = gio::Menu::new();
     let lexicons = gio::Menu::new();
     let topics = gio::Menu::new();
@@ -2802,14 +2847,9 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
             topics.append(Some(module.title.as_str()), Some(action.as_str()));
         }
     }
-    let marks = gio::Menu::new();
-    marks.append(Some("Bookmarks"), Some("win.bookmarks"));
-    marks.append(Some("Notes"), Some("win.notes"));
-    marks.append(Some("Export notes…"), Some("win.export-notes"));
-    menu.append_section(None, &marks);
-
     let study = gio::Menu::new();
-    study.append_submenu(Some("Commentary"), &commentary);
+    study.append(Some("Matthew Henry"), Some("win.mhc"));
+    study.append(Some("Treasury of Scripture Knowledge"), Some("win.tsk"));
     if lexicons.n_items() > 0 {
         study.append_submenu(Some("Lexicon"), &lexicons);
     }
