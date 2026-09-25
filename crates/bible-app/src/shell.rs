@@ -42,12 +42,14 @@ impl SplitShell {
         paned.set_hexpand(true);
         paned.set_vexpand(true);
         paned.set_wide_handle(true);
+        paned.add_css_class("pane-split");
         paned.set_resize_start_child(true);
         paned.set_resize_end_child(true);
         paned.set_shrink_start_child(false);
         paned.set_shrink_end_child(false);
         paned.set_start_child(Some(&left.root));
         paned.set_end_child(Some(&right.root));
+        mark_split_handle(&paned);
         Self { paned, left, right }
     }
 
@@ -100,6 +102,25 @@ pub fn open_detached(title: &str) -> DetachedHost {
     window.set_content(Some(&toolbar));
     window.present();
     DetachedHost { window, view }
+}
+
+/// The paned handle is the only resize control once a second view is open.
+pub fn mark_split_handle(paned: &gtk::Paned) {
+    fn apply(paned: &gtk::Paned) {
+        let mut child = paned.first_child();
+        while let Some(widget) = child {
+            if widget.css_name().as_str() == "separator" {
+                widget.set_tooltip_text(Some("Drag to resize"));
+                widget.set_cursor_from_name(Some("ew-resize"));
+                widget.update_property(&[gtk::accessible::Property::Label("Drag to resize")]);
+                return;
+            }
+            child = widget.next_sibling();
+        }
+    }
+    apply(paned);
+    let paned = paned.clone();
+    paned.connect_realize(apply);
 }
 
 pub fn tab_menu_model() -> gio::Menu {

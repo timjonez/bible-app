@@ -24,7 +24,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Detach a tab into its own window from the tab menu (Open in a window), or drag a tab out
 - Header book/chapter pickers, history, font, paragraphs, copy, and marks apply to the focused passage tab
 - Ctrl+- / Ctrl++: smaller / larger text
-- Drag either edge of the chapter to set the column width. That width is remembered
+- Drag either edge of the chapter to set the column width. That width is remembered. The edges hide while another view is open beside the chapter; drag the divider between the two views to resize them
 - Copy the current verse with citation (Ctrl+C / right-click), not a header button. A chapter selection copies that verse range.
 - Click a verse (number or body) to select it; MHC and TSK tabs follow that verse by default (toggle Follow verse on the tab menu). Library, notes, and occurrence lists stay put
 - Click a tagged KJV word for Strong’s first, then BDB (Hebrew) and/or Thayer (Greek) when that code is in the library, plus a tab per matching dictionary (Easton, Smith, Webster, …) and topic (Nave, Torrey, …) when the headword matches. Each tab can open that word in the library. The Strong’s tab can list every KJV verse for that number. Lemmas are not inserted beside words in the chapter.

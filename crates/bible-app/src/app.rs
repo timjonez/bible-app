@@ -28,6 +28,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+/// Narrowest search list, and the width used until the divider is dragged.
+const SEARCH_MIN_PX: i32 = 280;
+const SEARCH_DEFAULT_PX: i32 = 560;
+
 struct HostedTab {
     page: adw::TabPage,
     content: TabContent,
@@ -75,6 +79,8 @@ pub struct App {
     search_groups: Rc<RefCell<Vec<String>>>,
     search_db_path: Option<PathBuf>,
     search_list: gtk::ListBox,
+    search_paned: Option<gtk::Paned>,
+    search_position: Rc<Cell<i32>>,
     search_entry: gtk::SearchEntry,
     search_chips: gtk::Box,
     search_range_dd: gtk::DropDown,
@@ -312,12 +318,22 @@ impl SimpleComponent for App {
                         set_description: model.error.as_deref(),
                     }
                 } else {
-                    gtk::Box {
+                    #[name(search_paned)]
+                    gtk::Paned {
                         set_orientation: gtk::Orientation::Horizontal,
+                        set_hexpand: true,
+                        set_vexpand: true,
+                        set_wide_handle: true,
+                        add_css_class: "pane-split",
+                        set_resize_start_child: false,
+                        set_resize_end_child: true,
+                        set_shrink_start_child: false,
+                        set_shrink_end_child: true,
 
-                        gtk::Box {
+                        #[wrap(Some)]
+                        set_start_child = &gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_width_request: 560,
+                            set_width_request: SEARCH_MIN_PX,
                             set_spacing: 8,
                             set_margin_start: 12,
                             set_margin_end: 12,
@@ -430,17 +446,18 @@ impl SimpleComponent for App {
                             }
                         },
 
-                        gtk::Separator {
-                            set_orientation: gtk::Orientation::Vertical,
-                            #[watch]
-                            set_visible: model.search_open,
-                        },
-
-                        #[local_ref]
-                        workspace_host -> gtk::Box {
+                        #[wrap(Some)]
+                        set_end_child = &gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
                             set_hexpand: true,
                             set_vexpand: true,
+
+                            #[local_ref]
+                            workspace_host -> gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_hexpand: true,
+                                set_vexpand: true,
+                            },
                         }
                     }
                 },
@@ -712,6 +729,8 @@ impl SimpleComponent for App {
             search_groups: Rc::new(RefCell::new(Vec::new())),
             search_db_path,
             search_list: search_list.clone(),
+            search_paned: None,
+            search_position: Rc::new(Cell::new(0)),
             search_entry: search_entry.clone(),
             search_chips: search_chips.clone(),
             search_range_dd: search_range_dd.clone(),
@@ -742,6 +761,9 @@ impl SimpleComponent for App {
         picker::fill_books(&model.book_dropdown, &model.books);
 
         let widgets = view_output!();
+        model.search_paned = Some(widgets.search_paned.clone());
+        shell::mark_split_handle(&widgets.search_paned);
+        model.track_search_split();
         let action_group = group.into_action_group();
         action_group.add_action(&dict_action);
         action_group.add_action(&highlight_action);
@@ -1120,6 +1142,7 @@ impl SimpleComponent for App {
                 if open {
                     self.search_origin = Some(self.at());
                     self.search_open = true;
+                    self.reveal_search_split();
                     self.focus_search();
                     if !self.search_query.trim().is_empty() {
                         self.schedule_search(false);
@@ -1486,6 +1509,7 @@ impl SimpleComponent for App {
             Msg::ThemeChanged => self.recolor_passages(),
         }
         self.sync_study_actions();
+        self.apply_column_mode();
         let _ = sender;
     }
 }
@@ -1986,6 +2010,68 @@ impl App {
                 p.set_column_px(px);
             }
         }
+    }
+
+    /// Column edges belong to a chapter that fills the window by itself.
+    /// A split or the search list is resized by the divider between the two.
+    fn column_resize_for(&self, id: TabId) -> bool {
+        let Some(shell) = &self.shell else {
+            return true;
+        };
+        let Some(view) = self.view_holding(id) else {
+            return true;
+        };
+        let in_main = view == shell.left.view || view == shell.right.view;
+        if !in_main {
+            return true;
+        }
+        if self.search_open {
+            return false;
+        }
+        shell.right.view.n_pages() == 0
+    }
+
+    fn apply_column_mode(&self) {
+        let ids: Vec<TabId> = self.hosted.keys().copied().collect();
+        for id in ids {
+            let on = self.column_resize_for(id);
+            if let Some(TabContent::Passage(passage)) = self.hosted.get(&id).map(|h| &h.content) {
+                passage.set_column_resize(on);
+            }
+        }
+    }
+
+    fn track_search_split(&self) {
+        let Some(paned) = self.search_paned.clone() else {
+            return;
+        };
+        let saved = self.search_position.clone();
+        paned.connect_position_notify(move |paned| {
+            let pos = paned.position();
+            let shown = paned.start_child().is_some_and(|child| child.is_visible());
+            if shown && pos >= SEARCH_MIN_PX {
+                saved.set(pos);
+            }
+        });
+    }
+
+    fn reveal_search_split(&self) {
+        let Some(paned) = self.search_paned.clone() else {
+            return;
+        };
+        let saved = self.search_position.get();
+        glib::idle_add_local_once(move || {
+            let width = paned.width();
+            let mut pos = if saved >= SEARCH_MIN_PX {
+                saved
+            } else {
+                SEARCH_DEFAULT_PX
+            };
+            if width > SEARCH_MIN_PX * 2 {
+                pos = pos.clamp(SEARCH_MIN_PX, width - SEARCH_MIN_PX);
+            }
+            paned.set_position(pos);
+        });
     }
 
     fn recolor_passages(&self) {
