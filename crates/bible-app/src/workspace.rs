@@ -1,6 +1,24 @@
 use crate::nav::Ref;
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// Identity of a tab in the workspace. Stable for the tab's lifetime.
+/// A reader window. The first one is [`WindowId::MAIN`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowId(u64);
+
+impl WindowId {
+    pub const MAIN: Self = Self(0);
+
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
 
@@ -75,6 +93,7 @@ pub enum TabKind {
     Occurrences {
         code: String,
     },
+    Search,
 }
 
 impl TabKind {
@@ -88,6 +107,10 @@ impl TabKind {
 
     pub fn is_tsk(&self) -> bool {
         matches!(self, Self::Tsk { .. })
+    }
+
+    pub fn is_search(&self) -> bool {
+        matches!(self, Self::Search)
     }
 
     pub fn follows_verse(&self) -> bool {
@@ -109,8 +132,8 @@ impl TabKind {
 pub struct Tab {
     pub id: TabId,
     pub kind: TabKind,
+    pub window: WindowId,
     pub pane: Pane,
-    pub detached: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,22 +145,41 @@ pub struct OpenResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseOutcome {
     Closed,
-    /// Last passage was closed; a replacement passage was created.
-    Replaced {
-        id: TabId,
-        at: Ref,
-    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitOutcome {
+    /// A new passage was opened on the other side.
+    Duplicated { id: TabId, at: Ref },
+    /// The tab moved to the other side.
+    Moved,
+    /// The tab is already alone on its side of a split.
+    AlreadyBeside,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetachOutcome {
+    pub window: WindowId,
+    pub source: WindowId,
+}
+
+#[derive(Debug, Clone)]
+struct WindowRec {
+    id: WindowId,
+    focused: TabId,
+    left_sel: Option<TabId>,
+    right_sel: Option<TabId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
     next_id: u64,
+    next_window: Rc<Cell<u64>>,
     tabs: Vec<Tab>,
+    windows: Vec<WindowRec>,
     focused: TabId,
     last_passage: TabId,
     last_at: Ref,
-    left_sel: TabId,
-    right_sel: Option<TabId>,
 }
 
 impl Workspace {
@@ -145,18 +187,28 @@ impl Workspace {
         let id = TabId(1);
         Self {
             next_id: 2,
+            next_window: Rc::new(Cell::new(1)),
             tabs: vec![Tab {
                 id,
                 kind: TabKind::Passage { at: start },
+                window: WindowId::MAIN,
                 pane: Pane::Left,
-                detached: false,
+            }],
+            windows: vec![WindowRec {
+                id: WindowId::MAIN,
+                focused: id,
+                left_sel: Some(id),
+                right_sel: None,
             }],
             focused: id,
             last_passage: id,
             last_at: start,
-            left_sel: id,
-            right_sel: None,
         }
+    }
+
+    /// Shared counter so a drag-out can reserve an id before the model hears about it.
+    pub fn window_counter(&self) -> Rc<Cell<u64>> {
+        self.next_window.clone()
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -186,9 +238,24 @@ impl Workspace {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_split(&self) -> bool {
+        self.is_window_split(WindowId::MAIN)
+    }
+
+    pub fn is_window_split(&self, window: WindowId) -> bool {
         self.tabs
             .iter()
-            .any(|t| !t.detached && t.pane == Pane::Right)
+            .any(|t| t.window == window && t.pane == Pane::Right)
+    }
+
+    /// False when the tab is already the only one on its side of a split.
+    pub fn can_split(&self, id: TabId) -> bool {
+        let Some(tab) = self.tab(id) else {
+            return false;
+        };
+        if !self.is_window_split(tab.window) {
+            return true;
+        }
+        self.count(tab.window, Some(tab.pane)) > 1
     }
 
     pub fn focused_passage(&self) -> Option<&Tab> {
@@ -209,22 +276,59 @@ impl Workspace {
         self.focused_passage().and_then(|t| t.kind.at())
     }
 
-    /// Visible selected tabs: one, or two when split.
+    pub fn focused_passage_in(&self, window: WindowId) -> Option<TabId> {
+        let rec = self.window(window)?;
+        if self
+            .tab(rec.focused)
+            .is_some_and(|t| t.window == window && t.kind.is_passage())
+        {
+            return Some(rec.focused);
+        }
+        self.tabs
+            .iter()
+            .find(|t| t.window == window && t.kind.is_passage())
+            .map(|t| t.id)
+    }
+
+    pub fn focused_passage_ref_in(&self, window: WindowId) -> Option<Ref> {
+        self.focused_passage_in(window)
+            .and_then(|id| self.tab(id))
+            .and_then(|t| t.kind.at())
+    }
+
+    /// Visible selected tabs in the main window: one, or two when split.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn visible(&self) -> Vec<TabId> {
+        self.visible_in(WindowId::MAIN)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn visible_in(&self, window: WindowId) -> Vec<TabId> {
+        let Some(rec) = self.window(window) else {
+            return Vec::new();
+        };
         let mut ids = Vec::with_capacity(2);
-        if self.tab(self.left_sel).is_some_and(|t| !t.detached) {
-            ids.push(self.left_sel);
+        if let Some(id) = rec.left_sel {
+            if self
+                .tab(id)
+                .is_some_and(|t| t.window == window && t.pane == Pane::Left)
+            {
+                ids.push(id);
+            }
         }
-        if self.is_split() {
-            if let Some(id) = self.right_sel {
-                if self.tab(id).is_some_and(|t| !t.detached) && !ids.contains(&id) {
+        if self.is_window_split(window) {
+            if let Some(id) = rec.right_sel {
+                if self
+                    .tab(id)
+                    .is_some_and(|t| t.window == window && t.pane == Pane::Right)
+                    && !ids.contains(&id)
+                {
                     ids.push(id);
                 }
             }
         }
         if ids.is_empty() {
-            if let Some(t) = self.tabs.iter().find(|t| !t.detached) {
+            if let Some(t) = self.tabs.iter().find(|t| t.window == window) {
                 ids.push(t.id);
             }
         }
@@ -252,6 +356,17 @@ impl Workspace {
         self.find_kind(|k| k.is_tsk()).is_some()
     }
 
+    pub fn has_search(&self, window: WindowId) -> bool {
+        self.find_search(window).is_some()
+    }
+
+    pub fn find_search(&self, window: WindowId) -> Option<TabId> {
+        self.tabs
+            .iter()
+            .find(|t| t.window == window && t.kind.is_search())
+            .map(|t| t.id)
+    }
+
     pub fn find_kind(&self, pred: impl Fn(&TabKind) -> bool) -> Option<TabId> {
         self.tabs.iter().find(|t| pred(&t.kind)).map(|t| t.id)
     }
@@ -260,8 +375,8 @@ impl Workspace {
         let Some(tab) = self.tab(id) else {
             return;
         };
+        let window = tab.window;
         let pane = tab.pane;
-        let detached = tab.detached;
         let is_passage = tab.kind.is_passage();
         let at = tab.kind.at();
         self.focused = id;
@@ -271,30 +386,32 @@ impl Workspace {
                 self.last_at = at;
             }
         }
-        if !detached {
+        if let Some(rec) = self.window_mut(window) {
+            rec.focused = id;
             match pane {
-                Pane::Left => self.left_sel = id,
-                Pane::Right => self.right_sel = Some(id),
+                Pane::Left => rec.left_sel = Some(id),
+                Pane::Right => rec.right_sel = Some(id),
             }
         }
     }
 
-    pub fn set_host(&mut self, id: TabId, pane: Pane, detached: bool) {
-        let Some(tab) = self.tab_mut(id) else {
+    /// Record where a tab landed after a tab view moved it.
+    pub fn place(&mut self, id: TabId, window: WindowId, pane: Pane) {
+        let Some(tab) = self.tab(id) else {
             return;
         };
-        tab.pane = pane;
-        tab.detached = detached;
-        if !detached {
-            match pane {
-                Pane::Left => self.left_sel = id,
-                Pane::Right => self.right_sel = Some(id),
-            }
+        let source = tab.window;
+        if source == window && tab.pane == pane {
+            self.focus(id);
+            return;
         }
-        if detached {
-            self.prune_sel(id);
+        self.ensure_window(window);
+        if let Some(tab) = self.tab_mut(id) {
+            tab.window = window;
+            tab.pane = pane;
         }
-        self.repair_sel();
+        self.repair(source);
+        self.focus(id);
     }
 
     pub fn navigate_passage(&mut self, id: TabId, at: Ref) {
@@ -359,22 +476,30 @@ impl Workspace {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open_passage(&mut self, at: Ref) -> OpenResult {
-        let pane = self.insert_pane();
-        let id = self.add_tab(TabKind::Passage { at }, pane, false);
+        let (window, pane) = self.insert_slot();
+        let id = self.add_tab(TabKind::Passage { at }, window, pane);
         self.last_passage = id;
         self.last_at = at;
         OpenResult { id, created: true }
     }
 
-    /// New passage in the other pane (creates the one allowed split).
+    pub fn open_passage_in(&mut self, window: WindowId, at: Ref) -> OpenResult {
+        let pane = self.focused_pane(window);
+        let id = self.add_tab(TabKind::Passage { at }, window, pane);
+        self.last_passage = id;
+        self.last_at = at;
+        OpenResult { id, created: true }
+    }
+
+    /// New passage in the other pane of `from`'s window (creates the one allowed split).
     pub fn open_passage_beside(&mut self, from: TabId, at: Ref) -> OpenResult {
-        let pane = self
+        let (window, pane) = self
             .tab(from)
-            .filter(|t| !t.detached)
-            .map(|t| t.pane.other())
-            .unwrap_or(Pane::Right);
-        let id = self.add_tab(TabKind::Passage { at }, pane, false);
+            .map(|t| (t.window, t.pane.other()))
+            .unwrap_or((WindowId::MAIN, Pane::Right));
+        let id = self.add_tab(TabKind::Passage { at }, window, pane);
         self.last_passage = id;
         self.last_at = at;
         OpenResult { id, created: true }
@@ -448,51 +573,88 @@ impl Workspace {
         )
     }
 
-    /// Move `id` into the other main pane, creating a split if needed.
-    /// Returns false if there is nothing to split against.
+    /// One search tab in `window`. A second call focuses the one already there.
+    pub fn open_search(&mut self, window: WindowId) -> OpenResult {
+        if let Some(id) = self.find_search(window) {
+            self.focus(id);
+            return OpenResult { id, created: false };
+        }
+        let pane = self.focused_pane(window);
+        let id = self.add_tab(TabKind::Search, window, pane);
+        OpenResult { id, created: true }
+    }
+
+    /// Move `id` into the other pane of its window.
+    /// Returns false when that would empty the only pane.
     pub fn move_beside(&mut self, id: TabId) -> bool {
         let Some(tab) = self.tab(id) else {
             return false;
         };
-        if tab.detached {
-            let dest = if self
-                .tabs
-                .iter()
-                .any(|t| !t.detached && t.pane == Pane::Right)
-            {
-                Pane::Left
-            } else {
-                Pane::Right
-            };
-            self.set_host(id, dest, false);
-            self.focus(id);
-            return true;
-        }
+        let window = tab.window;
         let src = tab.pane;
         let dest = src.other();
         let others = self
             .tabs
             .iter()
-            .filter(|t| !t.detached && t.pane == src && t.id != id)
+            .filter(|t| t.window == window && t.pane == src && t.id != id)
             .count();
-        if others == 0 && !self.tabs.iter().any(|t| !t.detached && t.pane == dest) {
+        let dest_occupied = self
+            .tabs
+            .iter()
+            .any(|t| t.window == window && t.pane == dest);
+        if others == 0 && !dest_occupied {
             return false;
         }
-        self.set_host(id, dest, false);
+        self.set_pane(id, dest);
         self.focus(id);
-        if self.sel_in(src) == Some(id) {
-            if let Some(other) = self.first_in(src) {
-                match src {
-                    Pane::Left => self.left_sel = other,
-                    Pane::Right => self.right_sel = Some(other),
-                }
-            }
-        }
         true
     }
 
-    pub fn detach(&mut self, id: TabId) {
-        self.set_host(id, Pane::Left, true);
+    pub fn split_tab(&mut self, id: TabId) -> SplitOutcome {
+        let Some(tab) = self.tab(id).cloned() else {
+            return SplitOutcome::AlreadyBeside;
+        };
+        let window = tab.window;
+        let pane = tab.pane;
+        if self.is_window_split(window) {
+            if self.count(window, Some(pane)) <= 1 {
+                return SplitOutcome::AlreadyBeside;
+            }
+            self.set_pane(id, pane.other());
+            self.focus(id);
+            return SplitOutcome::Moved;
+        }
+        if tab.kind.is_passage() {
+            let at = tab.kind.at().unwrap_or(self.last_at);
+            let new_id = self.add_tab(TabKind::Passage { at }, window, pane.other());
+            self.last_passage = new_id;
+            self.last_at = at;
+            return SplitOutcome::Duplicated { id: new_id, at };
+        }
+        if self.count(window, Some(pane)) <= 1 {
+            let at = self.last_at;
+            let new_id = self.add_tab(TabKind::Passage { at }, window, pane.other());
+            self.last_passage = new_id;
+            self.last_at = at;
+            return SplitOutcome::Duplicated { id: new_id, at };
+        }
+        self.set_pane(id, pane.other());
+        self.focus(id);
+        SplitOutcome::Moved
+    }
+
+    pub fn detach(&mut self, id: TabId) -> Option<DetachOutcome> {
+        let tab = self.tab(id)?.clone();
+        let source = tab.window;
+        let window = self.alloc_window();
+        self.ensure_window(window);
+        if let Some(tab) = self.tab_mut(id) {
+            tab.window = window;
+            tab.pane = Pane::Left;
+        }
+        self.repair(source);
+        self.focus(id);
+        Some(DetachOutcome { window, source })
     }
 
     pub fn close(&mut self, id: TabId) -> CloseOutcome {
@@ -500,31 +662,21 @@ impl Workspace {
             return CloseOutcome::Closed;
         };
         let tab = self.tabs.remove(idx);
-        self.prune_sel(id);
-
-        let passages = self.tabs.iter().filter(|t| t.kind.is_passage()).count();
-        if passages == 0 {
-            let at = tab.kind.at().unwrap_or(self.last_at);
-            let new_id = self.add_tab(TabKind::Passage { at }, Pane::Left, false);
-            self.last_passage = new_id;
-            self.last_at = at;
-            return CloseOutcome::Replaced { id: new_id, at };
-        }
+        let window = tab.window;
+        self.repair(window);
 
         if self.focused == id {
-            let next = if self.tab(self.last_passage).is_some() {
-                self.last_passage
-            } else {
-                self.tabs
-                    .iter()
-                    .find(|t| t.kind.is_passage())
-                    .or_else(|| self.tabs.first())
-                    .map(|t| t.id)
-                    .unwrap_or(id)
-            };
-            self.focus(next);
+            let next = self
+                .tabs
+                .iter()
+                .find(|t| t.window == window)
+                .or_else(|| self.tabs.first())
+                .map(|t| t.id);
+            if let Some(next) = next {
+                self.focus(next);
+            }
         }
-        self.repair_sel();
+        self.repair(window);
         CloseOutcome::Closed
     }
 
@@ -541,72 +693,121 @@ impl Workspace {
             self.focus(id);
             OpenResult { id, created: false }
         } else {
-            let pane = self.insert_pane();
-            let id = self.add_tab(kind, pane, false);
+            let (window, pane) = self.insert_slot();
+            let id = self.add_tab(kind, window, pane);
             OpenResult { id, created: true }
         }
     }
 
-    fn add_tab(&mut self, kind: TabKind, pane: Pane, detached: bool) -> TabId {
+    fn add_tab(&mut self, kind: TabKind, window: WindowId, pane: Pane) -> TabId {
+        self.ensure_window(window);
         let id = TabId(self.next_id);
         self.next_id += 1;
         self.tabs.push(Tab {
             id,
             kind,
+            window,
             pane,
-            detached,
         });
         self.focus(id);
         id
     }
 
-    fn insert_pane(&self) -> Pane {
+    fn alloc_window(&mut self) -> WindowId {
+        let n = self.next_window.get();
+        self.next_window.set(n + 1);
+        WindowId(n)
+    }
+
+    fn ensure_window(&mut self, id: WindowId) {
+        if self.window(id).is_some() {
+            return;
+        }
+        let focused = self.focused;
+        self.windows.push(WindowRec {
+            id,
+            focused,
+            left_sel: None,
+            right_sel: None,
+        });
+    }
+
+    fn insert_slot(&self) -> (WindowId, Pane) {
         self.tab(self.focused)
-            .filter(|t| !t.detached)
+            .map(|t| (t.window, t.pane))
+            .unwrap_or((WindowId::MAIN, Pane::Left))
+    }
+
+    fn focused_pane(&self, window: WindowId) -> Pane {
+        self.window(window)
+            .and_then(|rec| self.tab(rec.focused))
+            .filter(|t| t.window == window)
             .map(|t| t.pane)
             .unwrap_or(Pane::Left)
     }
 
-    fn first_in(&self, pane: Pane) -> Option<TabId> {
+    fn set_pane(&mut self, id: TabId, pane: Pane) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        let window = tab.window;
+        tab.pane = pane;
+        self.repair(window);
+        self.focus(id);
+    }
+
+    fn count(&self, window: WindowId, pane: Option<Pane>) -> usize {
         self.tabs
             .iter()
-            .find(|t| !t.detached && t.pane == pane)
+            .filter(|t| t.window == window && pane.is_none_or(|p| t.pane == p))
+            .count()
+    }
+
+    fn window(&self, id: WindowId) -> Option<&WindowRec> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    fn window_mut(&mut self, id: WindowId) -> Option<&mut WindowRec> {
+        self.windows.iter_mut().find(|w| w.id == id)
+    }
+
+    fn first_in(&self, window: WindowId, pane: Pane) -> Option<TabId> {
+        self.tabs
+            .iter()
+            .find(|t| t.window == window && t.pane == pane)
             .map(|t| t.id)
     }
 
-    fn sel_in(&self, pane: Pane) -> Option<TabId> {
-        match pane {
-            Pane::Left => Some(self.left_sel),
-            Pane::Right => self.right_sel,
-        }
+    fn sel_ok(&self, id: Option<TabId>, window: WindowId, pane: Pane) -> bool {
+        id.is_some_and(|id| {
+            self.tab(id)
+                .is_some_and(|t| t.window == window && t.pane == pane)
+        })
     }
 
-    fn prune_sel(&mut self, id: TabId) {
-        if self.left_sel == id {
-            if let Some(other) = self.first_in(Pane::Left).filter(|o| *o != id) {
-                self.left_sel = other;
-            }
+    fn repair(&mut self, window: WindowId) {
+        let left = self.first_in(window, Pane::Left);
+        let right = self.first_in(window, Pane::Right);
+        let left_ok = self
+            .window(window)
+            .is_some_and(|rec| self.sel_ok(rec.left_sel, window, Pane::Left));
+        let right_ok = self
+            .window(window)
+            .is_some_and(|rec| self.sel_ok(rec.right_sel, window, Pane::Right));
+        let focused_here = self
+            .window(window)
+            .is_some_and(|rec| self.tab(rec.focused).is_some_and(|t| t.window == window));
+        let Some(rec) = self.window_mut(window) else {
+            return;
+        };
+        if !left_ok {
+            rec.left_sel = left;
         }
-        if self.right_sel == Some(id) {
-            self.right_sel = self.first_in(Pane::Right).filter(|o| *o != id);
+        if !right_ok {
+            rec.right_sel = right;
         }
-    }
-
-    fn repair_sel(&mut self) {
-        if self
-            .tab(self.left_sel)
-            .is_none_or(|t| t.detached || t.pane != Pane::Left)
-        {
-            if let Some(id) = self.first_in(Pane::Left) {
-                self.left_sel = id;
-            }
-        }
-        if self
-            .right_sel
-            .and_then(|id| self.tab(id))
-            .is_none_or(|t| t.detached || t.pane != Pane::Right)
-        {
-            self.right_sel = self.first_in(Pane::Right);
+        if !focused_here {
+            rec.focused = rec.left_sel.or(rec.right_sel).unwrap_or(rec.focused);
         }
     }
 }
@@ -808,18 +1009,95 @@ mod tests {
     }
 
     #[test]
-    fn closing_last_passage_replaces_it() {
+    fn closing_the_last_tab_leaves_none() {
         let mut ws = start();
         ws.navigate_passage(ws.focused(), r(43, 3, 16));
         let id = ws.focused();
-        match ws.close(id) {
-            CloseOutcome::Replaced { id: new_id, at } => {
-                assert_ne!(new_id, id);
-                assert_eq!(at, r(43, 3, 16));
-                assert_eq!(ws.tabs().len(), 1);
-                assert!(ws.tabs()[0].kind.is_passage());
+        assert_eq!(ws.close(id), CloseOutcome::Closed);
+        assert!(ws.tabs().is_empty());
+        assert!(ws.focused_passage_id().is_none());
+        assert_eq!(ws.last_at(), r(43, 3, 16));
+    }
+
+    #[test]
+    fn closing_the_passage_keeps_a_study_tab() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert_eq!(ws.close(passage), CloseOutcome::Closed);
+        assert_eq!(ws.tabs().len(), 1);
+        assert_eq!(ws.focused(), mhc);
+        assert!(ws.tab(mhc).unwrap().kind.is_mhc());
+    }
+
+    #[test]
+    fn splitting_the_only_passage_duplicates_it() {
+        let mut ws = start();
+        let left = ws.focused();
+        match ws.split_tab(left) {
+            SplitOutcome::Duplicated { id, at } => {
+                assert_eq!(at, r(1, 1, 1));
+                assert!(ws.is_split());
+                assert_eq!(ws.tab(left).unwrap().pane, Pane::Left);
+                assert_eq!(ws.tab(id).unwrap().pane, Pane::Right);
+                assert_eq!(ws.tab(id).unwrap().kind.at(), Some(r(1, 1, 1)));
+                assert_eq!(ws.tab(left).unwrap().window, WindowId::MAIN);
             }
-            other => panic!("expected replacement, got {other:?}"),
+            other => panic!("expected a duplicate passage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn splitting_matthew_henry_moves_it_beside_the_passage() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(!ws.is_split());
+        assert_eq!(ws.split_tab(mhc), SplitOutcome::Moved);
+        assert_eq!(ws.tab(passage).unwrap().pane, Pane::Left);
+        assert_eq!(ws.tab(mhc).unwrap().pane, Pane::Right);
+        assert!(ws.tab(mhc).unwrap().kind.is_mhc());
+    }
+
+    #[test]
+    fn splitting_a_tab_already_alone_on_its_side_does_nothing() {
+        let mut ws = start();
+        let left = ws.focused();
+        let right = ws.open_passage_beside(left, r(43, 3, 16)).id;
+        assert_eq!(ws.split_tab(left), SplitOutcome::AlreadyBeside);
+        assert_eq!(ws.split_tab(right), SplitOutcome::AlreadyBeside);
+        assert!(!ws.can_split(left));
+        assert!(!ws.can_split(right));
+        assert_eq!(ws.tabs().len(), 2);
+    }
+
+    #[test]
+    fn detaching_the_only_passage_leaves_the_window_empty() {
+        let mut ws = start();
+        ws.navigate_passage(ws.focused(), r(43, 3, 16));
+        let id = ws.focused();
+        let outcome = ws.detach(id).expect("detach");
+        assert_ne!(outcome.window, WindowId::MAIN);
+        assert_eq!(outcome.source, WindowId::MAIN);
+        assert_eq!(ws.tab(id).unwrap().window, outcome.window);
+        assert!(ws.tabs().iter().all(|tab| tab.window != WindowId::MAIN));
+        assert_eq!(ws.tabs().len(), 1);
+    }
+
+    #[test]
+    fn opening_search_twice_reuses_one_tab() {
+        let mut ws = start();
+        let first = ws.open_search(WindowId::MAIN);
+        assert!(first.created);
+        let second = ws.open_search(WindowId::MAIN);
+        assert!(!second.created);
+        assert_eq!(first.id, second.id);
+        assert!(ws.has_search(WindowId::MAIN));
+        assert_eq!(ws.tabs().iter().filter(|t| t.kind.is_search()).count(), 1);
+        let other = ws.detach(ws.focused_passage_id().unwrap()).unwrap().window;
+        let there = ws.open_search(other);
+        assert!(there.created);
+        assert_ne!(there.id, first.id);
+        assert!(ws.has_search(other));
     }
 }
