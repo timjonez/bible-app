@@ -8,14 +8,14 @@ use crate::occurrences;
 use crate::passage::{self, PassageView};
 use crate::picker;
 use crate::search;
-use crate::shell::{self, DetachedHost, SplitShell};
+use crate::shell::{self, SideChrome, SplitShell};
 use crate::strongs;
 use crate::theme;
 use crate::tsk;
 use crate::user_db;
-use crate::workspace::{CloseOutcome, MarksPage, Pane, TabId, TabKind, Workspace};
+use crate::workspace::{MarksPage, Pane, SplitOutcome, TabId, TabKind, WindowId, Workspace};
 use adw::prelude::*;
-use bible_app_db::{self, Book, DictModule, LibraryHit, LibraryKind, MatchMode, SearchScope};
+use bible_app_db::{self, Book, DictModule, LibraryKind, MatchMode, SearchScope};
 use gtk::gio;
 use gtk::glib;
 use relm4::actions::{RelmAction, RelmActionGroup};
@@ -27,10 +27,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
-
-/// Narrowest search list, and the width used until the divider is dragged.
-const SEARCH_MIN_PX: i32 = 280;
-const SEARCH_DEFAULT_PX: i32 = 560;
 
 struct HostedTab {
     page: adw::TabPage,
@@ -44,12 +40,13 @@ enum TabContent {
     Library(dict::DictWidgets),
     Marks(marks::MarksWidgets),
     Occurrences(occurrences::OccWidgets),
+    Search(search::Pane),
 }
 
-#[derive(Clone)]
-struct MainViews {
-    left: adw::TabView,
-    right: adw::TabView,
+struct SideWindow {
+    id: WindowId,
+    chrome: SideChrome,
+    syncing: Rc<Cell<bool>>,
 }
 
 pub struct App {
@@ -59,31 +56,10 @@ pub struct App {
     book_dropdown: gtk::DropDown,
     chapter_dropdown: gtk::DropDown,
     picker_syncing: Rc<Cell<bool>>,
-    search_open: bool,
-    search_query: String,
-    search_scope: SearchScope,
+    /// Saved match mode, used when a search tab is opened.
     search_mode: MatchMode,
-    search_range: search::SearchRange,
-    search_chip: search::BookChip,
-    search_hits: Vec<LibraryHit>,
-    search_status: String,
-    search_total: i64,
-    search_tokens: Vec<String>,
-    search_strongs: Option<String>,
-    search_chosen: Option<u8>,
-    search_book_counts: Vec<bible_app_db::BookCount>,
-    search_origin: Option<Ref>,
     search_mark: Option<SearchMark>,
-    search_gen: Rc<Cell<u64>>,
-    search_hold: Rc<Cell<bool>>,
-    search_groups: Rc<RefCell<Vec<String>>>,
     search_db_path: Option<PathBuf>,
-    search_list: gtk::ListBox,
-    search_paned: Option<gtk::Paned>,
-    search_position: Rc<Cell<i32>>,
-    search_entry: gtk::SearchEntry,
-    search_chips: gtk::Box,
-    search_range_dd: gtk::DropDown,
     dict_modules: Vec<DictModule>,
     font_size: i32,
     /// `0` uses the automatic measure. A positive value is the dragged width.
@@ -98,7 +74,7 @@ pub struct App {
     workspace: Workspace,
     hosted: HashMap<TabId, HostedTab>,
     shell: Option<SplitShell>,
-    detached: Rc<RefCell<Vec<DetachedHost>>>,
+    sides: Rc<RefCell<Vec<SideWindow>>>,
     menu_tab: Rc<Cell<Option<TabId>>>,
     goto_entry: gtk::Entry,
     goto_popover: gtk::Popover,
@@ -116,24 +92,25 @@ struct SearchMark {
 
 #[derive(Debug)]
 pub enum Msg {
-    SelectBookIndex(u32),
-    SelectChapterIndex(u32),
-    PrevChapter,
-    NextChapter,
-    GoTo(String),
-    GoToBeside(String),
-    SetSearch(bool),
-    Search(String),
-    SetSearchScope(SearchScope),
-    SetSearchMode(MatchMode),
-    SetSearchRange(search::SearchRange),
-    SelectSearchBook(Option<u8>),
-    SearchReady(u64, search::Outcome),
-    SearchMore,
-    PreviewHit(i32),
-    SearchActivate,
-    OpenHit(i32),
-    OpenHitBeside(i32),
+    SelectBookIndex(WindowId, u32),
+    SelectChapterIndex(WindowId, u32),
+    PrevChapter(WindowId),
+    NextChapter(WindowId),
+    GoTo(WindowId, String),
+    GoToBeside(WindowId, String),
+    Escape(WindowId),
+    SetSearch(WindowId, bool),
+    Search(TabId, String),
+    SetSearchScope(TabId, SearchScope),
+    SetSearchMode(TabId, MatchMode),
+    SetSearchRange(TabId, search::SearchRange),
+    SelectSearchBook(TabId, Option<u8>),
+    SearchReady(TabId, u64, search::Outcome),
+    SearchMore(TabId),
+    PreviewHit(TabId, i32),
+    SearchActivate(TabId),
+    OpenHit(TabId, i32),
+    OpenHitBeside(TabId, i32),
     ToggleMhc,
     ToggleTsk,
     OpenTskXref(i32),
@@ -153,8 +130,8 @@ pub enum Msg {
     DictOpen(i32),
     OpenStrongsOccurrences(String),
     OpenOccurrenceHit(i32),
-    Back,
-    Forward,
+    Back(WindowId),
+    Forward(WindowId),
     CopyVerses,
     CopyAtOffset(i32),
     FontSmaller,
@@ -186,9 +163,12 @@ pub enum Msg {
     TabClosed(TabId),
     TabAttached {
         id: TabId,
+        window: WindowId,
         pane: Pane,
-        detached: bool,
     },
+    SplitTab(TabId),
+    DetachTab(TabId),
+    WireSide(WindowId),
     SetupTabMenu(Option<TabId>),
     DetachMenuTab,
     BesideMenuTab,
@@ -228,7 +208,7 @@ impl SimpleComponent for App {
                             set_valign: gtk::Align::Center,
                             add_css_class: "passage-picker",
                             #[watch]
-                            set_sensitive: model.error.is_none() && !model.search_open,
+                            set_sensitive: model.error.is_none(),
                         },
 
                         #[local_ref]
@@ -239,7 +219,7 @@ impl SimpleComponent for App {
                             set_valign: gtk::Align::Center,
                             add_css_class: "chapter-picker",
                             #[watch]
-                            set_sensitive: model.error.is_none() && !model.search_open,
+                            set_sensitive: model.error.is_none(),
                         },
                     },
                     pack_start = &gtk::Box {
@@ -253,39 +233,35 @@ impl SimpleComponent for App {
                                 set_icon_name: "go-previous-symbolic",
                                 set_tooltip_text: Some("Previous chapter (Alt+Left)"),
                                 set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: !model.search_open,
-                                connect_clicked => Msg::PrevChapter,
+                                connect_clicked => Msg::PrevChapter(WindowId::MAIN),
                             },
                             gtk::Button {
                                 set_icon_name: "go-next-symbolic",
                                 set_tooltip_text: Some("Next chapter (Alt+Right)"),
                                 set_valign: gtk::Align::Center,
-                                #[watch]
-                                set_sensitive: !model.search_open,
-                                connect_clicked => Msg::NextChapter,
+                                connect_clicked => Msg::NextChapter(WindowId::MAIN),
                             },
                         },
                         gtk::Box {
                             add_css_class: "linked",
                             #[watch]
-                            set_visible: model.has_history(),
+                            set_visible: model.has_history_in(WindowId::MAIN),
 
                             gtk::Button {
                                 set_icon_name: "edit-undo-symbolic",
                                 set_tooltip_text: Some("Back in history (Alt+Shift+Left)"),
                                 set_valign: gtk::Align::Center,
                                 #[watch]
-                                set_sensitive: model.can_back() && !model.search_open,
-                                connect_clicked => Msg::Back,
+                                set_sensitive: model.can_back_in(WindowId::MAIN),
+                                connect_clicked => Msg::Back(WindowId::MAIN),
                             },
                             gtk::Button {
                                 set_icon_name: "edit-redo-symbolic",
                                 set_tooltip_text: Some("Forward in history (Alt+Shift+Right)"),
                                 set_valign: gtk::Align::Center,
                                 #[watch]
-                                set_sensitive: model.can_forward() && !model.search_open,
-                                connect_clicked => Msg::Forward,
+                                set_sensitive: model.can_forward_in(WindowId::MAIN),
+                                connect_clicked => Msg::Forward(WindowId::MAIN),
                             },
                         },
                     },
@@ -302,9 +278,9 @@ impl SimpleComponent for App {
                         set_tooltip_text: Some("Search (Ctrl+F)"),
                         set_valign: gtk::Align::Center,
                         #[watch]
-                        set_active: model.search_open,
+                        set_active: model.workspace.has_search(WindowId::MAIN),
                         connect_toggled[sender] => move |btn| {
-                            sender.input(Msg::SetSearch(btn.is_active()));
+                            sender.input(Msg::SetSearch(WindowId::MAIN, btn.is_active()));
                         }
                     },
                 },
@@ -318,147 +294,11 @@ impl SimpleComponent for App {
                         set_description: model.error.as_deref(),
                     }
                 } else {
-                    #[name(search_paned)]
-                    gtk::Paned {
-                        set_orientation: gtk::Orientation::Horizontal,
+                    #[local_ref]
+                    workspace_host -> gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
                         set_hexpand: true,
                         set_vexpand: true,
-                        set_wide_handle: true,
-                        add_css_class: "pane-split",
-                        set_resize_start_child: false,
-                        set_resize_end_child: true,
-                        set_shrink_start_child: false,
-                        set_shrink_end_child: true,
-
-                        #[wrap(Some)]
-                        set_start_child = &gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_width_request: SEARCH_MIN_PX,
-                            set_spacing: 8,
-                            set_margin_start: 12,
-                            set_margin_end: 12,
-                            set_margin_top: 12,
-                            set_margin_bottom: 12,
-                            add_css_class: "search-pane",
-                            #[watch]
-                            set_visible: model.search_open,
-
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Horizontal,
-                                set_spacing: 8,
-
-                                #[local_ref]
-                                search_entry -> gtk::SearchEntry {
-                                    #[watch]
-                                    set_placeholder_text: Some(search::placeholder(model.search_scope)),
-                                    set_tooltip_text: Some("Enter stays on the verse. Esc returns. Shift+Enter opens beside."),
-                                    set_hexpand: true,
-                                    connect_search_changed[sender] => move |entry| {
-                                        sender.input(Msg::Search(entry.text().to_string()));
-                                    },
-                                    connect_activate => Msg::SearchActivate,
-                                    connect_stop_search => Msg::SetSearch(false),
-                                },
-
-                                #[local_ref]
-                                search_scope -> gtk::DropDown {
-                                    set_tooltip_text: Some("Search in"),
-                                    set_valign: gtk::Align::Center,
-                                    set_hexpand: false,
-                                }
-                            },
-
-                            gtk::Box {
-                                set_orientation: gtk::Orientation::Horizontal,
-                                set_spacing: 8,
-
-                                #[local_ref]
-                                search_mode_dd -> gtk::DropDown {
-                                    set_tooltip_text: Some("Match"),
-                                    set_hexpand: true,
-                                },
-
-                                #[local_ref]
-                                search_range_dd -> gtk::DropDown {
-                                    set_tooltip_text: Some("Range"),
-                                    set_hexpand: true,
-                                }
-                            },
-
-                            gtk::Label {
-                                #[watch]
-                                set_label: &model.search_status,
-                                set_xalign: 0.0,
-                                set_wrap: true,
-                                add_css_class: "dim-label",
-                            },
-
-                            gtk::Label {
-                                #[watch]
-                                set_label: search::empty_description(
-                                    &model.search_query,
-                                    model.search_scope,
-                                )
-                                .unwrap_or(""),
-                                #[watch]
-                                set_visible: search::empty_description(
-                                    &model.search_query,
-                                    model.search_scope,
-                                )
-                                .is_some(),
-                                set_xalign: 0.0,
-                                set_wrap: true,
-                                add_css_class: "dim-label",
-                            },
-
-                            gtk::ScrolledWindow {
-                                set_policy: (
-                                    gtk::PolicyType::Automatic,
-                                    gtk::PolicyType::Never,
-                                ),
-                                set_propagate_natural_height: true,
-
-                                #[local_ref]
-                                search_chips -> gtk::Box {
-                                    set_orientation: gtk::Orientation::Horizontal,
-                                    set_spacing: 6,
-                                }
-                            },
-
-                            gtk::ScrolledWindow {
-                                #[watch]
-                                set_visible: !model.search_hits.is_empty(),
-                                set_hexpand: true,
-                                set_vexpand: true,
-                                set_policy: (
-                                    gtk::PolicyType::Never,
-                                    gtk::PolicyType::Automatic,
-                                ),
-
-                                #[local_ref]
-                                search_list -> gtk::ListBox {
-                                    set_selection_mode: gtk::SelectionMode::Single,
-                                    set_accessible_role: gtk::AccessibleRole::List,
-                                    connect_row_activated[sender] => move |_, row| {
-                                        sender.input(Msg::OpenHit(row.index()));
-                                    }
-                                }
-                            }
-                        },
-
-                        #[wrap(Some)]
-                        set_end_child = &gtk::Box {
-                            set_orientation: gtk::Orientation::Vertical,
-                            set_hexpand: true,
-                            set_vexpand: true,
-
-                            #[local_ref]
-                            workspace_host -> gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_hexpand: true,
-                                set_vexpand: true,
-                            },
-                        }
                     }
                 },
             }
@@ -476,23 +316,6 @@ impl SimpleComponent for App {
         picker::prepare(&chapter_dropdown, gtk::StringFilterMatchMode::Prefix);
         book_dropdown.update_property(&[gtk::accessible::Property::Label("Book")]);
         chapter_dropdown.update_property(&[gtk::accessible::Property::Label("Chapter")]);
-        let search_list = gtk::ListBox::new();
-        let search_entry = gtk::SearchEntry::new();
-        let search_chips = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let scope_labels = SearchScope::ALL.map(SearchScope::label);
-        let search_scope = gtk::DropDown::from_strings(&scope_labels);
-        search_scope.set_selected(SearchScope::Kjv.index());
-        search_scope.set_enable_search(false);
-        search_scope.update_property(&[gtk::accessible::Property::Label("Search in")]);
-        let mode_labels = MatchMode::ALL.map(MatchMode::label);
-        let search_mode_dd = gtk::DropDown::from_strings(&mode_labels);
-        search_mode_dd.set_enable_search(false);
-        search_mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
-        let range_labels = search::SearchRange::ALL.map(search::SearchRange::label);
-        let search_range_dd = gtk::DropDown::from_strings(&range_labels);
-        search_range_dd.set_selected(search::SearchRange::All.index());
-        search_range_dd.set_enable_search(false);
-        search_range_dd.update_property(&[gtk::accessible::Property::Label("Range")]);
         let workspace_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
         workspace_host.set_hexpand(true);
         workspace_host.set_vexpand(true);
@@ -532,8 +355,6 @@ impl SimpleComponent for App {
                     Some(e),
                 ),
             };
-        search_mode_dd.set_selected(search_mode.index());
-
         let goto_entry = gtk::Entry::new();
         goto_entry.set_placeholder_text(Some("John 3:16"));
         goto_entry.set_tooltip_text(Some(
@@ -547,7 +368,7 @@ impl SimpleComponent for App {
         goto_popover.set_child(Some(&goto_entry));
         let goto_sender = sender.clone();
         goto_entry.connect_activate(move |entry| {
-            goto_sender.input(Msg::GoTo(entry.text().to_string()));
+            goto_sender.input(Msg::GoTo(WindowId::MAIN, entry.text().to_string()));
         });
         let goto_keys = gtk::EventControllerKey::new();
         goto_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -556,7 +377,10 @@ impl SimpleComponent for App {
         goto_keys.connect_key_pressed(move |_, keyval, _, mods| {
             let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             if shift && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
-                goto_shift_sender.input(Msg::GoToBeside(goto_entry_shift.text().to_string()));
+                goto_shift_sender.input(Msg::GoToBeside(
+                    WindowId::MAIN,
+                    goto_entry_shift.text().to_string(),
+                ));
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -709,31 +533,9 @@ impl SimpleComponent for App {
             book_dropdown: book_dropdown.clone(),
             chapter_dropdown: chapter_dropdown.clone(),
             picker_syncing: Rc::new(Cell::new(false)),
-            search_open: false,
-            search_query: String::new(),
-            search_scope: SearchScope::Kjv,
             search_mode,
-            search_range: search::SearchRange::All,
-            search_chip: search::BookChip::Auto,
-            search_hits: Vec::new(),
-            search_status: search::status("", 0, 0, SearchScope::Kjv),
-            search_total: 0,
-            search_tokens: Vec::new(),
-            search_strongs: None,
-            search_chosen: None,
-            search_book_counts: Vec::new(),
-            search_origin: None,
             search_mark: None,
-            search_gen: Rc::new(Cell::new(0)),
-            search_hold: Rc::new(Cell::new(false)),
-            search_groups: Rc::new(RefCell::new(Vec::new())),
             search_db_path,
-            search_list: search_list.clone(),
-            search_paned: None,
-            search_position: Rc::new(Cell::new(0)),
-            search_entry: search_entry.clone(),
-            search_chips: search_chips.clone(),
-            search_range_dd: search_range_dd.clone(),
             dict_modules,
             font_size,
             column_width: loaded_column_width(),
@@ -747,7 +549,7 @@ impl SimpleComponent for App {
             workspace: Workspace::new(at),
             hosted: HashMap::new(),
             shell: None,
-            detached: Rc::new(RefCell::new(Vec::new())),
+            sides: Rc::new(RefCell::new(Vec::new())),
             menu_tab: Rc::new(Cell::new(None)),
             goto_entry: goto_entry.clone(),
             goto_popover: goto_popover.clone(),
@@ -761,9 +563,6 @@ impl SimpleComponent for App {
         picker::fill_books(&model.book_dropdown, &model.books);
 
         let widgets = view_output!();
-        model.search_paned = Some(widgets.search_paned.clone());
-        shell::mark_split_handle(&widgets.search_paned);
-        model.track_search_split();
         let action_group = group.into_action_group();
         action_group.add_action(&dict_action);
         action_group.add_action(&highlight_action);
@@ -778,27 +577,9 @@ impl SimpleComponent for App {
 
         if model.error.is_none() {
             let shell = SplitShell::new();
-            let mains = MainViews {
-                left: shell.left.view.clone(),
-                right: shell.right.view.clone(),
-            };
-            let menu = shell::tab_menu_model();
-            wire_tab_view(
-                &mains.left,
-                mains.clone(),
-                sender.input_sender().clone(),
-                model.detached.clone(),
-                model.actions.clone(),
-                &menu,
-            );
-            wire_tab_view(
-                &mains.right,
-                mains.clone(),
-                sender.input_sender().clone(),
-                model.detached.clone(),
-                model.actions.clone(),
-                &menu,
-            );
+            let ctx = model.wire_ctx();
+            wire_host(&shell.left, WindowId::MAIN, Pane::Left, &ctx);
+            wire_host(&shell.right, WindowId::MAIN, Pane::Right, &ctx);
             workspace_host.append(&shell.paned);
             model.shell = Some(shell);
             let id = model.workspace.focused();
@@ -815,7 +596,7 @@ impl SimpleComponent for App {
             let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
             let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             if ctrl && (keyval == gtk::gdk::Key::f || keyval == gtk::gdk::Key::F) {
-                sender_keys.input(Msg::SetSearch(true));
+                sender_keys.input(Msg::SetSearch(WindowId::MAIN, true));
                 return glib::Propagation::Stop;
             }
             if keyval == gtk::gdk::Key::Escape {
@@ -823,7 +604,7 @@ impl SimpleComponent for App {
                     goto_popover_keys.popdown();
                     return glib::Propagation::Stop;
                 }
-                sender_keys.input(Msg::SetSearch(false));
+                sender_keys.input(Msg::Escape(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if ctrl && (keyval == gtk::gdk::Key::l || keyval == gtk::gdk::Key::L) {
@@ -833,27 +614,27 @@ impl SimpleComponent for App {
                 return glib::Propagation::Stop;
             }
             if alt && shift && keyval == gtk::gdk::Key::Left {
-                sender_keys.input(Msg::Back);
+                sender_keys.input(Msg::Back(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if alt && shift && keyval == gtk::gdk::Key::Right {
-                sender_keys.input(Msg::Forward);
+                sender_keys.input(Msg::Forward(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if alt && keyval == gtk::gdk::Key::Left {
-                sender_keys.input(Msg::PrevChapter);
+                sender_keys.input(Msg::PrevChapter(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if alt && keyval == gtk::gdk::Key::Right {
-                sender_keys.input(Msg::NextChapter);
+                sender_keys.input(Msg::NextChapter(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if keyval == gtk::gdk::Key::Back {
-                sender_keys.input(Msg::Back);
+                sender_keys.input(Msg::Back(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if keyval == gtk::gdk::Key::Forward {
-                sender_keys.input(Msg::Forward);
+                sender_keys.input(Msg::Forward(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if ctrl
@@ -880,148 +661,16 @@ impl SimpleComponent for App {
         mouse_back.set_button(8);
         let back_sender = sender.clone();
         mouse_back.connect_pressed(move |_, _, _, _| {
-            back_sender.input(Msg::Back);
+            back_sender.input(Msg::Back(WindowId::MAIN));
         });
         root.add_controller(mouse_back);
         let mouse_forward = gtk::GestureClick::new();
         mouse_forward.set_button(9);
         let forward_sender = sender.clone();
         mouse_forward.connect_pressed(move |_, _, _, _| {
-            forward_sender.input(Msg::Forward);
+            forward_sender.input(Msg::Forward(WindowId::MAIN));
         });
         root.add_controller(mouse_forward);
-
-        let down = gtk::EventControllerKey::new();
-        let list = model.search_list.clone();
-        down.connect_key_pressed(move |_, keyval, _, _| {
-            if keyval == gtk::gdk::Key::Down || keyval == gtk::gdk::Key::KP_Down {
-                if let Some(row) = list.row_at_index(0) {
-                    list.select_row(Some(&row));
-                    row.grab_focus();
-                }
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        model.search_entry.add_controller(down);
-
-        let search_shift = gtk::EventControllerKey::new();
-        search_shift.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let search_shift_sender = sender.clone();
-        let search_list_shift = model.search_list.clone();
-        search_shift.connect_key_pressed(move |_, keyval, _, mods| {
-            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-            if shift && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
-                let idx = search_list_shift
-                    .selected_row()
-                    .map(|r| r.index())
-                    .unwrap_or(0);
-                search_shift_sender.input(Msg::OpenHitBeside(idx));
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        model.search_entry.add_controller(search_shift);
-
-        let list_shift = gtk::EventControllerKey::new();
-        list_shift.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let list_shift_sender = sender.clone();
-        list_shift.connect_key_pressed(move |_, keyval, _, mods| {
-            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-            if shift && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
-                list_shift_sender.input(Msg::OpenHitBeside(-1));
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        model.search_list.add_controller(list_shift);
-
-        let scope_sender = sender.clone();
-        search_scope.connect_selected_notify(move |dd| {
-            let pos = dd.selected();
-            if pos == gtk::INVALID_LIST_POSITION {
-                return;
-            }
-            scope_sender.input(Msg::SetSearchScope(SearchScope::from_index(pos)));
-        });
-        let mode_sender = sender.clone();
-        search_mode_dd.connect_selected_notify(move |dd| {
-            let pos = dd.selected();
-            if pos == gtk::INVALID_LIST_POSITION {
-                return;
-            }
-            mode_sender.input(Msg::SetSearchMode(MatchMode::from_index(pos)));
-        });
-        let range_sender = sender.clone();
-        search_range_dd.connect_selected_notify(move |dd| {
-            let pos = dd.selected();
-            if pos == gtk::INVALID_LIST_POSITION {
-                return;
-            }
-            range_sender.input(Msg::SetSearchRange(search::SearchRange::from_index(pos)));
-        });
-
-        let groups = model.search_groups.clone();
-        model.search_list.set_header_func(move |row, before| {
-            let groups = groups.borrow();
-            let idx = row.index();
-            if idx < 0 {
-                row.set_header(None::<&gtk::Widget>);
-                return;
-            }
-            let Some(group) = groups.get(idx as usize) else {
-                row.set_header(None::<&gtk::Widget>);
-                return;
-            };
-            let prev = before.and_then(|b| {
-                let prev_idx = b.index();
-                (prev_idx >= 0)
-                    .then(|| groups.get(prev_idx as usize))
-                    .flatten()
-            });
-            if prev.is_some_and(|p| p == group) {
-                row.set_header(None::<&gtk::Widget>);
-                return;
-            }
-            let label = gtk::Label::new(Some(group));
-            label.set_xalign(0.0);
-            label.add_css_class("heading");
-            label.set_margin_top(10);
-            label.set_margin_bottom(2);
-            label.set_margin_start(12);
-            row.set_header(Some(&label));
-        });
-        let preview_sender = sender.clone();
-        let preview_hold = model.search_hold.clone();
-        model.search_list.connect_row_selected(move |_, row| {
-            if preview_hold.get() {
-                return;
-            }
-            let Some(row) = row else { return };
-            preview_sender.input(Msg::PreviewHit(row.index()));
-        });
-        if let Some(scroll) = model
-            .search_list
-            .parent()
-            .and_downcast::<gtk::ScrolledWindow>()
-        {
-            let more = sender.clone();
-            scroll.connect_edge_reached(move |_, pos| {
-                if pos == gtk::PositionType::Bottom {
-                    more.input(Msg::SearchMore);
-                }
-            });
-        }
-        let list_esc = gtk::EventControllerKey::new();
-        let esc_sender = sender.clone();
-        list_esc.connect_key_pressed(move |_, keyval, _, _| {
-            if keyval == gtk::gdk::Key::Escape {
-                esc_sender.input(Msg::SetSearch(false));
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        model.search_list.add_controller(list_esc);
 
         let book_sender = sender.clone();
         let book_syncing = model.picker_syncing.clone();
@@ -1033,7 +682,7 @@ impl SimpleComponent for App {
             if pos == gtk::INVALID_LIST_POSITION {
                 return;
             }
-            book_sender.input(Msg::SelectBookIndex(pos));
+            book_sender.input(Msg::SelectBookIndex(WindowId::MAIN, pos));
         });
         let chapter_sender = sender.clone();
         let chapter_syncing = model.picker_syncing.clone();
@@ -1045,7 +694,7 @@ impl SimpleComponent for App {
             if pos == gtk::INVALID_LIST_POSITION {
                 return;
             }
-            chapter_sender.input(Msg::SelectChapterIndex(pos));
+            chapter_sender.input(Msg::SelectChapterIndex(WindowId::MAIN, pos));
         });
 
         ComponentParts { model, widgets }
@@ -1053,14 +702,15 @@ impl SimpleComponent for App {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
-            Msg::SelectBookIndex(idx) => {
+            Msg::SelectBookIndex(window, idx) => {
                 let Some(id) = picker::book_id_at(&self.books, idx) else {
                     return;
                 };
-                if self.at().book == id {
+                if self.at_in(window).book == id {
                     return;
                 }
-                self.go(
+                self.go_in(
+                    window,
                     Ref {
                         book: id,
                         chapter: 1,
@@ -1069,164 +719,150 @@ impl SimpleComponent for App {
                     false,
                 );
             }
-            Msg::SelectChapterIndex(idx) => {
+            Msg::SelectChapterIndex(window, idx) => {
                 let Some(chapter) = picker::chapter_from_index(idx) else {
                     return;
                 };
-                if self.at().chapter == chapter {
+                let at = self.at_in(window);
+                if at.chapter == chapter {
                     return;
                 }
-                self.go(
+                self.go_in(
+                    window,
                     Ref {
-                        book: self.at().book,
+                        book: at.book,
                         chapter,
                         verse: 1,
                     },
                     false,
                 );
             }
-            Msg::PrevChapter => {
-                if self.search_open {
-                    return;
-                }
+            Msg::PrevChapter(window) => {
                 if let Some(conn) = &self.conn {
-                    if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at()) {
-                        self.go(at, false);
+                    if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at_in(window)) {
+                        self.go_in(window, at, false);
                     }
                 }
             }
-            Msg::NextChapter => {
-                if self.search_open {
-                    return;
-                }
+            Msg::NextChapter(window) => {
                 if let Some(conn) = &self.conn {
-                    if let Ok(at) = nav::next_chapter(conn, &self.books, self.at()) {
-                        self.go(at, false);
+                    if let Ok(at) = nav::next_chapter(conn, &self.books, self.at_in(window)) {
+                        self.go_in(window, at, false);
                     }
                 }
             }
-            Msg::GoTo(text) => {
+            Msg::GoTo(window, text) => {
                 let text = text.trim();
                 if text.is_empty() {
-                    self.goto_popover.popdown();
+                    self.popdown_goto(window);
                     return;
                 }
-                if let Some(at) = nav::parse_ref(text, &self.books, self.at()) {
-                    self.search_open = false;
-                    self.go(at, true);
-                    self.goto_popover.popdown();
+                if let Some(at) = nav::parse_ref(text, &self.books, self.at_in(window)) {
+                    self.go_in(window, at, true);
+                    self.popdown_goto(window);
                 }
             }
-            Msg::GoToBeside(text) => {
+            Msg::GoToBeside(window, text) => {
                 let text = text.trim();
                 if text.is_empty() {
-                    self.goto_popover.popdown();
+                    self.popdown_goto(window);
                     return;
                 }
-                if let Some(at) = nav::parse_ref(text, &self.books, self.at()) {
-                    self.search_open = false;
-                    self.go_beside(at);
-                    self.goto_popover.popdown();
+                if let Some(at) = nav::parse_ref(text, &self.books, self.at_in(window)) {
+                    self.go_beside_in(window, at);
+                    self.popdown_goto(window);
                 }
             }
-            Msg::SetSearch(open) => {
-                if self.error.is_some() {
-                    return;
+            Msg::Escape(window) => self.escape(window),
+            Msg::SetSearch(window, open) => self.set_search(window, open),
+            Msg::Search(id, query) => {
+                if let Some(pane) = self.search_mut(id) {
+                    pane.query = query;
+                    pane.chip = search::BookChip::Auto;
                 }
-                if self.search_open == open {
-                    if open {
-                        self.focus_search();
+                self.schedule_search(id, false);
+            }
+            Msg::SetSearchScope(id, scope) => {
+                let changed = self.search(id).is_some_and(|pane| pane.scope != scope);
+                if changed {
+                    if let Some(pane) = self.search_mut(id) {
+                        pane.scope = scope;
+                        pane.chip = search::BookChip::Auto;
+                        pane.sync_placeholder();
+                        pane.range_dd
+                            .set_visible(search::SearchRange::applies(scope));
                     }
-                    return;
+                    self.schedule_search(id, false);
                 }
-                if open {
-                    self.search_origin = Some(self.at());
-                    self.search_open = true;
-                    self.reveal_search_split();
-                    self.focus_search();
-                    if !self.search_query.trim().is_empty() {
-                        self.schedule_search(false);
+            }
+            Msg::SetSearchMode(id, mode) => {
+                let changed = self.search(id).is_some_and(|pane| pane.mode != mode);
+                if changed {
+                    if let Some(pane) = self.search_mut(id) {
+                        pane.mode = mode;
+                        pane.chip = search::BookChip::Auto;
                     }
-                } else {
-                    self.close_search(true);
-                }
-            }
-            Msg::Search(query) => {
-                self.search_query = query;
-                self.search_chip = search::BookChip::Auto;
-                self.schedule_search(false);
-            }
-            Msg::SetSearchScope(scope) => {
-                if self.search_scope != scope {
-                    self.search_scope = scope;
-                    self.search_chip = search::BookChip::Auto;
-                    self.sync_range_menu();
-                    self.schedule_search(false);
-                }
-            }
-            Msg::SetSearchMode(mode) => {
-                if self.search_mode != mode {
                     self.search_mode = mode;
-                    self.search_chip = search::BookChip::Auto;
                     self.save_state();
-                    self.schedule_search(false);
+                    self.schedule_search(id, false);
                 }
             }
-            Msg::SetSearchRange(range) => {
-                if self.search_range != range {
-                    self.search_range = range;
-                    self.search_chip = search::BookChip::Auto;
-                    self.schedule_search(false);
+            Msg::SetSearchRange(id, range) => {
+                let changed = self.search(id).is_some_and(|pane| pane.range != range);
+                if changed {
+                    if let Some(pane) = self.search_mut(id) {
+                        pane.range = range;
+                        pane.chip = search::BookChip::Auto;
+                    }
+                    self.schedule_search(id, false);
                 }
             }
-            Msg::SelectSearchBook(book) => {
-                self.search_chip = match book {
-                    Some(id) => search::BookChip::Book(id),
-                    None => search::BookChip::AllBooks,
-                };
-                self.schedule_search(false);
-            }
-            Msg::SearchReady(gen, outcome) => {
-                if gen != self.search_gen.get() {
-                    return;
+            Msg::SelectSearchBook(id, book) => {
+                if let Some(pane) = self.search_mut(id) {
+                    pane.chip = match book {
+                        Some(book) => search::BookChip::Book(book),
+                        None => search::BookChip::AllBooks,
+                    };
                 }
-                self.apply_outcome(outcome);
+                self.schedule_search(id, false);
             }
-            Msg::SearchMore => {
-                let shown = self
-                    .search_hits
+            Msg::SearchReady(id, gen, outcome) => {
+                if self.search(id).is_some_and(|pane| pane.gen.get() == gen) {
+                    self.apply_outcome(id, outcome);
+                }
+            }
+            Msg::SearchMore(id) => {
+                let Some(pane) = self.search(id) else { return };
+                let shown = pane
+                    .hits
                     .iter()
                     .filter(|hit| search::hit_ref(hit).is_some())
                     .count() as i64;
-                if self.search_query.trim().is_empty() || shown >= self.search_total {
+                if pane.query.trim().is_empty() || shown >= pane.total {
                     return;
                 }
-                self.schedule_search(true);
+                self.schedule_search(id, true);
             }
-            Msg::PreviewHit(idx) => {
-                self.preview_hit(idx);
-            }
-            Msg::SearchActivate => {
+            Msg::PreviewHit(id, idx) => self.preview_hit(id, idx),
+            Msg::SearchActivate(id) => {
                 let idx = self
-                    .search_list
-                    .selected_row()
-                    .map(|r| r.index())
+                    .search(id)
+                    .and_then(|pane| pane.list.selected_row())
+                    .map(|row| row.index())
                     .unwrap_or(0);
-                self.open_hit(idx, false, true);
+                self.open_hit(id, idx, false, true);
             }
-            Msg::OpenHit(idx) => {
-                self.open_hit(idx, false, false);
-            }
-            Msg::OpenHitBeside(idx) => {
+            Msg::OpenHit(id, idx) => self.open_hit(id, idx, false, false),
+            Msg::OpenHitBeside(id, idx) => {
                 let idx = if idx < 0 {
-                    self.search_list
-                        .selected_row()
-                        .map(|r| r.index())
+                    self.search(id)
+                        .and_then(|pane| pane.list.selected_row())
+                        .map(|row| row.index())
                         .unwrap_or(0)
                 } else {
                     idx
                 };
-                self.open_hit(idx, true, true);
+                self.open_hit(id, idx, true, true);
             }
             Msg::ToggleMhc => {
                 if let Some(id) = self.workspace.find_kind(|k| k.is_mhc()) {
@@ -1246,17 +882,14 @@ impl SimpleComponent for App {
                 let Some(at) = self.tsk_widgets().and_then(|w| tsk::xref_at(w, idx)) else {
                     return;
                 };
-                self.search_open = false;
                 self.go(at, true);
             }
             Msg::OpenTskDest(at) => {
                 self.popdown_passage_popovers();
-                self.search_open = false;
                 self.go(at, true);
             }
             Msg::OpenTskDestBeside(at) => {
                 self.popdown_passage_popovers();
-                self.search_open = false;
                 self.go_beside(at);
             }
             Msg::OpenStrongsCode(code) => {
@@ -1304,14 +937,10 @@ impl SimpleComponent for App {
                 let Some(at) = self.occ_widgets().and_then(|w| occurrences::hit_at(w, idx)) else {
                     return;
                 };
-                self.search_open = false;
                 self.go(at, true);
             }
-            Msg::Back => {
-                if self.search_open {
-                    return;
-                }
-                let Some(id) = self.workspace.focused_passage_id() else {
+            Msg::Back(window) => {
+                let Some(id) = self.workspace.focused_passage_in(window) else {
                     return;
                 };
                 let Some(at) = self.passage_mut(id).and_then(|p| p.history.back()) else {
@@ -1319,11 +948,8 @@ impl SimpleComponent for App {
                 };
                 self.apply_passage_ref(id, at, true, false);
             }
-            Msg::Forward => {
-                if self.search_open {
-                    return;
-                }
-                let Some(id) = self.workspace.focused_passage_id() else {
+            Msg::Forward(window) => {
+                let Some(id) = self.workspace.focused_passage_in(window) else {
                     return;
                 };
                 let Some(at) = self.passage_mut(id).and_then(|p| p.history.forward()) else {
@@ -1367,9 +993,7 @@ impl SimpleComponent for App {
                 }
                 self.paragraphs = on;
                 self.save_state();
-                if !self.search_open {
-                    self.reload_all_passages(false);
-                }
+                self.reload_all_passages(false);
             }
             Msg::OpenBookmarks => self.ensure_marks("bookmarks"),
             Msg::OpenNotes => self.ensure_marks("notes"),
@@ -1378,7 +1002,6 @@ impl SimpleComponent for App {
                     .marks_widgets()
                     .and_then(|w| marks::bookmark_at(w, idx))
                 {
-                    self.search_open = false;
                     self.go(at, true);
                 }
             }
@@ -1390,7 +1013,6 @@ impl SimpleComponent for App {
             }
             Msg::MarksNoteActivated(idx) => {
                 if let Some(at) = self.marks_widgets().and_then(|w| marks::note_at(w, idx)) {
-                    self.search_open = false;
                     self.go(at, true);
                 }
             }
@@ -1473,12 +1095,14 @@ impl SimpleComponent for App {
             Msg::TabClosed(id) => {
                 self.forget_tab(id);
             }
-            Msg::TabAttached { id, pane, detached } => {
-                self.workspace.set_host(id, pane, detached);
-                self.workspace.focus(id);
-                self.collapse_empty_panes();
-                self.sync_shell();
+            Msg::TabAttached { id, window, pane } => {
+                self.workspace.place(id, window, pane);
+                self.collapse_empty(window);
+                self.sync_shells();
             }
+            Msg::SplitTab(id) => self.split_tab(id),
+            Msg::DetachTab(id) => self.detach_tab(id),
+            Msg::WireSide(id) => self.wire_side(id),
             Msg::SetupTabMenu(id) => {
                 self.menu_tab.set(id);
                 let tab = id.and_then(|id| self.workspace.tab(id));
@@ -1510,6 +1134,7 @@ impl SimpleComponent for App {
         }
         self.sync_study_actions();
         self.apply_column_mode();
+        self.sync_shells();
         let _ = sender;
     }
 }
@@ -1521,17 +1146,28 @@ impl App {
             .unwrap_or_else(|| self.workspace.last_at())
     }
 
-    fn can_back(&self) -> bool {
-        self.focused_passage().is_some_and(|p| p.history.can_back())
+    fn at_in(&self, window: WindowId) -> Ref {
+        self.workspace
+            .focused_passage_ref_in(window)
+            .unwrap_or_else(|| self.at())
     }
 
-    fn can_forward(&self) -> bool {
-        self.focused_passage()
+    fn can_back_in(&self, window: WindowId) -> bool {
+        self.workspace
+            .focused_passage_in(window)
+            .and_then(|id| self.passage(id))
+            .is_some_and(|p| p.history.can_back())
+    }
+
+    fn can_forward_in(&self, window: WindowId) -> bool {
+        self.workspace
+            .focused_passage_in(window)
+            .and_then(|id| self.passage(id))
             .is_some_and(|p| p.history.can_forward())
     }
 
-    fn has_history(&self) -> bool {
-        self.can_back() || self.can_forward()
+    fn has_history_in(&self, window: WindowId) -> bool {
+        self.can_back_in(window) || self.can_forward_in(window)
     }
 
     fn passage(&self, id: TabId) -> Option<&PassageView> {
@@ -1600,52 +1236,314 @@ impl App {
         }
     }
 
-    fn schedule_search(&mut self, append: bool) {
-        let next = self.search_gen.get().saturating_add(1);
-        self.search_gen.set(next);
-        let query = self.search_query.clone();
-        let plan = search::plan(
-            &query,
-            &self.books,
-            self.search_origin.unwrap_or_else(|| self.at()),
-            self.search_mode,
-            self.search_range,
-            self.search_chip,
-            self.search_scope,
-        );
+    fn search(&self, id: TabId) -> Option<&search::Pane> {
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Search(pane)) => Some(pane),
+            _ => None,
+        }
+    }
+
+    fn search_mut(&mut self, id: TabId) -> Option<&mut search::Pane> {
+        match self.hosted.get_mut(&id).map(|h| &mut h.content) {
+            Some(TabContent::Search(pane)) => Some(pane),
+            _ => None,
+        }
+    }
+
+    fn window_of(&self, id: TabId) -> WindowId {
+        self.workspace
+            .tab(id)
+            .map(|tab| tab.window)
+            .unwrap_or(WindowId::MAIN)
+    }
+
+    fn escape(&mut self, window: WindowId) {
+        if self.goto_open(window) {
+            self.popdown_goto(window);
+            return;
+        }
+        let Some(id) = self.workspace.find_search(window) else {
+            return;
+        };
+        if self.workspace.focused() == id {
+            self.set_search(window, false);
+        }
+    }
+
+    fn goto_open(&self, window: WindowId) -> bool {
+        if window == WindowId::MAIN {
+            return self.goto_popover.is_visible();
+        }
+        self.sides
+            .borrow()
+            .iter()
+            .any(|side| side.id == window && side.chrome.goto_popover.is_visible())
+    }
+
+    fn popdown_goto(&self, window: WindowId) {
+        if window == WindowId::MAIN {
+            self.goto_popover.popdown();
+            return;
+        }
+        if let Some(side) = self.sides.borrow().iter().find(|side| side.id == window) {
+            side.chrome.goto_popover.popdown();
+        }
+    }
+
+    fn set_search(&mut self, window: WindowId, open: bool) {
+        if self.error.is_some() {
+            return;
+        }
+        if self.workspace.has_search(window) == open {
+            if open {
+                if let Some(id) = self.workspace.find_search(window) {
+                    self.select_tab(id);
+                    self.focus_search(id);
+                }
+            }
+            return;
+        }
+        if open {
+            self.open_search_tab(window);
+        } else if let Some(id) = self.workspace.find_search(window) {
+            self.request_close(id);
+        }
+    }
+
+    fn open_search_tab(&mut self, window: WindowId) {
+        let was_split = self.workspace.is_window_split(window);
+        let at = self.at_in(window);
+        let opened = self.workspace.open_search(window);
+        if opened.created {
+            let mut pane = search::build_pane(self.search_mode);
+            pane.origin = Some(at);
+            self.wire_search(opened.id, &pane);
+            let root = pane.root.clone();
+            self.add_page(opened.id, &root, "Search", TabContent::Search(pane));
+            if !was_split {
+                self.move_tab_beside(opened.id);
+            }
+        } else {
+            self.select_tab(opened.id);
+        }
+        self.focus_search(opened.id);
+    }
+
+    fn wire_search(&self, id: TabId, pane: &search::Pane) {
+        let window = self.window_of(id);
+        let tx = self.msg_tx.clone();
+        pane.entry.connect_search_changed(move |entry| {
+            tx.emit(Msg::Search(id, entry.text().to_string()));
+        });
+        let tx = self.msg_tx.clone();
+        pane.entry.connect_activate(move |_| {
+            tx.emit(Msg::SearchActivate(id));
+        });
+        let tx = self.msg_tx.clone();
+        pane.entry.connect_stop_search(move |_| {
+            tx.emit(Msg::SetSearch(window, false));
+        });
+        let tx = self.msg_tx.clone();
+        pane.list.connect_row_activated(move |_, row| {
+            tx.emit(Msg::OpenHit(id, row.index()));
+        });
+        let tx = self.msg_tx.clone();
+        let hold = pane.hold.clone();
+        pane.list.connect_row_selected(move |_, row| {
+            if hold.get() {
+                return;
+            }
+            let Some(row) = row else { return };
+            tx.emit(Msg::PreviewHit(id, row.index()));
+        });
+        let groups = pane.groups.clone();
+        pane.list.set_header_func(move |row, before| {
+            let groups = groups.borrow();
+            let idx = row.index();
+            if idx < 0 {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let Some(group) = groups.get(idx as usize) else {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            };
+            let prev = before.and_then(|row| {
+                let prev_idx = row.index();
+                (prev_idx >= 0)
+                    .then(|| groups.get(prev_idx as usize))
+                    .flatten()
+            });
+            if prev.is_some_and(|prev| prev == group) {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let label = gtk::Label::new(Some(group));
+            label.set_xalign(0.0);
+            label.add_css_class("heading");
+            label.set_margin_top(10);
+            label.set_margin_bottom(2);
+            label.set_margin_start(12);
+            row.set_header(Some(&label));
+        });
+        if let Some(scroll) = pane.list.parent().and_downcast::<gtk::ScrolledWindow>() {
+            let tx = self.msg_tx.clone();
+            scroll.connect_edge_reached(move |_, pos| {
+                if pos == gtk::PositionType::Bottom {
+                    tx.emit(Msg::SearchMore(id));
+                }
+            });
+        }
+        let tx = self.msg_tx.clone();
+        pane.scope_dd.connect_selected_notify(move |dd| {
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(Msg::SetSearchScope(id, SearchScope::from_index(pos)));
+            }
+        });
+        let tx = self.msg_tx.clone();
+        pane.mode_dd.connect_selected_notify(move |dd| {
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(Msg::SetSearchMode(id, MatchMode::from_index(pos)));
+            }
+        });
+        let tx = self.msg_tx.clone();
+        pane.range_dd.connect_selected_notify(move |dd| {
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(Msg::SetSearchRange(
+                    id,
+                    search::SearchRange::from_index(pos),
+                ));
+            }
+        });
+        let down = gtk::EventControllerKey::new();
+        let list = pane.list.clone();
+        down.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Down || keyval == gtk::gdk::Key::KP_Down {
+                if let Some(row) = list.row_at_index(0) {
+                    list.select_row(Some(&row));
+                    row.grab_focus();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        pane.entry.add_controller(down);
+        let shift = gtk::EventControllerKey::new();
+        shift.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let tx = self.msg_tx.clone();
+        let list = pane.list.clone();
+        shift.connect_key_pressed(move |_, keyval, _, mods| {
+            let shifted = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if shifted && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
+                let idx = list.selected_row().map(|row| row.index()).unwrap_or(0);
+                tx.emit(Msg::OpenHitBeside(id, idx));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        pane.entry.add_controller(shift);
+        let list_shift = gtk::EventControllerKey::new();
+        list_shift.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let tx = self.msg_tx.clone();
+        list_shift.connect_key_pressed(move |_, keyval, _, mods| {
+            let shifted = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if shifted && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
+                tx.emit(Msg::OpenHitBeside(id, -1));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        pane.list.add_controller(list_shift);
+        let esc = gtk::EventControllerKey::new();
+        let tx = self.msg_tx.clone();
+        esc.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Escape {
+                tx.emit(Msg::SetSearch(window, false));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        pane.list.add_controller(esc);
+    }
+
+    fn focus_search(&self, id: TabId) {
+        let Some(entry) = self.search(id).map(|pane| pane.entry.clone()) else {
+            return;
+        };
+        glib::timeout_add_local_once(Duration::from_millis(100), move || {
+            entry.grab_focus();
+        });
+    }
+
+    fn schedule_search(&mut self, id: TabId, append: bool) {
+        let fallback = self.at();
+        let Some((next, query, origin, mode, range, chip, scope, gen_cell)) =
+            self.search_mut(id).map(|pane| {
+                let next = pane.gen.get().saturating_add(1);
+                pane.gen.set(next);
+                (
+                    next,
+                    pane.query.clone(),
+                    pane.origin.unwrap_or(fallback),
+                    pane.mode,
+                    pane.range,
+                    pane.chip,
+                    pane.scope,
+                    pane.gen.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let plan = search::plan(&query, &self.books, origin, mode, range, chip, scope);
         match plan {
             search::Plan::Idle => {
-                self.clear_search_results();
-                self.search_status = search::status("", 0, 0, self.search_scope);
+                self.clear_search_results(id);
+                if let Some(pane) = self.search(id) {
+                    pane.show_status(&search::status("", 0, 0, scope));
+                    pane.sync_empty();
+                }
             }
             search::Plan::Short => {
-                self.clear_search_results();
-                self.search_status = search::short_status().into();
+                self.clear_search_results(id);
+                if let Some(pane) = self.search(id) {
+                    pane.show_status(search::short_status());
+                    pane.sync_empty();
+                }
             }
             search::Plan::Goto(at) => {
-                self.search_hits = vec![search::goto_hit(at, &self.books)];
-                self.search_total = 1;
-                self.search_tokens.clear();
-                self.search_strongs = None;
-                self.search_book_counts.clear();
-                self.search_chosen = None;
-                self.search_status = format!("Go to {}", nav::format_ref(&self.books, at));
-                self.refill_hits(false);
-                self.refill_chips();
+                let hit = search::goto_hit(at, &self.books);
+                let label = format!("Go to {}", nav::format_ref(&self.books, at));
+                if let Some(pane) = self.search_mut(id) {
+                    pane.hits = vec![hit];
+                    pane.total = 1;
+                    pane.tokens.clear();
+                    pane.strongs = None;
+                    pane.counts.clear();
+                    pane.chosen = None;
+                    pane.show_status(&label);
+                    pane.sync_empty();
+                }
+                self.refill_hits(id, false);
+                self.refill_chips(id);
             }
             search::Plan::Ready(mut prepared) => {
                 prepared.db_path = self.search_db_path.clone().unwrap_or_default();
                 prepared.user_path = user_db::user_db_path();
                 let after = if append {
-                    self.search_hits.iter().rev().find_map(|hit| {
-                        let at = search::hit_ref(hit)?;
-                        Some((at.book, at.chapter, at.verse))
+                    self.search(id).and_then(|pane| {
+                        pane.hits.iter().rev().find_map(|hit| {
+                            let at = search::hit_ref(hit)?;
+                            Some((at.book, at.chapter, at.verse))
+                        })
                     })
                 } else {
                     None
                 };
                 let gen = next;
-                let gen_cell = self.search_gen.clone();
                 let tx = self.msg_tx.clone();
                 glib::timeout_add_local_once(Duration::from_millis(150), move || {
                     if gen_cell.get() != gen {
@@ -1654,7 +1552,7 @@ impl App {
                     std::thread::spawn(move || {
                         let outcome = search::execute(&prepared, after, append);
                         glib::MainContext::default().invoke(move || {
-                            tx.emit(Msg::SearchReady(gen, outcome));
+                            tx.emit(Msg::SearchReady(id, gen, outcome));
                         });
                     });
                 });
@@ -1662,67 +1560,78 @@ impl App {
         }
     }
 
-    fn clear_search_results(&mut self) {
-        self.search_hits.clear();
-        self.search_total = 0;
-        self.search_tokens.clear();
-        self.search_strongs = None;
-        self.search_book_counts.clear();
-        self.search_chosen = None;
-        self.refill_hits(false);
-        self.refill_chips();
+    fn clear_search_results(&mut self, id: TabId) {
+        if let Some(pane) = self.search_mut(id) {
+            pane.hits.clear();
+            pane.total = 0;
+            pane.tokens.clear();
+            pane.strongs = None;
+            pane.counts.clear();
+            pane.chosen = None;
+        }
+        self.refill_hits(id, false);
+        self.refill_chips(id);
     }
 
-    fn apply_outcome(&mut self, outcome: search::Outcome) {
+    fn apply_outcome(&mut self, id: TabId, outcome: search::Outcome) {
         let append = outcome.append;
+        let Some(pane) = self.search_mut(id) else {
+            return;
+        };
         if append {
-            self.search_hits.extend(outcome.hits);
+            pane.hits.extend(outcome.hits);
         } else {
-            self.search_hits = outcome.hits;
-            self.search_book_counts = outcome.by_book;
-            self.search_chosen = outcome.chosen_book;
+            pane.hits = outcome.hits;
+            pane.counts = outcome.by_book;
+            pane.chosen = outcome.chosen_book;
         }
-        self.search_total = outcome.total;
-        self.search_tokens = outcome.tokens;
-        self.search_strongs = outcome.strongs;
-        self.maybe_lexicon_row();
-        let shown = self
-            .search_hits
+        pane.total = outcome.total;
+        pane.tokens = outcome.tokens;
+        pane.strongs = outcome.strongs;
+        let scope = pane.scope;
+        let query = pane.query.clone();
+        self.maybe_lexicon_row(id);
+        let Some(pane) = self.search_mut(id) else {
+            return;
+        };
+        let shown = pane
+            .hits
             .iter()
             .filter(|hit| search::hit_ref(hit).is_some())
             .count();
-        self.search_status = search::status(
-            &self.search_query,
-            shown,
-            self.search_total,
-            self.search_scope,
-        );
-        self.refill_hits(append);
+        let total = pane.total;
+        pane.show_status(&search::status(&query, shown, total, scope));
+        pane.sync_empty();
+        let selected = if !append {
+            pane.list.selected_row().map(|row| row.index())
+        } else {
+            None
+        };
+        self.refill_hits(id, append);
         if !append {
-            self.refill_chips();
-            if let Some(row) = self.search_list.selected_row() {
-                self.preview_hit(row.index());
+            self.refill_chips(id);
+            if let Some(idx) = selected {
+                self.preview_hit(id, idx);
             }
         }
     }
 
-    fn maybe_lexicon_row(&mut self) {
-        let Some(code) = self.search_strongs.clone() else {
+    fn maybe_lexicon_row(&mut self, id: TabId) {
+        let Some(pane) = self.search(id) else {
             return;
         };
-        if self
-            .search_hits
-            .iter()
-            .any(|hit| hit.kind == LibraryKind::Lexicon)
-        {
+        let Some(code) = pane.strongs.clone() else {
+            return;
+        };
+        if pane.hits.iter().any(|hit| hit.kind == LibraryKind::Lexicon) {
             return;
         }
-        let shown = self
-            .search_hits
+        let shown = pane
+            .hits
             .iter()
             .filter(|hit| search::hit_ref(hit).is_some())
             .count() as i64;
-        if shown < self.search_total {
+        if shown < pane.total {
             return;
         }
         let module = if code.starts_with('G') {
@@ -1730,63 +1639,65 @@ impl App {
         } else {
             "BDB"
         };
-        if self.dict_modules.iter().any(|m| m.id == module) {
-            self.search_hits.push(search::lexicon_hit(&code, module));
-        }
-    }
-
-    fn refill_hits(&mut self, append: bool) {
-        let hits = if append {
-            let previous = self.search_groups.borrow().len();
-            self.search_hits[previous.min(self.search_hits.len())..].to_vec()
-        } else {
-            self.search_hits.clone()
-        };
-        self.search_hold.set(true);
-        search::refill_list(
-            &self.search_list,
-            &hits,
-            &self.books,
-            self.search_scope,
-            &self.search_tokens,
-            &self.search_groups,
-            append,
-        );
-        self.search_hold.set(false);
-    }
-
-    fn sync_range_menu(&self) {
-        self.search_range_dd
-            .set_visible(search::SearchRange::applies(self.search_scope));
-    }
-
-    fn refill_chips(&self) {
-        while let Some(child) = self.search_chips.first_child() {
-            self.search_chips.remove(&child);
-        }
-        if !search::show_chips(self.search_scope, self.search_strongs.is_some())
-            || self.search_book_counts.len() < 2
+        if self
+            .dict_modules
+            .iter()
+            .any(|module_row| module_row.id == module)
         {
+            if let Some(pane) = self.search_mut(id) {
+                pane.hits.push(search::lexicon_hit(&code, module));
+            }
+        }
+    }
+
+    fn refill_hits(&mut self, id: TabId, append: bool) {
+        let Some(pane) = self.search_mut(id) else {
+            return;
+        };
+        let hits = if append {
+            let previous = pane.groups.borrow().len();
+            pane.hits[previous.min(pane.hits.len())..].to_vec()
+        } else {
+            pane.hits.clone()
+        };
+        let list = pane.list.clone();
+        let groups = pane.groups.clone();
+        let hold = pane.hold.clone();
+        let scope = pane.scope;
+        let tokens = pane.tokens.clone();
+        hold.set(true);
+        search::refill_list(&list, &hits, &self.books, scope, &tokens, &groups, append);
+        hold.set(false);
+    }
+
+    fn refill_chips(&self, id: TabId) {
+        let Some(pane) = self.search(id) else {
+            return;
+        };
+        while let Some(child) = pane.chips.first_child() {
+            pane.chips.remove(&child);
+        }
+        if !search::show_chips(pane.scope, pane.strongs.is_some()) || pane.counts.len() < 2 {
             return;
         }
         let sender = self.msg_tx.clone();
-        if self.search_chosen.is_some() {
+        if pane.chosen.is_some() {
             let all = gtk::ToggleButton::with_label("All");
             all.add_css_class("flat");
             all.set_active(false);
             let tx = sender.clone();
             all.connect_clicked(move |btn| {
                 if btn.is_active() {
-                    tx.emit(Msg::SelectSearchBook(None));
+                    tx.emit(Msg::SelectSearchBook(id, None));
                 }
             });
-            self.search_chips.append(&all);
+            pane.chips.append(&all);
         }
         let mut leader: Option<gtk::ToggleButton> = None;
-        for count in &self.search_book_counts {
+        for count in &pane.counts {
             let button = gtk::ToggleButton::with_label(&search::chip_text(&self.books, count));
             button.add_css_class("flat");
-            button.set_active(Some(count.book) == self.search_chosen);
+            button.set_active(Some(count.book) == pane.chosen);
             if let Some(first) = &leader {
                 button.set_group(Some(first));
             } else {
@@ -1796,39 +1707,44 @@ impl App {
             let book = count.book;
             button.connect_clicked(move |btn| {
                 if btn.is_active() {
-                    tx.emit(Msg::SelectSearchBook(Some(book)));
+                    tx.emit(Msg::SelectSearchBook(id, Some(book)));
                 }
             });
-            self.search_chips.append(&button);
+            pane.chips.append(&button);
         }
     }
 
-    fn preview_hit(&mut self, idx: i32) {
-        if self.search_hold.get() {
+    fn preview_hit(&mut self, id: TabId, idx: i32) {
+        if self.search(id).is_some_and(|pane| pane.hold.get()) {
             return;
         }
         let Ok(idx) = usize::try_from(idx) else {
             return;
         };
-        let Some(hit) = self.search_hits.get(idx) else {
+        let Some(hit) = self.search(id).and_then(|pane| pane.hits.get(idx).cloned()) else {
             return;
         };
-        let Some(at) = search::hit_ref(hit) else {
+        let Some(at) = search::hit_ref(&hit) else {
             return;
         };
+        let tokens = self
+            .search(id)
+            .map(|pane| pane.tokens.clone())
+            .unwrap_or_default();
+        let strongs = self.search(id).and_then(|pane| pane.strongs.clone());
         self.search_mark = Some(SearchMark {
             at,
-            tokens: self.search_tokens.clone(),
-            strongs: self.search_strongs.clone(),
+            tokens,
+            strongs,
         });
-        self.preview_at(at);
+        self.preview_at_in(self.window_of(id), at);
     }
 
-    fn preview_at(&mut self, at: Ref) {
-        let id = match self.workspace.focused_passage_id() {
+    fn preview_at_in(&mut self, window: WindowId, at: Ref) {
+        let id = match self.workspace.focused_passage_in(window) {
             Some(id) => id,
             None => {
-                let opened = self.workspace.open_passage(at);
+                let opened = self.workspace.open_passage_in(window, at);
                 self.spawn_passage(opened.id, at);
                 opened.id
             }
@@ -1854,92 +1770,80 @@ impl App {
         self.apply_passage_ref(id, at, true, false);
     }
 
-    fn close_search(&mut self, restore: bool) {
-        self.search_open = false;
-        self.search_gen.set(self.search_gen.get().saturating_add(1));
-        if restore {
-            self.search_mark = None;
-            if let Some(at) = self.search_origin.take() {
-                if let Some(id) = self.workspace.focused_passage_id() {
-                    self.apply_passage_ref(id, at, true, false);
-                }
-            }
-        } else {
-            self.search_origin = None;
-        }
-    }
-
-    fn open_hit(&mut self, idx: i32, beside: bool, dismiss: bool) {
+    fn open_hit(&mut self, id: TabId, idx: i32, beside: bool, dismiss: bool) {
         let Ok(idx) = usize::try_from(idx) else {
             return;
         };
-        let Some(hit) = self.search_hits.get(idx) else {
+        let Some(hit) = self.search(id).and_then(|pane| pane.hits.get(idx).cloned()) else {
             return;
         };
-        let kind = hit.kind;
-        let module = hit.module.clone();
-        let headword = hit.headword.clone();
-        let at = search::hit_ref(hit);
+        let window = self.window_of(id);
+        let at = search::hit_ref(&hit);
         if let Some(at) = at {
+            let tokens = self
+                .search(id)
+                .map(|pane| pane.tokens.clone())
+                .unwrap_or_default();
+            let strongs = self.search(id).and_then(|pane| pane.strongs.clone());
             self.search_mark = Some(SearchMark {
                 at,
-                tokens: self.search_tokens.clone(),
-                strongs: self.search_strongs.clone(),
+                tokens,
+                strongs,
             });
         }
         if dismiss {
-            self.search_origin = None;
-            self.search_open = false;
+            if let Some(pane) = self.search_mut(id) {
+                pane.origin = None;
+            }
+            self.request_close(id);
         }
-        match kind {
+        match hit.kind {
             LibraryKind::Verse | LibraryKind::Note => {
-                let Some(at) = at else {
-                    return;
-                };
+                let Some(at) = at else { return };
                 if !dismiss {
-                    self.preview_at(at);
+                    self.preview_at_in(window, at);
                 } else if beside {
-                    self.go_beside(at);
+                    self.go_beside_in(window, at);
                 } else {
-                    self.go(at, true);
+                    self.go_in(window, at, true);
                 }
             }
             LibraryKind::Commentary => {
-                let Some(at) = at else {
-                    return;
-                };
+                let Some(at) = at else { return };
                 if dismiss {
-                    self.go(at, true);
+                    self.go_in(window, at, true);
                 } else {
-                    self.preview_at(at);
+                    self.preview_at_in(window, at);
                 }
-                if module == "TSK" {
+                if hit.module == "TSK" {
                     self.ensure_tsk();
                 } else {
                     self.ensure_mhc();
                 }
             }
             LibraryKind::Dictionary | LibraryKind::Topic | LibraryKind::Lexicon => {
-                let Some(headword) = headword.as_deref() else {
+                let Some(headword) = hit.headword.as_deref() else {
                     return;
                 };
-                self.open_library(&module, Some(headword));
+                self.open_library(&hit.module, Some(headword));
             }
         }
     }
 
-    fn focus_search(&self) {
-        let entry = self.search_entry.clone();
-        glib::timeout_add_local_once(Duration::from_millis(100), move || {
-            entry.grab_focus();
-        });
+    fn go(&mut self, at: Ref, highlight: bool) {
+        let window = self
+            .workspace
+            .focused_tab()
+            .map(|tab| tab.window)
+            .unwrap_or(WindowId::MAIN);
+        self.go_in(window, at, highlight);
     }
 
-    fn go(&mut self, at: Ref, highlight: bool) {
-        let id = match self.workspace.focused_passage_id() {
+    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) {
+        let id = match self.workspace.focused_passage_in(window) {
             Some(id) => id,
             None => {
-                let opened = self.workspace.open_passage(at);
+                let opened = self.workspace.open_passage_in(window, at);
                 self.spawn_passage(opened.id, at);
                 opened.id
             }
@@ -1948,9 +1852,18 @@ impl App {
     }
 
     fn go_beside(&mut self, at: Ref) {
+        let window = self
+            .workspace
+            .focused_tab()
+            .map(|tab| tab.window)
+            .unwrap_or(WindowId::MAIN);
+        self.go_beside_in(window, at);
+    }
+
+    fn go_beside_in(&mut self, window: WindowId, at: Ref) {
         let from = self
             .workspace
-            .focused_passage_id()
+            .focused_passage_in(window)
             .unwrap_or_else(|| self.workspace.focused());
         let opened = self.workspace.open_passage_beside(from, at);
         self.spawn_passage(opened.id, at);
@@ -2012,23 +1925,12 @@ impl App {
         }
     }
 
-    /// Column edges belong to a chapter that fills the window by itself.
-    /// A split or the search list is resized by the divider between the two.
+    /// Column edges belong to a chapter that fills its window by itself.
     fn column_resize_for(&self, id: TabId) -> bool {
-        let Some(shell) = &self.shell else {
+        let Some(tab) = self.workspace.tab(id) else {
             return true;
         };
-        let Some(view) = self.view_holding(id) else {
-            return true;
-        };
-        let in_main = view == shell.left.view || view == shell.right.view;
-        if !in_main {
-            return true;
-        }
-        if self.search_open {
-            return false;
-        }
-        shell.right.view.n_pages() == 0
+        tab.kind.is_passage() && !self.workspace.is_window_split(tab.window)
     }
 
     fn apply_column_mode(&self) {
@@ -2039,39 +1941,6 @@ impl App {
                 passage.set_column_resize(on);
             }
         }
-    }
-
-    fn track_search_split(&self) {
-        let Some(paned) = self.search_paned.clone() else {
-            return;
-        };
-        let saved = self.search_position.clone();
-        paned.connect_position_notify(move |paned| {
-            let pos = paned.position();
-            let shown = paned.start_child().is_some_and(|child| child.is_visible());
-            if shown && pos >= SEARCH_MIN_PX {
-                saved.set(pos);
-            }
-        });
-    }
-
-    fn reveal_search_split(&self) {
-        let Some(paned) = self.search_paned.clone() else {
-            return;
-        };
-        let saved = self.search_position.get();
-        glib::idle_add_local_once(move || {
-            let width = paned.width();
-            let mut pos = if saved >= SEARCH_MIN_PX {
-                saved
-            } else {
-                SEARCH_DEFAULT_PX
-            };
-            if width > SEARCH_MIN_PX * 2 {
-                pos = pos.clamp(SEARCH_MIN_PX, width - SEARCH_MIN_PX);
-            }
-            paned.set_position(pos);
-        });
     }
 
     fn recolor_passages(&self) {
@@ -2498,9 +2367,14 @@ impl App {
         title: &str,
         content: TabContent,
     ) {
-        let Some(shell) = &self.shell else { return };
-        let pane = self.workspace.tab(id).map(|t| t.pane).unwrap_or(Pane::Left);
-        let view = shell.host(pane).view.clone();
+        let (window, pane) = self
+            .workspace
+            .tab(id)
+            .map(|tab| (tab.window, tab.pane))
+            .unwrap_or((WindowId::MAIN, Pane::Left));
+        let Some(view) = self.view_in(window, pane) else {
+            return;
+        };
         let page = view.append(child);
         page.set_keyword(&id.keyword());
         page.set_title(title);
@@ -2513,7 +2387,7 @@ impl App {
         if let Some(h) = self.hosted.get(&id) {
             view.set_selected_page(&h.page);
         }
-        self.sync_shell();
+        self.sync_shells();
     }
 
     fn sync_tab_title(&self, id: TabId) {
@@ -2536,6 +2410,7 @@ impl App {
                 MarksPage::Bookmarks => "Bookmarks".into(),
             },
             TabKind::Occurrences { code } => format!("{code} in the KJV"),
+            TabKind::Search => "Search".into(),
         };
         hosted.page.set_title(&title);
         if let Some(at) = tab.kind.at() {
@@ -2582,18 +2457,35 @@ impl App {
     }
 
     fn forget_tab(&mut self, id: TabId) {
+        let restore = self.search(id).and_then(|pane| pane.origin);
+        let window = self.window_of(id);
         if self.hosted.remove(&id).is_none() {
             return;
         }
-        match self.workspace.close(id) {
-            CloseOutcome::Closed => {}
-            CloseOutcome::Replaced { id: new_id, at } => {
-                self.spawn_passage(new_id, at);
+        let _ = self.workspace.close(id);
+        if let Some(at) = restore {
+            self.search_mark = None;
+            if let Some(passage) = self.workspace.focused_passage_in(window) {
+                self.apply_passage_ref(passage, at, true, false);
             }
         }
-        self.collapse_empty_panes();
-        self.sync_shell();
+        self.collapse_empty(window);
+        self.sync_shells();
         self.sync_pickers();
+    }
+
+    fn view_in(&self, window: WindowId, pane: Pane) -> Option<adw::TabView> {
+        if window == WindowId::MAIN {
+            return self
+                .shell
+                .as_ref()
+                .map(|shell| shell.host(pane).view.clone());
+        }
+        self.sides
+            .borrow()
+            .iter()
+            .find(|side| side.id == window)
+            .map(|side| side.chrome.shell.host(pane).view.clone())
     }
 
     fn view_holding(&self, id: TabId) -> Option<adw::TabView> {
@@ -2603,30 +2495,227 @@ impl App {
             views.push(shell.left.view.clone());
             views.push(shell.right.view.clone());
         }
-        for host in self.detached.borrow().iter() {
-            views.push(host.view.clone());
+        for side in self.sides.borrow().iter() {
+            views.push(side.chrome.shell.left.view.clone());
+            views.push(side.chrome.shell.right.view.clone());
         }
         views
             .into_iter()
             .find(|view| (0..view.n_pages()).any(|i| view.nth_page(i) == *page))
     }
 
-    fn sync_shell(&self) {
+    fn sync_shells(&self) {
         if let Some(shell) = &self.shell {
             shell.sync_split();
+            self.sync_split_buttons(shell);
+        }
+        for side in self.sides.borrow().iter() {
+            side.chrome.shell.sync_split();
+            self.sync_split_buttons(&side.chrome.shell);
         }
     }
 
-    fn collapse_empty_panes(&self) {
-        let Some(shell) = &self.shell else { return };
-        if shell.left.view.n_pages() == 0 && shell.right.view.n_pages() > 0 {
-            while shell.right.view.n_pages() > 0 {
-                let page = shell.right.view.nth_page(0);
-                let pos = shell.left.view.n_pages();
-                shell.right.view.transfer_page(&page, &shell.left.view, pos);
+    fn sync_split_buttons(&self, shell: &SplitShell) {
+        for host in [&shell.left, &shell.right] {
+            let selected = shell::selected_tab_id(&host.view);
+            host.set_split_sensitive(selected.is_some_and(|id| self.workspace.can_split(id)));
+            host.popout_btn.set_sensitive(selected.is_some());
+        }
+    }
+
+    fn collapse_empty(&self, window: WindowId) {
+        let Some(left) = self.view_in(window, Pane::Left) else {
+            return;
+        };
+        let Some(right) = self.view_in(window, Pane::Right) else {
+            return;
+        };
+        if left.n_pages() == 0 && right.n_pages() > 0 {
+            while right.n_pages() > 0 {
+                let page = right.nth_page(0);
+                let pos = left.n_pages();
+                right.transfer_page(&page, &left, pos);
             }
         }
-        shell.sync_split();
+    }
+
+    fn ensure_side(&mut self, id: WindowId) {
+        if self.sides.borrow().iter().any(|side| side.id == id) {
+            return;
+        }
+        let chrome = shell::open_side_window(&build_app_menu(&self.dict_modules));
+        chrome
+            .window
+            .insert_action_group("win", Some(&self.actions));
+        let ctx = self.wire_ctx();
+        wire_host(&chrome.shell.left, id, Pane::Left, &ctx);
+        wire_host(&chrome.shell.right, id, Pane::Right, &ctx);
+        self.sides.borrow_mut().push(SideWindow {
+            id,
+            chrome,
+            syncing: Rc::new(Cell::new(false)),
+        });
+        self.wire_side(id);
+    }
+
+    fn wire_ctx(&self) -> WireCtx {
+        WireCtx {
+            sender: self.msg_tx.clone(),
+            sides: self.sides.clone(),
+            counter: self.workspace.window_counter(),
+            actions: self.actions.clone(),
+            menu: shell::tab_menu_model(),
+            app_menu: build_app_menu(&self.dict_modules),
+        }
+    }
+
+    fn wire_side(&mut self, id: WindowId) {
+        let Some((
+            book,
+            chapter,
+            search_btn,
+            prev,
+            next,
+            back,
+            forward,
+            goto_entry,
+            goto_popover,
+            window,
+            syncing,
+        )) = ({
+            let sides = self.sides.borrow();
+            let Some(side) = sides.iter().find(|side| side.id == id) else {
+                return;
+            };
+            Some((
+                side.chrome.book.clone(),
+                side.chrome.chapter.clone(),
+                side.chrome.search_btn.clone(),
+                side.chrome.prev.clone(),
+                side.chrome.next.clone(),
+                side.chrome.back.clone(),
+                side.chrome.forward.clone(),
+                side.chrome.goto_entry.clone(),
+                side.chrome.goto_popover.clone(),
+                side.chrome.window.clone(),
+                side.syncing.clone(),
+            ))
+        })
+        else {
+            return;
+        };
+        picker::prepare(&book, gtk::StringFilterMatchMode::Substring);
+        picker::prepare(&chapter, gtk::StringFilterMatchMode::Prefix);
+        picker::fill_books(&book, &self.books);
+        let tx = self.msg_tx.clone();
+        let sync = syncing.clone();
+        book.connect_selected_notify(move |dd| {
+            if sync.get() {
+                return;
+            }
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(Msg::SelectBookIndex(id, pos));
+            }
+        });
+        let tx = self.msg_tx.clone();
+        let sync = syncing.clone();
+        chapter.connect_selected_notify(move |dd| {
+            if sync.get() {
+                return;
+            }
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(Msg::SelectChapterIndex(id, pos));
+            }
+        });
+        let tx = self.msg_tx.clone();
+        prev.connect_clicked(move |_| tx.emit(Msg::PrevChapter(id)));
+        let tx = self.msg_tx.clone();
+        next.connect_clicked(move |_| tx.emit(Msg::NextChapter(id)));
+        let tx = self.msg_tx.clone();
+        back.connect_clicked(move |_| tx.emit(Msg::Back(id)));
+        let tx = self.msg_tx.clone();
+        forward.connect_clicked(move |_| tx.emit(Msg::Forward(id)));
+        let tx = self.msg_tx.clone();
+        search_btn.connect_toggled(move |btn| tx.emit(Msg::SetSearch(id, btn.is_active())));
+        let tx = self.msg_tx.clone();
+        goto_entry.connect_activate(move |entry| tx.emit(Msg::GoTo(id, entry.text().to_string())));
+        let shift = gtk::EventControllerKey::new();
+        shift.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let tx = self.msg_tx.clone();
+        let entry = goto_entry.clone();
+        shift.connect_key_pressed(move |_, keyval, _, mods| {
+            let shifted = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if shifted && (keyval == gtk::gdk::Key::Return || keyval == gtk::gdk::Key::KP_Enter) {
+                tx.emit(Msg::GoToBeside(id, entry.text().to_string()));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        goto_entry.add_controller(shift);
+        let keys = gtk::EventControllerKey::new();
+        let tx = self.msg_tx.clone();
+        let pop = goto_popover.clone();
+        let entry = goto_entry.clone();
+        keys.connect_key_pressed(move |_, keyval, _, mods| {
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+            let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            if ctrl && (keyval == gtk::gdk::Key::f || keyval == gtk::gdk::Key::F) {
+                tx.emit(Msg::SetSearch(id, true));
+                return glib::Propagation::Stop;
+            }
+            if keyval == gtk::gdk::Key::Escape {
+                if pop.is_visible() {
+                    pop.popdown();
+                    return glib::Propagation::Stop;
+                }
+                tx.emit(Msg::Escape(id));
+                return glib::Propagation::Stop;
+            }
+            if ctrl && (keyval == gtk::gdk::Key::l || keyval == gtk::gdk::Key::L) {
+                pop.popup();
+                entry.grab_focus();
+                entry.select_region(0, -1);
+                return glib::Propagation::Stop;
+            }
+            if alt && shift && keyval == gtk::gdk::Key::Left {
+                tx.emit(Msg::Back(id));
+                return glib::Propagation::Stop;
+            }
+            if alt && shift && keyval == gtk::gdk::Key::Right {
+                tx.emit(Msg::Forward(id));
+                return glib::Propagation::Stop;
+            }
+            if alt && keyval == gtk::gdk::Key::Left {
+                tx.emit(Msg::PrevChapter(id));
+                return glib::Propagation::Stop;
+            }
+            if alt && keyval == gtk::gdk::Key::Right {
+                tx.emit(Msg::NextChapter(id));
+                return glib::Propagation::Stop;
+            }
+            if ctrl
+                && (keyval == gtk::gdk::Key::plus
+                    || keyval == gtk::gdk::Key::equal
+                    || keyval == gtk::gdk::Key::KP_Add)
+            {
+                tx.emit(Msg::FontLarger);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && (keyval == gtk::gdk::Key::minus || keyval == gtk::gdk::Key::KP_Subtract) {
+                tx.emit(Msg::FontSmaller);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(keys);
+        let pop = goto_popover.clone();
+        window.connect_destroy(move |_| {
+            pop.unparent();
+        });
+        self.sync_pickers();
     }
 
     fn detach_tab(&mut self, id: TabId) {
@@ -2636,56 +2725,71 @@ impl App {
         let Some(hosted) = self.hosted.get(&id) else {
             return;
         };
-        if let Some(shell) = &self.shell {
-            if from != shell.left.view && from != shell.right.view {
-                return;
-            }
-        }
-        let title = hosted.page.title().to_string();
-        let host = shell::open_detached(&title);
-        if let Some(shell) = &self.shell {
-            let mains = MainViews {
-                left: shell.left.view.clone(),
-                right: shell.right.view.clone(),
-            };
-            host.window.insert_action_group("win", Some(&self.actions));
-            wire_tab_view(
-                &host.view,
-                mains,
-                self.msg_tx.clone(),
-                self.detached.clone(),
-                self.actions.clone(),
-                &shell::tab_menu_model(),
-            );
-        }
-        from.transfer_page(&hosted.page, &host.view, 0);
-        self.detached.borrow_mut().push(host);
-        self.workspace.detach(id);
-        self.collapse_empty_panes();
-        self.sync_shell();
+        let page = hosted.page.clone();
+        let Some(outcome) = self.workspace.detach(id) else {
+            return;
+        };
+        self.ensure_side(outcome.window);
+        let Some(dest) = self.view_in(outcome.window, Pane::Left) else {
+            return;
+        };
+        from.transfer_page(&page, &dest, 0);
+        self.collapse_empty(outcome.source);
+        self.sync_shells();
+        self.select_tab(id);
     }
 
     fn move_tab_beside(&mut self, id: TabId) {
+        let Some(from) = self.view_holding(id) else {
+            return;
+        };
         if !self.workspace.move_beside(id) {
             return;
         }
         let Some(tab) = self.workspace.tab(id) else {
             return;
         };
+        let window = tab.window;
         let dest_pane = tab.pane;
-        let Some(shell) = &self.shell else { return };
-        let dest = shell.host(dest_pane).view.clone();
-        let Some(from) = self.view_holding(id) else {
+        let Some(dest) = self.view_in(window, dest_pane) else {
             return;
         };
         if from != dest {
             if let Some(hosted) = self.hosted.get(&id) {
-                dest.set_visible(true);
                 from.transfer_page(&hosted.page, &dest, dest.n_pages());
             }
         }
         self.select_tab(id);
-        self.sync_shell();
+        self.sync_shells();
+    }
+
+    fn split_tab(&mut self, id: TabId) {
+        match self.workspace.split_tab(id) {
+            SplitOutcome::Duplicated { id: new_id, at } => {
+                self.spawn_passage(new_id, at);
+            }
+            SplitOutcome::Moved => {
+                let Some(from) = self.view_holding(id) else {
+                    return;
+                };
+                let Some(tab) = self.workspace.tab(id) else {
+                    return;
+                };
+                let window = tab.window;
+                let pane = tab.pane;
+                let Some(dest) = self.view_in(window, pane) else {
+                    return;
+                };
+                if from != dest {
+                    if let Some(hosted) = self.hosted.get(&id) {
+                        from.transfer_page(&hosted.page, &dest, dest.n_pages());
+                    }
+                }
+                self.select_tab(id);
+            }
+            SplitOutcome::AlreadyBeside => {}
+        }
+        self.sync_shells();
     }
 
     fn popdown_passage_popovers(&self) {
@@ -2849,16 +2953,45 @@ impl App {
     }
 
     fn sync_pickers(&self) {
-        let at = self.at();
-        self.picker_syncing.set(true);
-        picker::select_book(&self.book_dropdown, &self.books, at.book);
-        let n = self
+        self.sync_header(WindowId::MAIN);
+        let ids: Vec<WindowId> = self.sides.borrow().iter().map(|side| side.id).collect();
+        for id in ids {
+            self.sync_header(id);
+        }
+    }
+
+    fn sync_header(&self, window: WindowId) {
+        let at = self.at_in(window);
+        let chapters = self
             .conn
             .as_ref()
-            .and_then(|c| bible_app_db::max_chapter(c, at.book).ok())
+            .and_then(|conn| bible_app_db::max_chapter(conn, at.book).ok())
             .unwrap_or(1);
-        picker::sync_chapters(&self.chapter_dropdown, n, at.chapter);
-        self.picker_syncing.set(false);
+        if window == WindowId::MAIN {
+            self.picker_syncing.set(true);
+            picker::select_book(&self.book_dropdown, &self.books, at.book);
+            picker::sync_chapters(&self.chapter_dropdown, chapters, at.chapter);
+            self.picker_syncing.set(false);
+            return;
+        }
+        let history = self.has_history_in(window);
+        let back = self.can_back_in(window);
+        let forward = self.can_forward_in(window);
+        let searching = self.workspace.has_search(window);
+        let sides = self.sides.borrow();
+        let Some(side) = sides.iter().find(|side| side.id == window) else {
+            return;
+        };
+        side.syncing.set(true);
+        picker::select_book(&side.chrome.book, &self.books, at.book);
+        picker::sync_chapters(&side.chrome.chapter, chapters, at.chapter);
+        side.syncing.set(false);
+        side.chrome.history.set_visible(history);
+        side.chrome.back.set_sensitive(back);
+        side.chrome.forward.set_sensitive(forward);
+        if side.chrome.search_btn.is_active() != searching {
+            side.chrome.search_btn.set_active(searching);
+        }
     }
 }
 
@@ -2949,21 +3082,25 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     menu
 }
 
-fn wire_tab_view(
-    view: &adw::TabView,
-    mains: MainViews,
+#[derive(Clone)]
+struct WireCtx {
     sender: relm4::Sender<Msg>,
-    detached: Rc<RefCell<Vec<DetachedHost>>>,
+    sides: Rc<RefCell<Vec<SideWindow>>>,
+    counter: Rc<Cell<u64>>,
     actions: gio::SimpleActionGroup,
-    menu: &gio::Menu,
-) {
-    view.set_menu_model(Some(menu));
-    let send = sender.clone();
+    menu: gio::Menu,
+    app_menu: gio::Menu,
+}
+
+fn wire_host(host: &shell::PaneHost, window: WindowId, pane: Pane, ctx: &WireCtx) {
+    let view = &host.view;
+    view.set_menu_model(Some(&ctx.menu));
+    let send = ctx.sender.clone();
     view.connect_setup_menu(move |_, page| {
-        let id = page.and_then(|p| p.keyword().as_deref().and_then(TabId::from_keyword));
+        let id = page.and_then(|page| page.keyword().as_deref().and_then(TabId::from_keyword));
         send.emit(Msg::SetupTabMenu(id));
     });
-    let send = sender.clone();
+    let send = ctx.sender.clone();
     view.connect_selected_page_notify(move |view| {
         if let Some(page) = view.selected_page() {
             if let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) {
@@ -2971,8 +3108,7 @@ fn wire_tab_view(
             }
         }
     });
-    let send = sender.clone();
-    let mains_close = mains.clone();
+    let send = ctx.sender.clone();
     view.connect_page_detached(move |view, page, _| {
         if view.is_transferring_page() {
             return;
@@ -2980,54 +3116,47 @@ fn wire_tab_view(
         if let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) {
             send.emit(Msg::TabClosed(id));
         }
-        let is_main = view == &mains_close.left || view == &mains_close.right;
-        if !is_main && view.n_pages() == 0 {
-            if let Some(win) = view.root().and_downcast::<gtk::Window>() {
-                glib::idle_add_local_once(move || {
-                    win.close();
-                });
-            }
-        }
     });
-    let send = sender.clone();
-    let mains_attach = mains.clone();
-    view.connect_page_attached(move |view, page, _| {
+    let send = ctx.sender.clone();
+    view.connect_page_attached(move |_view, page, _| {
         let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) else {
             return;
         };
-        let (pane, detached_flag) = if view == &mains_attach.left {
-            (Pane::Left, false)
-        } else if view == &mains_attach.right {
-            (Pane::Right, false)
-        } else {
-            (Pane::Left, true)
-        };
-        send.emit(Msg::TabAttached {
-            id,
-            pane,
-            detached: detached_flag,
-        });
+        send.emit(Msg::TabAttached { id, window, pane });
     });
-    let send = sender.clone();
-    let detached_c = detached.clone();
-    let mains_create = mains;
-    let menu = menu.clone();
-    let actions_c = actions;
-    view.connect_create_window(move |_| {
-        let host = shell::open_detached("bible-app");
-        host.window.insert_action_group("win", Some(&actions_c));
-        wire_tab_view(
-            &host.view,
-            mains_create.clone(),
-            send.clone(),
-            detached_c.clone(),
-            actions_c.clone(),
-            &menu,
-        );
-        let view = host.view.clone();
-        detached_c.borrow_mut().push(host);
-        Some(view)
+    let split_view = host.view.clone();
+    let send = ctx.sender.clone();
+    host.split_btn.connect_clicked(move |_| {
+        if let Some(id) = shell::selected_tab_id(&split_view) {
+            send.emit(Msg::SplitTab(id));
+        }
     });
+    let pop_view = host.view.clone();
+    let send = ctx.sender.clone();
+    host.popout_btn.connect_clicked(move |_| {
+        if let Some(id) = shell::selected_tab_id(&pop_view) {
+            send.emit(Msg::DetachTab(id));
+        }
+    });
+    let ctx = ctx.clone();
+    view.connect_create_window(move |_| Some(open_drag_window(&ctx)));
+}
+
+fn open_drag_window(ctx: &WireCtx) -> adw::TabView {
+    let id = WindowId::from_raw(ctx.counter.get());
+    ctx.counter.set(id.raw() + 1);
+    let chrome = shell::open_side_window(&ctx.app_menu);
+    chrome.window.insert_action_group("win", Some(&ctx.actions));
+    wire_host(&chrome.shell.left, id, Pane::Left, ctx);
+    wire_host(&chrome.shell.right, id, Pane::Right, ctx);
+    let view = chrome.shell.left.view.clone();
+    ctx.sides.borrow_mut().push(SideWindow {
+        id,
+        chrome,
+        syncing: Rc::new(Cell::new(false)),
+    });
+    ctx.sender.emit(Msg::WireSide(id));
+    view
 }
 
 relm4::new_action_group!(WindowActionGroup, "win");

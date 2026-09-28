@@ -7,7 +7,9 @@ use bible_app_db::{
 use gtk::prelude::*;
 use relm4::gtk;
 use rusqlite::Connection;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
+use std::rc::Rc;
 
 pub const PAGE: usize = 80;
 const OT_LAST: u8 = 39;
@@ -850,6 +852,156 @@ pub fn lexicon_hit(code: &str, module: &str) -> LibraryHit {
         verse: None,
         headword: Some(code.to_string()),
         snippet: format!("Open {code}"),
+    }
+}
+
+/// One window's search tab: the list, and the query it is showing.
+pub struct Pane {
+    pub root: gtk::Box,
+    pub entry: gtk::SearchEntry,
+    pub list: gtk::ListBox,
+    pub chips: gtk::Box,
+    pub scope_dd: gtk::DropDown,
+    pub mode_dd: gtk::DropDown,
+    pub range_dd: gtk::DropDown,
+    pub status: gtk::Label,
+    pub empty: gtk::Label,
+    pub query: String,
+    pub scope: SearchScope,
+    pub mode: MatchMode,
+    pub range: SearchRange,
+    pub chip: BookChip,
+    pub hits: Vec<LibraryHit>,
+    pub total: i64,
+    pub tokens: Vec<String>,
+    pub strongs: Option<String>,
+    pub chosen: Option<u8>,
+    pub counts: Vec<BookCount>,
+    pub origin: Option<Ref>,
+    pub gen: Rc<Cell<u64>>,
+    pub hold: Rc<Cell<bool>>,
+    pub groups: Rc<RefCell<Vec<String>>>,
+}
+
+pub fn build_pane(mode: MatchMode) -> Pane {
+    let entry = gtk::SearchEntry::new();
+    entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
+    entry.set_tooltip_text(Some(
+        "Enter stays on the verse. Esc returns. Shift+Enter opens beside.",
+    ));
+    entry.set_hexpand(true);
+
+    let scope_dd = gtk::DropDown::from_strings(&SearchScope::ALL.map(SearchScope::label));
+    scope_dd.set_selected(SearchScope::Kjv.index());
+    scope_dd.set_enable_search(false);
+    scope_dd.set_tooltip_text(Some("Search in"));
+    scope_dd.update_property(&[gtk::accessible::Property::Label("Search in")]);
+
+    let mode_dd = gtk::DropDown::from_strings(&MatchMode::ALL.map(MatchMode::label));
+    mode_dd.set_selected(mode.index());
+    mode_dd.set_enable_search(false);
+    mode_dd.set_tooltip_text(Some("Match"));
+    mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
+
+    let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));
+    range_dd.set_selected(SearchRange::All.index());
+    range_dd.set_enable_search(false);
+    range_dd.set_tooltip_text(Some("Range"));
+    range_dd.update_property(&[gtk::accessible::Property::Label("Range")]);
+
+    let filters = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    filters.append(&entry);
+    filters.append(&scope_dd);
+    let modes = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    mode_dd.set_hexpand(true);
+    range_dd.set_hexpand(true);
+    modes.append(&mode_dd);
+    modes.append(&range_dd);
+
+    let status = gtk::Label::new(Some(&status("", 0, 0, SearchScope::Kjv)));
+    status.set_xalign(0.0);
+    status.set_wrap(true);
+    status.add_css_class("dim-label");
+
+    let empty = gtk::Label::new(Some(empty_description("", SearchScope::Kjv).unwrap_or("")));
+    empty.set_xalign(0.0);
+    empty.set_wrap(true);
+    empty.add_css_class("dim-label");
+
+    let chips = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let chip_scroll = gtk::ScrolledWindow::new();
+    chip_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    chip_scroll.set_propagate_natural_height(true);
+    chip_scroll.set_child(Some(&chips));
+
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    list.set_accessible_role(gtk::AccessibleRole::List);
+    let list_scroll = gtk::ScrolledWindow::new();
+    list_scroll.set_hexpand(true);
+    list_scroll.set_vexpand(true);
+    list_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    list_scroll.set_child(Some(&list));
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+    root.set_margin_top(12);
+    root.set_margin_bottom(12);
+    root.add_css_class("search-pane");
+    root.append(&filters);
+    root.append(&modes);
+    root.append(&status);
+    root.append(&empty);
+    root.append(&chip_scroll);
+    root.append(&list_scroll);
+
+    Pane {
+        root,
+        entry,
+        list,
+        chips,
+        scope_dd,
+        mode_dd,
+        range_dd,
+        status,
+        empty,
+        query: String::new(),
+        scope: SearchScope::Kjv,
+        mode,
+        range: SearchRange::All,
+        chip: BookChip::Auto,
+        hits: Vec::new(),
+        total: 0,
+        tokens: Vec::new(),
+        strongs: None,
+        chosen: None,
+        counts: Vec::new(),
+        origin: None,
+        gen: Rc::new(Cell::new(0)),
+        hold: Rc::new(Cell::new(false)),
+        groups: Rc::new(RefCell::new(Vec::new())),
+    }
+}
+
+impl Pane {
+    pub fn show_status(&self, text: &str) {
+        self.status.set_label(text);
+    }
+
+    pub fn sync_empty(&self) {
+        match empty_description(&self.query, self.scope) {
+            Some(text) => {
+                self.empty.set_label(text);
+                self.empty.set_visible(true);
+            }
+            None => self.empty.set_visible(false),
+        }
+    }
+
+    pub fn sync_placeholder(&self) {
+        self.entry
+            .set_placeholder_text(Some(placeholder(self.scope)));
     }
 }
 
