@@ -14,7 +14,7 @@ use crate::strongs;
 use crate::theme;
 use crate::tsk;
 use crate::user_db;
-use crate::workspace::{MarksPage, Pane, SplitOutcome, TabId, TabKind, WindowId, Workspace};
+use crate::workspace::{MarksPage, SplitOutcome, TabId, TabKind, WindowId, Workspace};
 use adw::prelude::*;
 use bible_app_db::{self, Book, DictModule, LibraryKind, MatchMode, SearchScope};
 use gtk::gio;
@@ -24,13 +24,17 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 struct HostedTab {
-    page: adw::TabPage,
+    /// None while this view is the right-hand side of another tab.
+    page: Option<adw::TabPage>,
+    /// Child of `page`. None while this view is embedded.
+    slot: Option<gtk::Box>,
+    body: gtk::Widget,
     content: TabContent,
 }
 
@@ -71,6 +75,8 @@ pub struct App {
     user: Option<Connection>,
     workspace: Workspace,
     hosted: HashMap<TabId, HostedTab>,
+    /// Pages closed only so their view can be drawn inside another tab.
+    embedding: HashSet<TabId>,
     shell: Option<SplitShell>,
     sides: Rc<RefCell<Vec<SideWindow>>>,
     menu_tab: Rc<Cell<Option<TabId>>>,
@@ -166,10 +172,11 @@ pub enum Msg {
     ExportWrite(PathBuf),
     TabSelected(TabId),
     TabClosed(TabId),
+    /// Dismiss the view drawn inside a split tab.
+    CloseGuest(TabId),
     TabAttached {
         id: TabId,
         window: WindowId,
-        pane: Pane,
     },
     SplitTab(TabId),
     WireSide(WindowId),
@@ -178,8 +185,7 @@ pub enum Msg {
     BesideMenuTab,
     SetTabFollow(bool),
     ThemeChanged,
-    /// `None` uses the focused pane of `window`.
-    NewTab(WindowId, Option<Pane>),
+    NewTab(WindowId),
     BlankSelectBook(TabId, u32),
     BlankSelectChapter(TabId, u32),
     BlankLaunch {
@@ -471,6 +477,7 @@ impl SimpleComponent for App {
             user,
             workspace: Workspace::new(at),
             hosted: HashMap::new(),
+            embedding: HashSet::new(),
             shell: None,
             sides: Rc::new(RefCell::new(Vec::new())),
             menu_tab: Rc::new(Cell::new(None)),
@@ -502,9 +509,8 @@ impl SimpleComponent for App {
             let shell = SplitShell::new();
             shell.attach_header(&widgets.header_bar, &widgets.menu_btn);
             let ctx = model.wire_ctx();
-            wire_host(&shell.left, WindowId::MAIN, Pane::Left, &ctx);
-            wire_host(&shell.right, WindowId::MAIN, Pane::Right, &ctx);
-            workspace_host.append(&shell.paned);
+            wire_host(&shell.host, WindowId::MAIN, &ctx);
+            workspace_host.append(&shell.host.root);
             model.shell = Some(shell);
             let id = model.workspace.focused();
             model.spawn_passage(id, at);
@@ -524,7 +530,7 @@ impl SimpleComponent for App {
                 return glib::Propagation::Stop;
             }
             if ctrl && !shift && (keyval == gtk::gdk::Key::t || keyval == gtk::gdk::Key::T) {
-                sender_keys.input(Msg::NewTab(WindowId::MAIN, None));
+                sender_keys.input(Msg::NewTab(WindowId::MAIN));
                 return glib::Propagation::Stop;
             }
             if keyval == gtk::gdk::Key::Escape {
@@ -1044,13 +1050,12 @@ impl SimpleComponent for App {
                 }
             }
             Msg::TabClosed(id) => {
-                self.forget_tab(id);
+                if !self.embedding.remove(&id) {
+                    self.forget_tab(id);
+                }
             }
-            Msg::TabAttached { id, window, pane } => {
-                self.workspace.place(id, window, pane);
-                self.collapse_empty(window);
-                self.sync_shells();
-            }
+            Msg::CloseGuest(id) => self.forget_tab(id),
+            Msg::TabAttached { id, window } => self.tab_attached(id, window),
             Msg::SplitTab(id) => self.split_tab(id),
             Msg::WireSide(id) => self.wire_side(id),
             Msg::SetupTabMenu(id) => {
@@ -1081,7 +1086,7 @@ impl SimpleComponent for App {
                 }
             }
             Msg::ThemeChanged => self.recolor_passages(),
-            Msg::NewTab(window, pane) => self.new_tab(window, pane),
+            Msg::NewTab(window) => self.new_tab(window),
             Msg::BlankSelectBook(id, idx) => self.blank_select_book(id, idx),
             Msg::BlankSelectChapter(id, idx) => self.blank_select_chapter(id, idx),
             Msg::BlankLaunch { id, choice } => self.launch_from_blank(id, choice),
@@ -1861,12 +1866,12 @@ impl App {
         }
     }
 
-    /// Column edges belong to a chapter that fills its window by itself.
+    /// Column edges belong to a chapter that fills its tab by itself.
     fn column_resize_for(&self, id: TabId) -> bool {
         let Some(tab) = self.workspace.tab(id) else {
             return true;
         };
-        tab.kind.is_passage() && !self.workspace.is_window_split(tab.window)
+        tab.kind.is_passage() && tab.host.is_none() && self.workspace.guest_of(id).is_none()
     }
 
     fn apply_column_mode(&self) {
@@ -2084,8 +2089,8 @@ impl App {
                 dict::select_module(widgets, module);
             }
             let title = dict::tab_title(widgets);
-            if let Some(h) = self.hosted.get(&opened.id) {
-                h.page.set_title(&title);
+            if let Some(page) = self.page_of(opened.id) {
+                page.set_title(&title);
             }
             self.select_tab(opened.id);
         }
@@ -2111,8 +2116,8 @@ impl App {
             if let Some(conn) = &self.conn {
                 occurrences::fill(widgets, conn, &self.books, code);
             }
-            if let Some(h) = self.hosted.get(&opened.id) {
-                h.page.set_title(&format!("{code} in the KJV"));
+            if let Some(page) = self.page_of(opened.id) {
+                page.set_title(&format!("{code} in the KJV"));
             }
             self.select_tab(opened.id);
         }
@@ -2147,8 +2152,8 @@ impl App {
             if let Some(user) = &self.user {
                 marks::fill(widgets, user, &self.books);
             }
-            if let Some(h) = self.hosted.get(&opened.id) {
-                h.page.set_title(if page == "notes" {
+            if let Some(tab_page) = self.page_of(opened.id) {
+                tab_page.set_title(if page == "notes" {
                     "Notes"
                 } else {
                     "Bookmarks"
@@ -2231,8 +2236,8 @@ impl App {
         if let Some(TabContent::Mhc(w)) = self.hosted.get(&id).map(|h| &h.content) {
             mhc::fill(w, conn, &self.books, at);
         }
-        if let Some(h) = self.hosted.get(&id) {
-            h.page.set_tooltip(&nav::format_ref(&self.books, at));
+        if let Some(page) = self.page_of(id) {
+            page.set_tooltip(&nav::format_ref(&self.books, at));
         }
     }
 
@@ -2242,8 +2247,8 @@ impl App {
         if let Some(TabContent::Tsk(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
             tsk::fill(w, conn, &self.books, at, tx);
         }
-        if let Some(h) = self.hosted.get(&id) {
-            h.page.set_tooltip(&nav::format_ref(&self.books, at));
+        if let Some(page) = self.page_of(id) {
+            page.set_tooltip(&nav::format_ref(&self.books, at));
         }
     }
 
@@ -2321,15 +2326,35 @@ impl App {
         title: &str,
         content: TabContent,
     ) {
-        let (window, pane) = self
+        let body = child.clone().upcast::<gtk::Widget>();
+        let window = self
             .workspace
             .tab(id)
-            .map(|tab| (tab.window, tab.pane))
-            .unwrap_or((WindowId::MAIN, Pane::Left));
-        let Some(view) = self.view_in(window, pane) else {
+            .map(|tab| tab.window)
+            .unwrap_or(WindowId::MAIN);
+        let host = self.workspace.tab(id).and_then(|tab| tab.host);
+        if let Some(host) = host {
+            self.hosted.insert(
+                id,
+                HostedTab {
+                    page: None,
+                    slot: None,
+                    body,
+                    content,
+                },
+            );
+            self.layout_tab(host);
+            self.select_tab(host);
+            self.sync_shells();
+            return;
+        }
+        let Some(view) = self.view_of(window) else {
             return;
         };
-        let page = view.append(child);
+        let slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        slot.set_hexpand(true);
+        slot.set_vexpand(true);
+        let page = view.append(&slot);
         page.set_keyword(&id.keyword());
         page.set_title(title);
         if let Some(at) = self.workspace.tab(id).and_then(|t| t.kind.at()) {
@@ -2337,25 +2362,29 @@ impl App {
                 page.set_tooltip(&nav::format_ref(&self.books, at));
             }
         }
-        self.hosted.insert(id, HostedTab { page, content });
-        if let Some(h) = self.hosted.get(&id) {
-            view.set_selected_page(&h.page);
-        }
+        self.hosted.insert(
+            id,
+            HostedTab {
+                page: Some(page),
+                slot: Some(slot),
+                body,
+                content,
+            },
+        );
+        self.layout_tab(id);
+        self.select_tab(id);
         self.sync_shells();
     }
 
-    fn new_tab(&mut self, window: WindowId, pane: Option<Pane>) {
+    fn page_of(&self, id: TabId) -> Option<adw::TabPage> {
+        self.hosted.get(&id).and_then(|hosted| hosted.page.clone())
+    }
+
+    fn new_tab(&mut self, window: WindowId) {
         if self.error.is_some() {
             return;
         }
-        let pane = pane.unwrap_or_else(|| {
-            self.workspace
-                .focused_tab()
-                .filter(|tab| tab.window == window)
-                .map(|tab| tab.pane)
-                .unwrap_or(Pane::Left)
-        });
-        let opened = self.workspace.open_blank(window, pane);
+        let opened = self.workspace.open_blank(window);
         let page = launcher::build(
             opened.id,
             self.msg_tx.clone(),
@@ -2394,19 +2423,19 @@ impl App {
         if id == before {
             return;
         }
-        let Some(view) = self.view_holding(id) else {
+        let Some(page) = self.page_of(id) else {
             return;
         };
-        let Some(other) = self.view_holding(before) else {
+        let Some(sibling) = self.page_of(before) else {
+            return;
+        };
+        let Some(view) = self.view_holding(&page) else {
+            return;
+        };
+        let Some(other) = self.view_holding(&sibling) else {
             return;
         };
         if view != other {
-            return;
-        }
-        let Some(page) = self.hosted.get(&id).map(|h| h.page.clone()) else {
-            return;
-        };
-        let Some(sibling) = self.hosted.get(&before).map(|h| h.page.clone()) else {
             return;
         };
         let pos = view.page_position(&sibling);
@@ -2545,10 +2574,13 @@ impl App {
             TabKind::Search => "Search".into(),
             TabKind::Blank => "New".into(),
         };
-        hosted.page.set_title(&title);
+        let Some(page) = hosted.page.clone() else {
+            return;
+        };
+        page.set_title(&title);
         if let Some(at) = tab.kind.at() {
             if !tab.kind.is_passage() {
-                hosted.page.set_tooltip(&nav::format_ref(&self.books, at));
+                page.set_tooltip(&nav::format_ref(&self.books, at));
             }
         }
     }
@@ -2563,14 +2595,21 @@ impl App {
     }
 
     fn select_tab(&self, id: TabId) {
-        let Some(hosted) = self.hosted.get(&id) else {
+        let shown = self
+            .workspace
+            .tab(id)
+            .and_then(|tab| tab.host)
+            .unwrap_or(id);
+        let Some(page) = self.page_of(shown) else {
             return;
         };
-        if let Some(view) = self.view_holding(id) {
-            view.set_selected_page(&hosted.page);
-            if let Some(win) = view.root().and_downcast::<gtk::Window>() {
-                win.present();
-            }
+        let window = self.window_of(shown);
+        let Some(view) = self.view_of(window) else {
+            return;
+        };
+        view.set_selected_page(&page);
+        if let Some(win) = view.root().and_downcast::<gtk::Window>() {
+            win.present();
         }
     }
 
@@ -2581,56 +2620,66 @@ impl App {
     }
 
     fn request_close(&self, id: TabId) {
-        let Some(hosted) = self.hosted.get(&id) else {
+        let Some(page) = self.page_of(id) else {
+            self.msg_tx.emit(Msg::CloseGuest(id));
             return;
         };
-        if let Some(view) = self.view_holding(id) {
-            view.close_page(&hosted.page);
+        if let Some(view) = self.view_holding(&page) {
+            view.close_page(&page);
         }
     }
 
     fn forget_tab(&mut self, id: TabId) {
         let restore = self.search(id).and_then(|pane| pane.origin);
         let window = self.window_of(id);
+        let guest = self.workspace.guest_of(id);
+        let host = self.workspace.tab(id).and_then(|tab| tab.host);
+        if let Some(body) = self.hosted.get(&id).map(|hosted| hosted.body.clone()) {
+            unparent(&body);
+        }
+        if let Some(guest) = guest {
+            if let Some(body) = self.hosted.get(&guest).map(|hosted| hosted.body.clone()) {
+                unparent(&body);
+            }
+        }
         if self.hosted.remove(&id).is_none() {
             return;
         }
         let _ = self.workspace.close(id);
+        if let Some(guest) = guest {
+            self.mount_real_tab(guest);
+        }
+        if let Some(host) = host {
+            self.layout_tab(host);
+        }
         if let Some(at) = restore {
             self.search_mark = None;
             if let Some(passage) = self.workspace.focused_passage_in(window) {
                 self.apply_passage_ref(passage, at, true, false);
             }
         }
-        self.collapse_empty(window);
         self.sync_shells();
         self.sync_pickers();
     }
 
-    fn view_in(&self, window: WindowId, pane: Pane) -> Option<adw::TabView> {
+    fn view_of(&self, window: WindowId) -> Option<adw::TabView> {
         if window == WindowId::MAIN {
-            return self
-                .shell
-                .as_ref()
-                .map(|shell| shell.host(pane).view.clone());
+            return self.shell.as_ref().map(|shell| shell.host.view.clone());
         }
         self.sides
             .borrow()
             .iter()
             .find(|side| side.id == window)
-            .map(|side| side.chrome.shell.host(pane).view.clone())
+            .map(|side| side.chrome.shell.host.view.clone())
     }
 
-    fn view_holding(&self, id: TabId) -> Option<adw::TabView> {
-        let page = &self.hosted.get(&id)?.page;
+    fn view_holding(&self, page: &adw::TabPage) -> Option<adw::TabView> {
         let mut views = Vec::new();
         if let Some(shell) = &self.shell {
-            views.push(shell.left.view.clone());
-            views.push(shell.right.view.clone());
+            views.push(shell.host.view.clone());
         }
         for side in self.sides.borrow().iter() {
-            views.push(side.chrome.shell.left.view.clone());
-            views.push(side.chrome.shell.right.view.clone());
+            views.push(side.chrome.shell.host.view.clone());
         }
         views
             .into_iter()
@@ -2639,51 +2688,166 @@ impl App {
 
     fn sync_shells(&self) {
         if let Some(shell) = &self.shell {
-            shell.sync_split();
             self.sync_split_buttons(shell);
         }
         for side in self.sides.borrow().iter() {
-            side.chrome.shell.sync_split();
             self.sync_split_buttons(&side.chrome.shell);
         }
     }
 
     fn sync_split_buttons(&self, shell: &SplitShell) {
         let icon = gio::ThemedIcon::new("view-dual-symbolic");
-        for host in [&shell.left, &shell.right] {
-            let n = host.view.n_pages();
-            for i in 0..n {
-                let page = host.view.nth_page(i);
-                let on = page
-                    .keyword()
-                    .as_deref()
-                    .and_then(TabId::from_keyword)
-                    .is_some_and(|id| self.workspace.can_split(id));
-                page.set_indicator_icon(Some(&icon));
-                page.set_indicator_activatable(on);
-                page.set_indicator_tooltip(if on {
-                    "Split this view"
-                } else {
-                    "Already beside another view"
-                });
-            }
+        let n = shell.host.view.n_pages();
+        for i in 0..n {
+            let page = shell.host.view.nth_page(i);
+            let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) else {
+                continue;
+            };
+            let on = self.workspace.can_split(id);
+            page.set_indicator_icon(Some(&icon));
+            page.set_indicator_activatable(on);
+            page.set_indicator_tooltip(if self.workspace.guest_of(id).is_some() {
+                "This tab is split"
+            } else if on {
+                "Split this view"
+            } else {
+                "Already beside another view"
+            });
         }
     }
 
-    fn collapse_empty(&self, window: WindowId) {
-        let Some(left) = self.view_in(window, Pane::Left) else {
+    /// Rebuild one tab's page: the view alone, or that view beside its guest.
+    fn layout_tab(&mut self, id: TabId) {
+        // Collapse column insets before the paned measures the chapter.
+        self.apply_column_mode();
+        let Some(slot) = self.hosted.get(&id).and_then(|hosted| hosted.slot.clone()) else {
             return;
         };
-        let Some(right) = self.view_in(window, Pane::Right) else {
-            return;
-        };
-        if left.n_pages() == 0 && right.n_pages() > 0 {
-            while right.n_pages() > 0 {
-                let page = right.nth_page(0);
-                let pos = left.n_pages();
-                right.transfer_page(&page, &left, pos);
-            }
+        let host_body = self.hosted.get(&id).map(|hosted| hosted.body.clone());
+        let guest = self.workspace.guest_of(id);
+        let guest_body = guest.and_then(|guest| self.hosted.get(&guest).map(|h| h.body.clone()));
+        if let Some(body) = &host_body {
+            unparent(body);
         }
+        if let Some(body) = &guest_body {
+            unparent(body);
+        }
+        while let Some(child) = slot.first_child() {
+            child.unparent();
+        }
+        match (host_body, guest, guest_body) {
+            (Some(host_body), Some(guest_id), Some(guest_body)) => {
+                host_body.set_hexpand(true);
+                host_body.set_vexpand(true);
+                guest_body.set_hexpand(true);
+                guest_body.set_vexpand(true);
+                let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+                paned.add_css_class("pane-split");
+                paned.set_hexpand(true);
+                paned.set_vexpand(true);
+                paned.set_wide_handle(true);
+                paned.set_resize_start_child(true);
+                paned.set_resize_end_child(true);
+                // Chapter margins can still report a wide minimum on the first
+                // measure. Allow the handle to sit at half the tab anyway.
+                paned.set_shrink_start_child(true);
+                paned.set_shrink_end_child(true);
+                paned.set_start_child(Some(&host_body));
+                paned.set_end_child(Some(&guest_frame(guest_id, &guest_body, &self.msg_tx)));
+                shell::mark_split_handle(&paned);
+                center_split(&paned);
+                slot.append(&paned);
+                // The slot already has the tab's size. Nothing upstream
+                // reallocates it for a new child, so the paned would stay
+                // 0×0 and the old chapter allocation would keep painting.
+                allocate_to_parent(&paned);
+            }
+            (Some(host_body), _, _) => {
+                slot.append(&host_body);
+                allocate_to_parent(&host_body);
+                // The chapter was measured at the split width. Fit the column
+                // to the full tab now that the body has that size.
+                self.apply_column_mode();
+            }
+            _ => {}
+        }
+    }
+
+    /// Give a promoted view its own tab again.
+    fn mount_real_tab(&mut self, id: TabId) {
+        let Some(tab) = self.workspace.tab(id).cloned() else {
+            return;
+        };
+        if tab.host.is_some() || self.page_of(id).is_some() {
+            return;
+        }
+        let Some(body) = self.hosted.get(&id).map(|hosted| hosted.body.clone()) else {
+            return;
+        };
+        let Some(view) = self.view_of(tab.window) else {
+            return;
+        };
+        unparent(&body);
+        let slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        slot.set_hexpand(true);
+        slot.set_vexpand(true);
+        let page = view.append(&slot);
+        page.set_keyword(&id.keyword());
+        if let Some(hosted) = self.hosted.get_mut(&id) {
+            hosted.page = Some(page);
+            hosted.slot = Some(slot);
+        }
+        self.sync_tab_title(id);
+        self.layout_tab(id);
+        self.select_tab(id);
+    }
+
+    /// Drop `id` out of the tab bar and draw it inside its host.
+    fn embed_in_host(&mut self, id: TabId) {
+        let Some(host) = self.workspace.tab(id).and_then(|tab| tab.host) else {
+            return;
+        };
+        let Some(page) = self.page_of(id) else {
+            self.layout_tab(host);
+            self.select_tab(host);
+            return;
+        };
+        let Some(view) = self.view_holding(&page) else {
+            return;
+        };
+        if let Some(body) = self.hosted.get(&id).map(|hosted| hosted.body.clone()) {
+            unparent(&body);
+        }
+        if let Some(hosted) = self.hosted.get_mut(&id) {
+            hosted.page = None;
+            hosted.slot = None;
+        }
+        self.embedding.insert(id);
+        let pages = view.n_pages();
+        view.close_page(&page);
+        // close-page confirms through its default handler. If that did not
+        // remove the page, finish the request so the view leaves the tab bar.
+        if view.n_pages() == pages {
+            view.close_page_finish(&page, true);
+        }
+        self.layout_tab(host);
+        self.select_tab(host);
+        self.sync_shells();
+    }
+
+    fn tab_attached(&mut self, id: TabId, window: WindowId) {
+        let carried = self.workspace.guest_of(id);
+        self.workspace.place(id, window);
+        if let Some(guest) = carried.filter(|_| self.workspace.guest_of(id).is_none()) {
+            if let Some(body) = self.hosted.get(&guest).map(|hosted| hosted.body.clone()) {
+                unparent(&body);
+            }
+            self.layout_tab(id);
+            self.mount_real_tab(guest);
+            self.workspace.focus(id);
+            self.select_tab(id);
+        }
+        self.sync_shells();
     }
 
     fn ensure_side(&mut self, id: WindowId) {
@@ -2695,8 +2859,7 @@ impl App {
             .window
             .insert_action_group("win", Some(&self.actions));
         let ctx = self.wire_ctx();
-        wire_host(&chrome.shell.left, id, Pane::Left, &ctx);
-        wire_host(&chrome.shell.right, id, Pane::Right, &ctx);
+        wire_host(&chrome.shell.host, id, &ctx);
         self.sides.borrow_mut().push(SideWindow { id, chrome });
         self.wire_side(id);
     }
@@ -2754,7 +2917,7 @@ impl App {
                 return glib::Propagation::Stop;
             }
             if ctrl && !shift && (keyval == gtk::gdk::Key::t || keyval == gtk::gdk::Key::T) {
-                tx.emit(Msg::NewTab(id, None));
+                tx.emit(Msg::NewTab(id));
                 return glib::Propagation::Stop;
             }
             if keyval == gtk::gdk::Key::Escape {
@@ -2810,47 +2973,29 @@ impl App {
     }
 
     fn detach_tab(&mut self, id: TabId) {
-        let Some(from) = self.view_holding(id) else {
+        let Some(page) = self.page_of(id) else {
             return;
         };
-        let Some(hosted) = self.hosted.get(&id) else {
+        let Some(from) = self.view_holding(&page) else {
             return;
         };
-        let page = hosted.page.clone();
         let Some(outcome) = self.workspace.detach(id) else {
             return;
         };
         self.ensure_side(outcome.window);
-        let Some(dest) = self.view_in(outcome.window, Pane::Left) else {
+        let Some(dest) = self.view_of(outcome.window) else {
             return;
         };
         from.transfer_page(&page, &dest, 0);
-        self.collapse_empty(outcome.source);
         self.sync_shells();
         self.select_tab(id);
     }
 
     fn move_tab_beside(&mut self, id: TabId) {
-        let Some(from) = self.view_holding(id) else {
-            return;
-        };
         if !self.workspace.move_beside(id) {
             return;
         }
-        let Some(tab) = self.workspace.tab(id) else {
-            return;
-        };
-        let window = tab.window;
-        let dest_pane = tab.pane;
-        let Some(dest) = self.view_in(window, dest_pane) else {
-            return;
-        };
-        if from != dest {
-            if let Some(hosted) = self.hosted.get(&id) {
-                from.transfer_page(&hosted.page, &dest, dest.n_pages());
-            }
-        }
-        self.select_tab(id);
+        self.embed_in_host(id);
         self.sync_shells();
     }
 
@@ -2859,25 +3004,7 @@ impl App {
             SplitOutcome::Duplicated { id: new_id, at } => {
                 self.spawn_passage(new_id, at);
             }
-            SplitOutcome::Moved => {
-                let Some(from) = self.view_holding(id) else {
-                    return;
-                };
-                let Some(tab) = self.workspace.tab(id) else {
-                    return;
-                };
-                let window = tab.window;
-                let pane = tab.pane;
-                let Some(dest) = self.view_in(window, pane) else {
-                    return;
-                };
-                if from != dest {
-                    if let Some(hosted) = self.hosted.get(&id) {
-                        from.transfer_page(&hosted.page, &dest, dest.n_pages());
-                    }
-                }
-                self.select_tab(id);
-            }
+            SplitOutcome::Moved => self.embed_in_host(id),
             SplitOutcome::AlreadyBeside => {}
         }
         self.sync_shells();
@@ -3167,7 +3294,7 @@ struct WireCtx {
     app_menu: gio::Menu,
 }
 
-fn wire_host(host: &shell::PaneHost, window: WindowId, pane: Pane, ctx: &WireCtx) {
+fn wire_host(host: &shell::PaneHost, window: WindowId, ctx: &WireCtx) {
     let view = &host.view;
     view.set_menu_model(Some(&ctx.menu));
     let send = ctx.sender.clone();
@@ -3183,6 +3310,14 @@ fn wire_host(host: &shell::PaneHost, window: WindowId, pane: Pane, ctx: &WireCtx
             }
         }
     });
+    view.connect_close_page(|view, page| {
+        // Pull an embedded view out before the page is destroyed, then confirm
+        // the close. Returning Proceed does not run the default handler, so
+        // the page would stay on the bar with its closing flag stuck.
+        rescue_split_guest(page);
+        view.close_page_finish(page, true);
+        glib::Propagation::Stop
+    });
     let send = ctx.sender.clone();
     view.connect_page_detached(move |view, page, _| {
         if view.is_transferring_page() {
@@ -3197,11 +3332,11 @@ fn wire_host(host: &shell::PaneHost, window: WindowId, pane: Pane, ctx: &WireCtx
         let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) else {
             return;
         };
-        send.emit(Msg::TabAttached { id, window, pane });
+        send.emit(Msg::TabAttached { id, window });
     });
     let send = ctx.sender.clone();
     host.new_btn.connect_clicked(move |_| {
-        send.emit(Msg::NewTab(window, Some(pane)));
+        send.emit(Msg::NewTab(window));
     });
     let send = ctx.sender.clone();
     view.connect_indicator_activated(move |_view, page| {
@@ -3213,14 +3348,155 @@ fn wire_host(host: &shell::PaneHost, window: WindowId, pane: Pane, ctx: &WireCtx
     view.connect_create_window(move |_| Some(open_drag_window(&ctx)));
 }
 
+fn unparent(widget: &gtk::Widget) {
+    let Some(parent) = widget.parent() else {
+        return;
+    };
+    // Paned and Overlay keep their own child pointer. Unparenting the widget
+    // directly leaves that pointer set, and destroying the container later
+    // frees it again.
+    if let Some(overlay) = parent.downcast_ref::<gtk::Overlay>() {
+        if overlay.child().as_ref() == Some(widget) {
+            overlay.set_child(None::<&gtk::Widget>);
+            return;
+        }
+    }
+    if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+        if paned.start_child().as_ref() == Some(widget) {
+            paned.set_start_child(None::<&gtk::Widget>);
+            return;
+        }
+        if paned.end_child().as_ref() == Some(widget) {
+            paned.set_end_child(None::<&gtk::Widget>);
+            return;
+        }
+    }
+    widget.unparent();
+}
+
+fn guest_frame(id: TabId, body: &gtk::Widget, tx: &relm4::Sender<Msg>) -> gtk::Overlay {
+    let overlay = gtk::Overlay::new();
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+    overlay.set_child(Some(body));
+    let close = gtk::Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("flat");
+    close.add_css_class("split-close");
+    close.set_tooltip_text(Some("Close"));
+    close.set_halign(gtk::Align::End);
+    close.set_valign(gtk::Align::Start);
+    close.set_margin_top(8);
+    close.set_margin_end(8);
+    close.update_property(&[gtk::accessible::Property::Label("Close")]);
+    let tx = tx.clone();
+    close.connect_clicked(move |_| tx.emit(Msg::CloseGuest(id)));
+    overlay.add_overlay(&close);
+    overlay
+}
+
+/// Give a widget the size its parent already has.
+///
+/// The page slot is allocated before its child is swapped. GTK does not
+/// allocate that new child, so a split stays 0×0 and a closed split keeps
+/// the half-width chapter. Queueing an allocate does not reach the window.
+fn allocate_to_parent(child: &impl IsA<gtk::Widget>) {
+    let child = child.as_ref();
+    let Some(parent) = child.parent() else {
+        return;
+    };
+    let width = parent.width();
+    let height = parent.height();
+    if width > 1 && height > 1 {
+        child.allocate(width, height, -1, None);
+    }
+}
+
+fn give_paned_parent_size(paned: &gtk::Paned) -> i32 {
+    if paned.width() <= 1 {
+        allocate_to_parent(paned);
+    }
+    paned.width()
+}
+
+fn center_split(paned: &gtk::Paned) {
+    // Both children resizing keeps the first position as a ratio of the pane.
+    // A chapter's minimum is wide, so that ratio pins the handle to the right
+    // edge. Hold an absolute position until the end side is actually showing.
+    paned.set_resize_start_child(false);
+    paned.set_resize_end_child(true);
+    paned.set_position(480);
+    let waits = Rc::new(Cell::new(0u8));
+    let tries = Rc::new(Cell::new(0u8));
+    paned.add_tick_callback(move |paned, _| {
+        if paned.parent().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        let width = give_paned_parent_size(paned);
+        if width <= 1 {
+            if waits.get() >= 90 {
+                return glib::ControlFlow::Break;
+            }
+            waits.set(waits.get().saturating_add(1));
+            return glib::ControlFlow::Continue;
+        }
+        let target = width / 2;
+        let end_w = paned.end_child().map(|child| child.width()).unwrap_or(0);
+        if (paned.position() - target).abs() <= 16 && end_w >= width / 5 {
+            paned.set_resize_start_child(true);
+            paned.set_resize_end_child(true);
+            return glib::ControlFlow::Break;
+        }
+        if tries.get() >= 30 {
+            return glib::ControlFlow::Break;
+        }
+        tries.set(tries.get().saturating_add(1));
+        paned.set_position(target);
+        // set_position only queues an allocate, and that queue does not run.
+        // Pass the slot's size, not the paned's content size: allocate()
+        // takes the outside size and content size is smaller once CSS is applied.
+        if let Some(parent) = paned.parent() {
+            let parent_width = parent.width();
+            let parent_height = parent.height();
+            if parent_width > 1 && parent_height > 1 {
+                paned.allocate(parent_width, parent_height, -1, None);
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Keep the right-hand view alive when its tab is closed. The page owns the
+/// paned, so the guest has to leave that paned before the page is destroyed.
+fn rescue_split_guest(page: &adw::TabPage) {
+    let Some(slot) = page.child().downcast::<gtk::Box>().ok() else {
+        return;
+    };
+    let Some(paned) = slot
+        .first_child()
+        .and_then(|child| child.downcast::<gtk::Paned>().ok())
+    else {
+        return;
+    };
+    if !paned.has_css_class("pane-split") {
+        return;
+    }
+    let Some(end) = paned.end_child() else {
+        return;
+    };
+    if let Some(overlay) = end.downcast_ref::<gtk::Overlay>() {
+        if let Some(child) = overlay.child() {
+            unparent(&child);
+        }
+    }
+}
+
 fn open_drag_window(ctx: &WireCtx) -> adw::TabView {
     let id = WindowId::from_raw(ctx.counter.get());
     ctx.counter.set(id.raw() + 1);
     let chrome = shell::open_side_window(&ctx.app_menu);
     chrome.window.insert_action_group("win", Some(&ctx.actions));
-    wire_host(&chrome.shell.left, id, Pane::Left, ctx);
-    wire_host(&chrome.shell.right, id, Pane::Right, ctx);
-    let view = chrome.shell.left.view.clone();
+    wire_host(&chrome.shell.host, id, ctx);
+    let view = chrome.shell.host.view.clone();
     ctx.sides.borrow_mut().push(SideWindow { id, chrome });
     ctx.sender.emit(Msg::WireSide(id));
     view
