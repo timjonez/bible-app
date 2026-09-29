@@ -7,6 +7,31 @@ pub struct TskPhrase {
     pub dests: Vec<Ref>,
 }
 
+/// One scripture citation in Treasury text. Offsets are characters, for a text buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Citation {
+    pub start: i32,
+    pub end: i32,
+    pub at: Ref,
+}
+
+/// Every `Book chapter:verse` citation in `text`, including a range as one link to its first verse.
+pub fn citations(text: &str, books: &[Book]) -> Vec<Citation> {
+    extract_refs(text, books)
+        .into_iter()
+        .filter_map(|found| {
+            let end_byte = found.start + found.consumed;
+            if !text.is_char_boundary(found.start) || !text.is_char_boundary(end_byte) {
+                return None;
+            }
+            let start = text[..found.start].chars().count() as i32;
+            let end = start + text[found.start..end_byte].chars().count() as i32;
+            let at = *found.dests.first()?;
+            Some(Citation { start, end, at })
+        })
+        .collect()
+}
+
 /// Parse TSK `* heading. refs` lines into phrase keys with destinations.
 pub fn parse_tsk_phrases(text: &str, books: &[Book]) -> Vec<TskPhrase> {
     let mut out = Vec::new();
@@ -49,6 +74,7 @@ fn star_blocks(text: &str) -> Vec<String> {
 
 struct FoundRef {
     start: usize,
+    consumed: usize,
     dests: Vec<Ref>,
 }
 
@@ -162,7 +188,11 @@ fn extract_refs(text: &str, books: &[Book]) -> Vec<FoundRef> {
         if at_token_start(text, i) {
             if let Some((dests, consumed)) = parse_dest_at(&text[i..], books, dummy) {
                 if !numbered_book_tail(text, i, &dests, books) {
-                    out.push(FoundRef { start: i, dests });
+                    out.push(FoundRef {
+                        start: i,
+                        consumed,
+                        dests,
+                    });
                     i += consumed;
                     continue;
                 }
@@ -483,5 +513,95 @@ God creates heaven and earth.
     fn or_note_without_refs_skipped() {
         let text = "* he made the stars also. Or, with the stars also.";
         assert!(parse_tsk_phrases(text, &books()).is_empty());
+    }
+
+    fn cited(text: &str) -> Vec<(String, Ref)> {
+        citations(text, &books())
+            .into_iter()
+            .map(|link| {
+                let label: String = text
+                    .chars()
+                    .skip(link.start as usize)
+                    .take((link.end - link.start) as usize)
+                    .collect();
+                (label, link.at)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn citations_cover_the_whole_reference_including_a_range() {
+        let text = "* beginning. Proverbs 8:22–24 Mark 13:19 1 John 1:1";
+        assert_eq!(
+            cited(text),
+            vec![
+                (
+                    "Proverbs 8:22–24".into(),
+                    Ref {
+                        book: 20,
+                        chapter: 8,
+                        verse: 22
+                    }
+                ),
+                (
+                    "Mark 13:19".into(),
+                    Ref {
+                        book: 41,
+                        chapter: 13,
+                        verse: 19
+                    }
+                ),
+                (
+                    "1 John 1:1".into(),
+                    Ref {
+                        book: 62,
+                        chapter: 1,
+                        verse: 1
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_verse_range_is_one_link_to_its_first_verse() {
+        let text = "John 1:1–3";
+        let links = citations(text, &books());
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].at,
+            Ref {
+                book: 43,
+                chapter: 1,
+                verse: 1
+            }
+        );
+        assert_eq!(cited(text)[0].0, "John 1:1–3");
+    }
+
+    #[test]
+    fn prose_without_a_citation_has_no_link() {
+        assert!(citations("God creates heaven and earth.", &books()).is_empty());
+        assert!(citations("* firmament. Heb. expansion.", &books()).is_empty());
+    }
+
+    #[test]
+    fn stacked_notes_keep_citation_offsets() {
+        let first = "* beginning. Proverbs 8:22–24 Mark 13:19";
+        let second = "* God. Exodus 20:11";
+        let sections = [("Genesis 1:1", first), ("Genesis 1:2", second)];
+        let stacked = nav::stack_sections(&sections);
+        let chars: Vec<char> = stacked.text.chars().collect();
+        let expect = ["Proverbs 8:22–24", "Mark 13:19", "Exodus 20:11"];
+        let mut found = Vec::new();
+        for (i, (_, body)) in sections.iter().enumerate() {
+            let body_at = stacked.heading_at[i] + stacked.heading_len[i] + 2;
+            for link in citations(body.trim(), &books()) {
+                let start = (body_at + link.start) as usize;
+                let end = (body_at + link.end) as usize;
+                found.push(chars[start..end].iter().collect::<String>());
+            }
+        }
+        assert_eq!(found, expect);
     }
 }

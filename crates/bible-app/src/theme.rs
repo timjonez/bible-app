@@ -140,6 +140,7 @@ pub fn paint_buffer(buffer: &gtk::TextBuffer) {
     set_fg(buffer, "note-mark", &palette.dim);
     set_fg(buffer, "apparatus", &palette.muted);
     set_fg(buffer, "xref", &palette.accent);
+    set_fg(buffer, "cite", &palette.accent);
     set_fg(buffer, "mhc-num", &palette.accent);
     set_fg(buffer, "tsk-sup", &palette.accent);
     set_fg(buffer, "lemma", &palette.dim);

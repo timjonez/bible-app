@@ -118,9 +118,26 @@ pub enum Msg {
     OpenHitBeside(TabId, i32),
     ToggleMhc,
     ToggleTsk,
-    OpenTskXref(i32),
     OpenTskDest(Ref),
     OpenTskDestBeside(Ref),
+    ClickCite {
+        id: TabId,
+        offset: i32,
+    },
+    CiteMenu {
+        id: TabId,
+        offset: i32,
+        x: i32,
+        y: i32,
+    },
+    OpenCiteTab {
+        id: TabId,
+        at: Ref,
+    },
+    OpenCiteWindow {
+        id: TabId,
+        at: Ref,
+    },
     OpenStrongsCode(String),
     ClickWord {
         id: TabId,
@@ -754,12 +771,6 @@ impl SimpleComponent for App {
                     }
                 });
             }
-            Msg::OpenTskXref(idx) => {
-                let Some(at) = self.tsk_widgets().and_then(|w| tsk::xref_at(w, idx)) else {
-                    return;
-                };
-                self.go(at, true);
-            }
             Msg::OpenTskDest(at) => {
                 self.popdown_passage_popovers();
                 self.go(at, true);
@@ -768,6 +779,22 @@ impl SimpleComponent for App {
                 self.popdown_passage_popovers();
                 self.go_beside(at);
             }
+            Msg::ClickCite { id, offset } => {
+                let Some(at) = self.cite_at(id, offset) else {
+                    return;
+                };
+                self.open_cite_beside(id, at);
+            }
+            Msg::CiteMenu { id, offset, x, y } => {
+                let Some(at) = self.cite_at(id, offset) else {
+                    return;
+                };
+                if let Some(widgets) = self.tsk_widgets_for(id) {
+                    tsk::popup_cite_menu(widgets, x, y, at, id, self.msg_tx.clone());
+                }
+            }
+            Msg::OpenCiteTab { id, at } => self.open_cite_tab(id, at),
+            Msg::OpenCiteWindow { id, at } => self.open_cite_window(id, at),
             Msg::OpenStrongsCode(code) => {
                 self.open_strongs_code(&code);
             }
@@ -1145,12 +1172,16 @@ impl App {
         }
     }
 
-    fn tsk_widgets(&self) -> Option<&tsk::TskWidgets> {
-        let id = self.workspace.find_kind(|k| k.is_tsk())?;
+    fn tsk_widgets_for(&self, id: TabId) -> Option<&tsk::TskWidgets> {
         match self.hosted.get(&id).map(|h| &h.content) {
             Some(TabContent::Tsk(w)) => Some(w),
             _ => None,
         }
+    }
+
+    fn cite_at(&self, id: TabId, offset: i32) -> Option<Ref> {
+        self.tsk_widgets_for(id)
+            .and_then(|widgets| tsk::cite_at(widgets, offset))
     }
 
     fn occ_widgets(&self) -> Option<&occurrences::OccWidgets> {
@@ -1778,6 +1809,76 @@ impl App {
         self.apply_passage_ref(id, at, highlight, true);
     }
 
+    /// Open `at` beside the Treasury. Later clicks reuse that same passage.
+    fn open_cite_beside(&mut self, source: TabId, at: Ref) {
+        if let Some(id) = self.workspace.passage_beside(source) {
+            self.show_cite(source, id, at);
+            return;
+        }
+        if self.workspace.can_split(source) {
+            let opened = self.workspace.open_passage_beside(source, at);
+            self.spawn_passage(opened.id, at);
+            self.finish_new_cite(source, opened.id, at);
+            return;
+        }
+        if let Some(id) = self.cite_companion(source) {
+            self.show_cite(source, id, at);
+            return;
+        }
+        let opened = self.workspace.open_passage_in(self.window_of(source), at);
+        self.spawn_passage(opened.id, at);
+        self.finish_new_cite(source, opened.id, at);
+    }
+
+    fn finish_new_cite(&mut self, source: TabId, id: TabId, at: Ref) {
+        self.workspace.navigate_passage_except(id, at, source);
+        self.refresh_followers_except(Some(source));
+        self.set_cite_companion(source, id);
+        self.sync_pickers();
+        self.save_state();
+    }
+
+    fn open_cite_tab(&mut self, source: TabId, at: Ref) {
+        let opened = self.workspace.open_passage_in(self.window_of(source), at);
+        self.spawn_passage(opened.id, at);
+        self.select_tab(opened.id);
+        self.save_state();
+    }
+
+    fn open_cite_window(&mut self, source: TabId, at: Ref) {
+        let opened = self.workspace.open_passage_in(self.window_of(source), at);
+        self.spawn_passage(opened.id, at);
+        self.detach_tab(opened.id);
+        self.save_state();
+    }
+
+    fn show_cite(&mut self, source: TabId, id: TabId, at: Ref) {
+        if let Some(passage) = self.passage_mut(id) {
+            passage.history.navigate(at);
+            passage.at = at;
+        }
+        self.workspace.navigate_passage_except(id, at, source);
+        self.reload_passage(id, true);
+        self.refresh_followers_except(Some(source));
+        self.sync_pickers();
+        self.set_cite_companion(source, id);
+        self.save_state();
+    }
+
+    fn set_cite_companion(&self, source: TabId, passage: TabId) {
+        if let Some(widgets) = self.tsk_widgets_for(source) {
+            widgets.companion.set(Some(passage));
+        }
+    }
+
+    fn cite_companion(&self, source: TabId) -> Option<TabId> {
+        let id = self.tsk_widgets_for(source)?.companion.get()?;
+        self.workspace
+            .tab(id)
+            .filter(|tab| tab.kind.is_passage())
+            .map(|tab| tab.id)
+    }
+
     fn go_beside(&mut self, at: Ref) {
         let window = self
             .workspace
@@ -1872,8 +1973,10 @@ impl App {
 
     fn recolor_passages(&self) {
         for hosted in self.hosted.values() {
-            if let TabContent::Passage(passage) = &hosted.content {
-                theme::paint_buffer(&passage.buffer);
+            match &hosted.content {
+                TabContent::Passage(passage) => theme::paint_buffer(&passage.buffer),
+                TabContent::Tsk(widgets) => theme::paint_buffer(&widgets.buffer),
+                _ => {}
             }
         }
     }
@@ -2036,7 +2139,7 @@ impl App {
         let at = self.at();
         let opened = self.workspace.open_tsk(at);
         if opened.created {
-            let widgets = tsk::build(self.msg_tx.clone());
+            let widgets = tsk::build();
             tsk::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
             let root = widgets.root.clone();
             self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
@@ -2241,14 +2344,13 @@ impl App {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
-        let tx = self.msg_tx.clone();
         match self.hosted.get(&id).map(|h| &h.content) {
             Some(TabContent::Mhc(widgets)) => {
                 mhc::show(widgets, conn, &self.books, at);
                 remember_study(&widgets.history, &widgets.placed, at, memory);
             }
             Some(TabContent::Tsk(widgets)) => {
-                tsk::show(widgets, conn, &self.books, at, tx);
+                tsk::show(widgets, conn, &self.books, at);
                 remember_study(&widgets.history, &widgets.placed, at, memory);
             }
             _ => return,
@@ -2260,12 +2362,16 @@ impl App {
     }
 
     fn refresh_followers(&mut self) {
+        self.refresh_followers_except(None);
+    }
+
+    fn refresh_followers_except(&mut self, except: Option<TabId>) {
         let following: Vec<(TabId, Ref)> = self
             .workspace
             .tabs()
             .iter()
-            .filter(|t| t.kind.follows_verse())
-            .filter_map(|t| t.kind.at().map(|at| (t.id, at)))
+            .filter(|tab| Some(tab.id) != except && tab.kind.follows_verse())
+            .filter_map(|tab| tab.kind.at().map(|at| (tab.id, at)))
             .collect();
         for (id, at) in following {
             self.present_study(id, at, PlaceMemory::Retarget);
