@@ -2,12 +2,14 @@ use crate::workspace::Pane;
 use adw::prelude::*;
 use gtk::gio;
 use relm4::{adw, gtk};
+use std::cell::Cell;
+use std::rc::Rc;
 
 pub struct PaneHost {
     pub root: gtk::Box,
+    pub bar: adw::TabBar,
     pub view: adw::TabView,
     pub new_btn: gtk::Button,
-    pub popout_btn: gtk::Button,
 }
 
 impl PaneHost {
@@ -24,35 +26,27 @@ impl PaneHost {
         new_btn.set_tooltip_text(Some("New tab (Ctrl+T)"));
         new_btn.add_css_class("flat");
         new_btn.update_property(&[gtk::accessible::Property::Label("New tab")]);
-        let popout_btn = gtk::Button::from_icon_name("window-new-symbolic");
-        popout_btn.set_tooltip_text(Some("Open in a new window"));
-        popout_btn.add_css_class("flat");
-        popout_btn.update_property(&[gtk::accessible::Property::Label("Open in a new window")]);
         // The tab strip normally takes the leftover width, which pins the
         // new-tab button to the far end. Size the strip to the tabs so the
-        // button sits against the last one, and let the gap before pop-out grow.
+        // button sits against the last one.
         if let Some(strip) = tab_strip(&bar) {
             strip.set_hexpand(false);
             strip.set_propagate_natural_width(true);
         }
-        let gap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        gap.set_hexpand(true);
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        actions.append(&new_btn);
-        actions.append(&gap);
-        actions.append(&popout_btn);
-        bar.set_end_action_widget(Some(&actions));
+        bar.set_end_action_widget(Some(&new_btn));
+
+        bar.set_hexpand(true);
+        bar.set_valign(gtk::Align::Fill);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
-        root.append(&bar);
         root.append(&view);
         Self {
             root,
+            bar,
             view,
             new_btn,
-            popout_btn,
         }
     }
 }
@@ -79,6 +73,8 @@ fn tab_strip(bar: &adw::TabBar) -> Option<gtk::ScrolledWindow> {
 
 pub struct SplitShell {
     pub paned: gtk::Paned,
+    /// Left and right tab bars, shown in the window's top row.
+    pub tabs: gtk::Paned,
     pub left: PaneHost,
     pub right: PaneHost,
 }
@@ -100,7 +96,55 @@ impl SplitShell {
         paned.set_start_child(Some(&left.root));
         paned.set_end_child(Some(&right.root));
         mark_split_handle(&paned);
-        Self { paned, left, right }
+
+        // The tab bars share the header row. The content divider is the one
+        // the pointer drags; this one only keeps the bars above their panes.
+        let tabs = gtk::Paned::new(gtk::Orientation::Horizontal);
+        tabs.set_hexpand(true);
+        tabs.set_valign(gtk::Align::Fill);
+        tabs.add_css_class("header-tabs");
+        tabs.set_wide_handle(false);
+        tabs.set_can_focus(false);
+        tabs.set_resize_start_child(true);
+        tabs.set_resize_end_child(true);
+        tabs.set_shrink_start_child(false);
+        tabs.set_shrink_end_child(true);
+        tabs.set_start_child(Some(&left.bar));
+        mute_header_handle(&tabs);
+        track_tab_split(&paned, &tabs);
+
+        Self {
+            paned,
+            tabs,
+            left,
+            right,
+        }
+    }
+
+    /// Place both tab bars on the left of the header, with the menu after them.
+    ///
+    /// The header centers its title against the trailing controls, which
+    /// insets the first tab. Hiding those controls and putting the menu in
+    /// the title row lets the tabs start at the left edge.
+    pub fn attach_header(&self, header: &adw::HeaderBar, menu: &gtk::MenuButton) {
+        if menu.parent().is_some() {
+            header.remove(menu);
+        }
+        header.set_show_start_title_buttons(false);
+        header.set_show_end_title_buttons(false);
+        header.set_show_title(true);
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.set_hexpand(true);
+        row.set_valign(gtk::Align::Fill);
+        self.tabs.set_hexpand(true);
+        row.append(&self.tabs);
+        menu.set_valign(gtk::Align::Center);
+        row.append(menu);
+        let controls = gtk::WindowControls::new(gtk::PackType::End);
+        controls.set_valign(gtk::Align::Center);
+        row.append(&controls);
+        header.set_title_widget(Some(&row));
     }
 
     pub fn host(&self, pane: Pane) -> &PaneHost {
@@ -121,10 +165,62 @@ impl SplitShell {
             }
         }
         self.right.root.set_visible(split);
+        if split {
+            if self.tabs.end_child().is_none() {
+                self.tabs.set_end_child(Some(&self.right.bar));
+            }
+            self.right.bar.set_visible(true);
+        } else {
+            self.tabs.set_end_child(None::<&gtk::Widget>);
+            let width = self.tabs.width();
+            if width > 0 {
+                self.tabs.set_position(width);
+            }
+        }
     }
 }
 
-/// Back and forward through the focused passage's history, above the tabs.
+/// Keep the header tab split lined up with the content divider.
+fn track_tab_split(paned: &gtk::Paned, tabs: &gtk::Paned) {
+    let paned = paned.clone();
+    let seen = Rc::new(Cell::new((0i32, 0i32, 0i32)));
+    tabs.add_tick_callback(move |tabs, _| {
+        let content_w = paned.width();
+        let header_w = tabs.width();
+        let pos = paned.position();
+        let key = (content_w, header_w, pos);
+        if key != seen.get() && content_w > 0 && header_w > 0 {
+            seen.set(key);
+            let split = paned.end_child().is_some_and(|child| child.is_visible());
+            if split {
+                let aligned = (pos as i64) * (header_w as i64) / (content_w as i64);
+                tabs.set_position(aligned as i32);
+            } else {
+                tabs.set_position(header_w);
+            }
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
+fn mute_header_handle(paned: &gtk::Paned) {
+    fn apply(paned: &gtk::Paned) {
+        let mut child = paned.first_child();
+        while let Some(widget) = child {
+            if widget.css_name().as_str() == "separator" {
+                widget.set_can_target(false);
+                widget.set_visible(false);
+                return;
+            }
+            child = widget.next_sibling();
+        }
+    }
+    apply(paned);
+    let paned = paned.clone();
+    paned.connect_realize(apply);
+}
+
+/// Back and forward through one passage's history, at the start of its bar.
 pub struct HistoryNav {
     pub row: gtk::Box,
     pub back: gtk::Button,
@@ -156,8 +252,6 @@ pub struct SideChrome {
     pub shell: SplitShell,
     pub goto_entry: gtk::Entry,
     pub goto_popover: gtk::Popover,
-    pub back: gtk::Button,
-    pub forward: gtk::Button,
 }
 
 pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
@@ -174,10 +268,6 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     menu_btn.set_menu_model(Some(menu));
 
     let header = adw::HeaderBar::new();
-    header.set_show_title(false);
-    let nav = history_nav();
-    header.pack_start(&nav.row);
-    header.pack_end(&menu_btn);
 
     let goto_entry = gtk::Entry::new();
     goto_entry.set_placeholder_text(Some("John 3:16"));
@@ -193,7 +283,9 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     goto_popover.set_parent(&header);
 
     let shell = SplitShell::new();
+    shell.attach_header(&header, &menu_btn);
     let toolbar = adw::ToolbarView::new();
+    toolbar.set_top_bar_style(adw::ToolbarStyle::Flat);
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&shell.paned));
     window.set_content(Some(&toolbar));
@@ -204,8 +296,6 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
         shell,
         goto_entry,
         goto_popover,
-        back: nav.back,
-        forward: nav.forward,
     }
 }
 
@@ -234,11 +324,4 @@ pub fn tab_menu_model() -> gio::Menu {
     menu.append(Some("Open in a window"), Some("win.tab-detach"));
     menu.append(Some("Follow verse"), Some("win.tab-follow"));
     menu
-}
-
-pub fn selected_tab_id(view: &adw::TabView) -> Option<crate::workspace::TabId> {
-    view.selected_page()
-        .and_then(|page| page.keyword())
-        .as_deref()
-        .and_then(crate::workspace::TabId::from_keyword)
 }
