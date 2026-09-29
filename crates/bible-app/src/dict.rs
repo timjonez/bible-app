@@ -1,4 +1,7 @@
+use crate::history::History;
 use crate::occurrences;
+use crate::shell;
+use crate::workspace::TabId;
 use adw::prelude::*;
 use bible_app_db::{self, DictHit, DictModule};
 use gtk::glib;
@@ -9,30 +12,40 @@ use std::rc::Rc;
 
 pub struct DictWidgets {
     pub root: gtk::Widget,
-    pub heading: gtk::Label,
     pub search: gtk::SearchEntry,
     pub popover: gtk::Popover,
     pub list: gtk::ListBox,
     pub buffer: gtk::TextBuffer,
+    pub prev: gtk::Button,
+    pub next: gtk::Button,
+    pub back: gtk::Button,
+    pub forward: gtk::Button,
     pub modules: Vec<DictModule>,
     pub module_id: Option<String>,
     pub hits: Vec<DictHit>,
     pub query: String,
+    /// `-1` when no entry is open.
+    pub entry_i: Cell<i32>,
+    pub trail: RefCell<History<i32>>,
     see_kjv: gtk::Button,
     occ_code: Rc<RefCell<String>>,
     syncing: Rc<Cell<bool>>,
 }
 
 pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
-    let heading = gtk::Label::new(Some("Library"));
-    heading.add_css_class("heading");
-    heading.set_xalign(0.0);
-    heading.set_wrap(true);
-
+    let bar = shell::location_bar(
+        "Previous entry (Alt+Left)",
+        "Next entry (Alt+Right)",
+        "Previous entry",
+        "Next entry",
+    );
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search a headword"));
-    search.set_hexpand(true);
+    search.set_width_chars(24);
+    search.set_hexpand(false);
+    search.set_valign(gtk::Align::Center);
     search.update_property(&[gtk::accessible::Property::Label("Search a headword")]);
+    bar.pickers.append(&search);
 
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -121,6 +134,9 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     see_kjv.add_css_class("pill");
     see_kjv.set_tooltip_text(Some("List every KJV verse tagged with this number"));
     see_kjv.set_visible(false);
+    see_kjv.set_margin_start(12);
+    see_kjv.set_margin_top(8);
+    see_kjv.set_margin_bottom(4);
     let send_occ = sender.clone();
     let occ_click = occ_code.clone();
     see_kjv.connect_clicked(move |_| {
@@ -130,38 +146,68 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
         }
     });
 
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    body.set_margin_start(12);
-    body.set_margin_end(12);
-    body.set_margin_top(8);
-    body.set_margin_bottom(8);
-    body.append(&heading);
-    body.append(&search);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     body.append(&see_kjv);
     body.append(&text_scroll);
+    let page = shell::bar_page(&bar.row, &body);
 
     install_css();
 
     let popover_destroy = popover.clone();
-    body.connect_destroy(move |_| {
+    page.connect_destroy(move |_| {
         popover_destroy.unparent();
     });
 
-    DictWidgets {
-        root: body.upcast(),
-        heading,
+    let widgets = DictWidgets {
+        root: page.upcast(),
         search,
         popover,
         list,
         buffer,
+        prev: bar.prev,
+        next: bar.next,
+        back: bar.back,
+        forward: bar.forward,
         modules: Vec::new(),
         module_id: None,
         hits: Vec::new(),
         query: String::new(),
+        entry_i: Cell::new(-1),
+        trail: RefCell::new(History::new(0)),
         see_kjv,
         occ_code,
         syncing,
-    }
+    };
+    sync_history(&widgets);
+    widgets
+}
+
+pub fn wire(widgets: &DictWidgets, id: TabId, sender: relm4::Sender<super::app::Msg>) {
+    let tx = sender.clone();
+    widgets
+        .prev
+        .connect_clicked(move |_| tx.emit(super::app::Msg::LibraryPrev(id)));
+    let tx = sender.clone();
+    widgets
+        .next
+        .connect_clicked(move |_| tx.emit(super::app::Msg::LibraryNext(id)));
+    let tx = sender.clone();
+    widgets
+        .back
+        .connect_clicked(move |_| tx.emit(super::app::Msg::LibraryBack(id)));
+    let tx = sender;
+    widgets
+        .forward
+        .connect_clicked(move |_| tx.emit(super::app::Msg::LibraryForward(id)));
+}
+
+pub fn sync_history(widgets: &DictWidgets) {
+    let open = widgets.entry_i.get() >= 0;
+    let trail = widgets.trail.borrow();
+    widgets.prev.set_sensitive(open);
+    widgets.next.set_sensitive(open);
+    widgets.back.set_sensitive(open && trail.can_back());
+    widgets.forward.set_sensitive(open && trail.can_forward());
 }
 
 pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
@@ -181,9 +227,10 @@ pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
 }
 
 pub fn select_module(widgets: &mut DictWidgets, id: &str) {
+    let changed = widgets.module_id.as_deref() != Some(id);
     widgets.module_id = Some(id.to_string());
-    if let Some(m) = widgets.modules.iter().find(|m| m.id == id) {
-        widgets.heading.set_label(&m.title);
+    if changed {
+        widgets.entry_i.set(-1);
     }
     widgets.syncing.set(true);
     widgets.search.set_text("");
@@ -197,6 +244,7 @@ pub fn select_module(widgets: &mut DictWidgets, id: &str) {
     widgets
         .buffer
         .set_text("Search a headword to open its entry.");
+    sync_history(widgets);
 }
 
 pub fn current_module(widgets: &DictWidgets) -> Option<&str> {
@@ -275,20 +323,13 @@ fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool)
     widgets.popover.popup();
 }
 
-pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
-    let Ok(idx) = usize::try_from(idx) else {
-        return;
-    };
-    let Some(hit) = widgets.hits.get(idx) else {
-        return;
-    };
-    let Some(module) = current_module(widgets) else {
-        return;
-    };
+/// Show entry `i` and return the headword to store on the tab.
+pub fn display(widgets: &DictWidgets, conn: &Connection, i: i32) -> Option<String> {
+    let module = current_module(widgets)?.to_string();
     let loaded = if module == bible_app_db::STRONGS_MODULE {
-        bible_app_db::get_strongs_entry(conn, hit.i)
+        bible_app_db::get_strongs_entry(conn, i)
     } else {
-        bible_app_db::get_entry(conn, module, hit.i)
+        bible_app_db::get_entry(conn, &module, i)
     };
     match loaded {
         Ok(Some((head, text))) => {
@@ -297,8 +338,17 @@ pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
             widgets.syncing.set(false);
             widgets.buffer.set_text(&format!("{head}\n\n{text}"));
             widgets.popover.popdown();
+            widgets.entry_i.set(i);
+            let key = if module == bible_app_db::STRONGS_MODULE {
+                head.split_whitespace()
+                    .next()
+                    .unwrap_or(head.as_str())
+                    .to_string()
+            } else {
+                head
+            };
             if module == bible_app_db::STRONGS_MODULE {
-                if let Some((num, lang)) = bible_app_db::parse_strongs_code(&hit.headword) {
+                if let Some((num, lang)) = bible_app_db::parse_strongs_code(&key) {
                     let code = format!("{lang}{num}");
                     let count = bible_app_db::strongs_occurrence_count(conn, &code).unwrap_or(0);
                     *widgets.occ_code.borrow_mut() = code.clone();
@@ -314,18 +364,72 @@ pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) {
                 widgets.occ_code.borrow_mut().clear();
                 widgets.see_kjv.set_visible(false);
             }
+            Some(key)
         }
         Ok(None) => {
             widgets.occ_code.borrow_mut().clear();
             widgets.see_kjv.set_visible(false);
             widgets.buffer.set_text("Entry missing.");
+            None
         }
         Err(e) => {
             widgets.occ_code.borrow_mut().clear();
             widgets.see_kjv.set_visible(false);
             widgets.buffer.set_text(&e.to_string());
+            None
         }
     }
+}
+
+pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) -> Option<String> {
+    let idx = usize::try_from(idx).ok()?;
+    let i = widgets.hits.get(idx)?.i;
+    let was_empty = widgets.entry_i.get() < 0;
+    let key = display(widgets, conn, i)?;
+    {
+        let mut trail = widgets.trail.borrow_mut();
+        if was_empty {
+            trail.restart(i);
+        } else {
+            trail.navigate(i);
+        }
+    }
+    sync_history(widgets);
+    Some(key)
+}
+
+pub fn step(widgets: &DictWidgets, conn: &Connection, forward: bool) -> Option<String> {
+    let module = current_module(widgets)?.to_string();
+    let i = widgets.entry_i.get();
+    if i < 0 {
+        return None;
+    }
+    let hit = if module == bible_app_db::STRONGS_MODULE {
+        bible_app_db::adjacent_strongs(conn, i, forward).ok()?
+    } else {
+        bible_app_db::adjacent_entry(conn, &module, i, forward).ok()?
+    }?;
+    let key = display(widgets, conn, hit.i)?;
+    widgets.trail.borrow_mut().navigate(hit.i);
+    sync_history(widgets);
+    Some(key)
+}
+
+pub fn history_step(widgets: &DictWidgets, conn: &Connection, forward: bool) -> Option<String> {
+    if widgets.entry_i.get() < 0 {
+        return None;
+    }
+    let i = {
+        let mut trail = widgets.trail.borrow_mut();
+        if forward {
+            trail.forward()?
+        } else {
+            trail.back()?
+        }
+    };
+    let key = display(widgets, conn, i);
+    sync_history(widgets);
+    key
 }
 
 fn refill_list(list: &gtk::ListBox, hits: &[DictHit]) {

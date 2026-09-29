@@ -1,21 +1,35 @@
-use crate::nav::Ref;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct History {
-    entries: Vec<Ref>,
+pub struct History<T> {
+    entries: Vec<T>,
     index: usize,
 }
 
-impl History {
-    pub fn new(start: Ref) -> Self {
+impl<T: Clone + PartialEq> History<T> {
+    pub fn new(start: T) -> Self {
         Self {
             entries: vec![start],
             index: 0,
         }
     }
 
-    pub fn current(&self) -> Ref {
-        self.entries[self.index]
+    pub fn current(&self) -> T {
+        self.entries[self.index].clone()
+    }
+
+    /// Replace the trail with a single place. Used when a tab first opens.
+    pub fn restart(&mut self, at: T) {
+        self.entries.clear();
+        self.entries.push(at);
+        self.index = 0;
+    }
+
+    /// Move the current place without pushing a step. Used while a tab follows the passage.
+    pub fn retarget(&mut self, to: T) {
+        if self.entries.is_empty() {
+            self.restart(to);
+            return;
+        }
+        self.entries[self.index] = to;
     }
 
     pub fn can_back(&self) -> bool {
@@ -27,7 +41,7 @@ impl History {
     }
 
     /// Record a jump to `to`. Truncates any forward entries.
-    pub fn navigate(&mut self, to: Ref) {
+    pub fn navigate(&mut self, to: T) {
         if self.current() == to {
             return;
         }
@@ -40,7 +54,7 @@ impl History {
         self.index = self.entries.len() - 1;
     }
 
-    pub fn back(&mut self) -> Option<Ref> {
+    pub fn back(&mut self) -> Option<T> {
         if !self.can_back() {
             return None;
         }
@@ -48,7 +62,7 @@ impl History {
         Some(self.current())
     }
 
-    pub fn forward(&mut self) -> Option<Ref> {
+    pub fn forward(&mut self) -> Option<T> {
         if !self.can_forward() {
             return None;
         }
@@ -60,6 +74,7 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nav::Ref;
 
     fn r(book: u8, chapter: u8, verse: u8) -> Ref {
         Ref {
@@ -96,5 +111,25 @@ mod tests {
         assert!(!hist.can_forward());
         assert_eq!(hist.current(), r(43, 3, 16));
         assert_eq!(hist.back(), Some(r(1, 2, 1)));
+    }
+
+    #[test]
+    fn retarget_keeps_the_previous_step() {
+        let mut hist = History::new(r(1, 1, 1));
+        hist.navigate(r(1, 2, 1));
+        hist.retarget(r(43, 3, 16));
+        assert_eq!(hist.current(), r(43, 3, 16));
+        assert_eq!(hist.back(), Some(r(1, 1, 1)));
+        assert_eq!(hist.forward(), Some(r(43, 3, 16)));
+    }
+
+    #[test]
+    fn restart_drops_the_trail() {
+        let mut hist = History::new(1);
+        hist.navigate(2);
+        hist.restart(9);
+        assert_eq!(hist.current(), 9);
+        assert!(!hist.can_back());
+        assert!(!hist.can_forward());
     }
 }

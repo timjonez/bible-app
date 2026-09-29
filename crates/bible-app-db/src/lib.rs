@@ -717,6 +717,74 @@ fn row_dict_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<DictEntry> {
     })
 }
 
+/// The next or previous entry in import order. `i` is that entry's index.
+pub fn adjacent_entry(
+    conn: &Connection,
+    module: &str,
+    i: i32,
+    forward: bool,
+) -> Result<Option<DictHit>, DbError> {
+    let sql = if forward {
+        "SELECT i, headword FROM entries
+         WHERE module = ?1 AND i > ?2
+         ORDER BY i
+         LIMIT 1"
+    } else {
+        "SELECT i, headword FROM entries
+         WHERE module = ?1 AND i < ?2
+         ORDER BY i DESC
+         LIMIT 1"
+    };
+    let row = conn
+        .query_row(sql, rusqlite::params![module, i], |row| {
+            Ok(DictHit {
+                i: row.get(0)?,
+                headword: row.get(1)?,
+            })
+        })
+        .optional()?;
+    Ok(row)
+}
+
+/// Next or previous Strong's number. Hebrew runs before Greek. `i` is the
+/// same encoding as [`get_strongs_entry`].
+pub fn adjacent_strongs(
+    conn: &Connection,
+    i: i32,
+    forward: bool,
+) -> Result<Option<DictHit>, DbError> {
+    let Some((num, lang)) = strongs_row_parts(i) else {
+        return Ok(None);
+    };
+    // Hebrew before Greek. Letter order is the other way around.
+    let sql = if forward {
+        "SELECT num, lang FROM strongs
+         WHERE (lang = ?1 AND num > ?2)
+            OR (CASE lang WHEN 'H' THEN 0 WHEN 'G' THEN 1 ELSE 2 END
+                > CASE ?1 WHEN 'H' THEN 0 WHEN 'G' THEN 1 ELSE 2 END)
+         ORDER BY CASE lang WHEN 'H' THEN 0 WHEN 'G' THEN 1 ELSE 2 END, num
+         LIMIT 1"
+    } else {
+        "SELECT num, lang FROM strongs
+         WHERE (lang = ?1 AND num < ?2)
+            OR (CASE lang WHEN 'H' THEN 0 WHEN 'G' THEN 1 ELSE 2 END
+                < CASE ?1 WHEN 'H' THEN 0 WHEN 'G' THEN 1 ELSE 2 END)
+         ORDER BY CASE lang WHEN 'H' THEN 0 WHEN 'G' THEN 1 ELSE 2 END DESC, num DESC
+         LIMIT 1"
+    };
+    let row = conn
+        .query_row(sql, rusqlite::params![lang, num], |row| {
+            let num: i32 = row.get(0)?;
+            let lang: String = row.get(1)?;
+            Ok(DictHit {
+                i: strongs_row_i(&lang, num),
+                headword: format!("{lang}{num}"),
+            })
+        })
+        .optional()?;
+    Ok(row)
+}
+
 pub fn get_entry(
     conn: &Connection,
     module: &str,
@@ -1344,5 +1412,42 @@ mod tests {
         let tabs = lookup_lexicons_for_defs(&conn, std::slice::from_ref(&hebrew)).unwrap();
         assert_eq!(tabs[0].module, "BDB");
         assert!(!tabs.iter().any(|e| e.module == "Thayer"));
+    }
+
+    #[test]
+    fn adjacent_entry_follows_import_order() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license)
+            VALUES ('BDB', 'lexicon', 'BDB', 'CC BY 4.0');
+            INSERT INTO entries (module, i, headword, text) VALUES
+                ('BDB', 1, 'H1', 'one'),
+                ('BDB', 2, 'H2', 'two'),
+                ('BDB', 10, 'H10', 'ten');
+            INSERT INTO strongs (num, lang, lemma, pronunciation, definition) VALUES
+                (1, 'H', 'a', '', 'first'),
+                (2, 'H', 'b', '', 'second'),
+                (1, 'G', 'c', '', 'greek');
+            "#,
+        )
+        .unwrap();
+        let next = adjacent_entry(&conn, "BDB", 1, true).unwrap().unwrap();
+        assert_eq!(next.headword, "H2");
+        assert!(adjacent_entry(&conn, "BDB", 10, true).unwrap().is_none());
+        let prev = adjacent_entry(&conn, "BDB", 10, false).unwrap().unwrap();
+        assert_eq!(prev.headword, "H2");
+
+        let after_hebrew = adjacent_strongs(&conn, strongs_row_i("H", 2), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_hebrew.headword, "G1");
+        let before_greek = adjacent_strongs(&conn, strongs_row_i("G", 1), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before_greek.headword, "H2");
+        assert!(adjacent_strongs(&conn, strongs_row_i("H", 1), false)
+            .unwrap()
+            .is_none());
     }
 }

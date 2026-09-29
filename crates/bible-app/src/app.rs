@@ -143,6 +143,16 @@ pub enum Msg {
     PassageNext(TabId),
     PassageBack(TabId),
     PassageForward(TabId),
+    StudyBook(TabId, u32),
+    StudyChapter(TabId, u32),
+    StudyPrev(TabId),
+    StudyNext(TabId),
+    StudyBack(TabId),
+    StudyForward(TabId),
+    LibraryPrev(TabId),
+    LibraryNext(TabId),
+    LibraryBack(TabId),
+    LibraryForward(TabId),
     CopyVerses,
     CopyAtOffset(i32),
     FontSmaller,
@@ -611,20 +621,8 @@ impl SimpleComponent for App {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
-            Msg::PrevChapter(window) => {
-                if let Some(conn) = &self.conn {
-                    if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at_in(window)) {
-                        self.go_in(window, at, false);
-                    }
-                }
-            }
-            Msg::NextChapter(window) => {
-                if let Some(conn) = &self.conn {
-                    if let Ok(at) = nav::next_chapter(conn, &self.books, self.at_in(window)) {
-                        self.go_in(window, at, false);
-                    }
-                }
-            }
+            Msg::PrevChapter(window) => self.alt_step(window, AltStep::Prev),
+            Msg::NextChapter(window) => self.alt_step(window, AltStep::Next),
             Msg::GoTo(window, text) => {
                 let text = text.trim();
                 if text.is_empty() {
@@ -800,13 +798,7 @@ impl SimpleComponent for App {
                     }
                 }
             }
-            Msg::DictOpen(idx) => {
-                let Some(conn) = &self.conn else { return };
-                if let Some(TabContent::Library(widgets)) = self.library() {
-                    dict::open_hit(widgets, conn, idx);
-                }
-                self.sync_open_tab_title();
-            }
+            Msg::DictOpen(idx) => self.open_dict_hit(idx),
             Msg::OpenStrongsOccurrences(code) => {
                 self.popdown_passage_popovers();
                 self.open_occurrences(&code);
@@ -817,24 +809,8 @@ impl SimpleComponent for App {
                 };
                 self.go(at, true);
             }
-            Msg::Back(window) => {
-                let Some(id) = self.workspace.focused_passage_in(window) else {
-                    return;
-                };
-                let Some(at) = self.passage_mut(id).and_then(|p| p.history.back()) else {
-                    return;
-                };
-                self.apply_passage_ref(id, at, true, false);
-            }
-            Msg::Forward(window) => {
-                let Some(id) = self.workspace.focused_passage_in(window) else {
-                    return;
-                };
-                let Some(at) = self.passage_mut(id).and_then(|p| p.history.forward()) else {
-                    return;
-                };
-                self.apply_passage_ref(id, at, true, false);
-            }
+            Msg::Back(window) => self.alt_step(window, AltStep::Back),
+            Msg::Forward(window) => self.alt_step(window, AltStep::Forward),
             Msg::SelectPassageBook(id, idx) => {
                 let Some(book) = picker::book_id_at(&self.books, idx) else {
                     return;
@@ -911,6 +887,16 @@ impl SimpleComponent for App {
                 self.workspace.focus(id);
                 self.apply_passage_ref(id, at, true, false);
             }
+            Msg::StudyBook(id, idx) => self.study_book(id, idx),
+            Msg::StudyChapter(id, idx) => self.study_chapter(id, idx),
+            Msg::StudyPrev(id) => self.study_prev(id),
+            Msg::StudyNext(id) => self.study_next(id),
+            Msg::StudyBack(id) => self.study_history(id, false),
+            Msg::StudyForward(id) => self.study_history(id, true),
+            Msg::LibraryPrev(id) => self.library_step(id, false),
+            Msg::LibraryNext(id) => self.library_step(id, true),
+            Msg::LibraryBack(id) => self.library_history(id, false),
+            Msg::LibraryForward(id) => self.library_history(id, true),
             Msg::CopyVerses => {
                 self.copy_from_selection_or_current();
             }
@@ -1081,7 +1067,14 @@ impl SimpleComponent for App {
                 if let Some(id) = self.menu_tab.get() {
                     self.workspace.set_follow(id, on);
                     if on {
-                        self.refresh_followers();
+                        let at = self
+                            .workspace
+                            .tab(id)
+                            .and_then(|tab| tab.kind.at())
+                            .unwrap_or_else(|| self.at());
+                        self.present_study(id, at, PlaceMemory::Navigate);
+                    } else {
+                        self.sync_study_bar(id);
                     }
                 }
             }
@@ -1129,13 +1122,6 @@ impl App {
         self.workspace
             .focused_passage_id()
             .and_then(|id| self.passage(id))
-    }
-
-    fn library(&self) -> Option<&TabContent> {
-        let id = self
-            .workspace
-            .find_kind(|k| matches!(k, TabKind::Library { .. }))?;
-        self.hosted.get(&id).map(|h| &h.content)
     }
 
     fn marks(&self) -> Option<&TabContent> {
@@ -2019,9 +2005,7 @@ impl App {
         let opened = self.workspace.open_mhc(at);
         if opened.created {
             let widgets = mhc::build();
-            if let Some(conn) = &self.conn {
-                mhc::fill(&widgets, conn, &self.books, at);
-            }
+            mhc::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
             let root = widgets.root.clone();
             self.add_page(opened.id, &root, "Matthew Henry", TabContent::Mhc(widgets));
             if self.open_beside {
@@ -2029,8 +2013,19 @@ impl App {
             }
         } else {
             self.select_tab(opened.id);
-            self.fill_mhc(opened.id, at);
         }
+        let follow = self
+            .workspace
+            .tab(opened.id)
+            .is_some_and(|tab| tab.kind.follows_verse());
+        let memory = if opened.created {
+            PlaceMemory::Restart
+        } else if follow {
+            PlaceMemory::Retarget
+        } else {
+            PlaceMemory::Navigate
+        };
+        self.present_study(opened.id, at, memory);
         self.sync_tab_title(opened.id);
     }
 
@@ -2041,10 +2036,8 @@ impl App {
         let at = self.at();
         let opened = self.workspace.open_tsk(at);
         if opened.created {
-            let mut widgets = tsk::build(self.msg_tx.clone());
-            if let Some(conn) = &self.conn {
-                tsk::fill(&mut widgets, conn, &self.books, at, self.msg_tx.clone());
-            }
+            let widgets = tsk::build(self.msg_tx.clone());
+            tsk::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
             let root = widgets.root.clone();
             self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
             if self.open_beside {
@@ -2052,8 +2045,19 @@ impl App {
             }
         } else {
             self.select_tab(opened.id);
-            self.fill_tsk(opened.id, at);
         }
+        let follow = self
+            .workspace
+            .tab(opened.id)
+            .is_some_and(|tab| tab.kind.follows_verse());
+        let memory = if opened.created {
+            PlaceMemory::Restart
+        } else if follow {
+            PlaceMemory::Retarget
+        } else {
+            PlaceMemory::Navigate
+        };
+        self.present_study(opened.id, at, memory);
         self.sync_tab_title(opened.id);
     }
 
@@ -2066,6 +2070,7 @@ impl App {
             .open_library(module.to_string(), headword.map(str::to_string));
         if opened.created {
             let mut widgets = dict::build(self.msg_tx.clone());
+            dict::wire(&widgets, opened.id, self.msg_tx.clone());
             if let Some(conn) = &self.conn {
                 dict::load_modules(&mut widgets, conn);
             }
@@ -2231,41 +2236,39 @@ impl App {
         }
     }
 
-    fn fill_mhc(&mut self, id: TabId, at: Ref) {
-        let Some(conn) = &self.conn else { return };
-        if let Some(TabContent::Mhc(w)) = self.hosted.get(&id).map(|h| &h.content) {
-            mhc::fill(w, conn, &self.books, at);
-        }
-        if let Some(page) = self.page_of(id) {
-            page.set_tooltip(&nav::format_ref(&self.books, at));
-        }
-    }
-
-    fn fill_tsk(&mut self, id: TabId, at: Ref) {
-        let Some(conn) = &self.conn else { return };
+    fn present_study(&mut self, id: TabId, at: Ref, memory: PlaceMemory) {
+        self.workspace.set_study_at(id, at);
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
         let tx = self.msg_tx.clone();
-        if let Some(TabContent::Tsk(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
-            tsk::fill(w, conn, &self.books, at, tx);
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Mhc(widgets)) => {
+                mhc::show(widgets, conn, &self.books, at);
+                remember_study(&widgets.history, &widgets.placed, at, memory);
+            }
+            Some(TabContent::Tsk(widgets)) => {
+                tsk::show(widgets, conn, &self.books, at, tx);
+                remember_study(&widgets.history, &widgets.placed, at, memory);
+            }
+            _ => return,
         }
         if let Some(page) = self.page_of(id) {
             page.set_tooltip(&nav::format_ref(&self.books, at));
         }
+        self.sync_study_bar(id);
     }
 
     fn refresh_followers(&mut self) {
-        let following: Vec<(TabId, TabKind)> = self
+        let following: Vec<(TabId, Ref)> = self
             .workspace
             .tabs()
             .iter()
             .filter(|t| t.kind.follows_verse())
-            .map(|t| (t.id, t.kind.clone()))
+            .filter_map(|t| t.kind.at().map(|at| (t.id, at)))
             .collect();
-        for (id, kind) in following {
-            match kind {
-                TabKind::Mhc { at, .. } => self.fill_mhc(id, at),
-                TabKind::Tsk { at, .. } => self.fill_tsk(id, at),
-                _ => {}
-            }
+        for (id, at) in following {
+            self.present_study(id, at, PlaceMemory::Retarget);
         }
     }
 
@@ -3194,6 +3197,319 @@ impl App {
         picker::sync_chapters(&p.chapter, chapters, at.chapter);
         p.bar_syncing.set(false);
         p.sync_history_buttons();
+    }
+
+    fn alt_step(&mut self, window: WindowId, step: AltStep) {
+        let focused = self.workspace.focused_in(window);
+        let kind = focused.and_then(|id| self.workspace.tab(id).map(|tab| tab.kind.clone()));
+        match (focused, kind, step) {
+            (Some(id), Some(TabKind::Mhc { .. } | TabKind::Tsk { .. }), AltStep::Prev) => {
+                self.study_chapter_step(id, false);
+            }
+            (Some(id), Some(TabKind::Mhc { .. } | TabKind::Tsk { .. }), AltStep::Next) => {
+                self.study_chapter_step(id, true);
+            }
+            (Some(id), Some(TabKind::Mhc { .. } | TabKind::Tsk { .. }), AltStep::Back) => {
+                self.study_history(id, false);
+            }
+            (Some(id), Some(TabKind::Mhc { .. } | TabKind::Tsk { .. }), AltStep::Forward) => {
+                self.study_history(id, true);
+            }
+            (Some(id), Some(TabKind::Library { .. }), AltStep::Prev) => {
+                self.library_step(id, false)
+            }
+            (Some(id), Some(TabKind::Library { .. }), AltStep::Next) => self.library_step(id, true),
+            (Some(id), Some(TabKind::Library { .. }), AltStep::Back) => {
+                self.library_history(id, false);
+            }
+            (Some(id), Some(TabKind::Library { .. }), AltStep::Forward) => {
+                self.library_history(id, true);
+            }
+            (_, _, AltStep::Prev) => {
+                if let Some(conn) = &self.conn {
+                    if let Ok(at) = nav::prev_chapter(conn, &self.books, self.at_in(window)) {
+                        self.go_in(window, at, false);
+                    }
+                }
+            }
+            (_, _, AltStep::Next) => {
+                if let Some(conn) = &self.conn {
+                    if let Ok(at) = nav::next_chapter(conn, &self.books, self.at_in(window)) {
+                        self.go_in(window, at, false);
+                    }
+                }
+            }
+            (_, _, AltStep::Back) => self.passage_history(window, false),
+            (_, _, AltStep::Forward) => self.passage_history(window, true),
+        }
+    }
+
+    fn passage_history(&mut self, window: WindowId, forward: bool) {
+        let Some(id) = self.workspace.focused_passage_in(window) else {
+            return;
+        };
+        let at = if forward {
+            self.passage_mut(id)
+                .and_then(|passage| passage.history.forward())
+        } else {
+            self.passage_mut(id)
+                .and_then(|passage| passage.history.back())
+        };
+        if let Some(at) = at {
+            self.apply_passage_ref(id, at, true, false);
+        }
+    }
+
+    fn study_book(&mut self, id: TabId, idx: u32) {
+        let Some(book) = picker::book_id_at(&self.books, idx) else {
+            return;
+        };
+        let Some(at) = self.workspace.tab(id).and_then(|tab| tab.kind.at()) else {
+            return;
+        };
+        if at.book == book {
+            return;
+        }
+        self.move_study(
+            id,
+            Ref {
+                book,
+                chapter: 1,
+                verse: 1,
+            },
+        );
+    }
+
+    fn study_chapter(&mut self, id: TabId, idx: u32) {
+        let Some(chapter) = picker::chapter_from_index(idx) else {
+            return;
+        };
+        let Some(at) = self.workspace.tab(id).and_then(|tab| tab.kind.at()) else {
+            return;
+        };
+        if at.chapter == chapter {
+            return;
+        }
+        self.move_study(
+            id,
+            Ref {
+                book: at.book,
+                chapter,
+                verse: 1,
+            },
+        );
+    }
+
+    fn study_prev(&mut self, id: TabId) {
+        self.study_chapter_step(id, false);
+    }
+
+    fn study_next(&mut self, id: TabId) {
+        self.study_chapter_step(id, true);
+    }
+
+    fn study_chapter_step(&mut self, id: TabId, forward: bool) {
+        let Some(at) = self.workspace.tab(id).and_then(|tab| tab.kind.at()) else {
+            return;
+        };
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let stepped = if forward {
+            nav::next_chapter(conn, &self.books, at)
+        } else {
+            nav::prev_chapter(conn, &self.books, at)
+        };
+        let Ok(at) = stepped else {
+            return;
+        };
+        self.move_study(id, at);
+    }
+
+    fn move_study(&mut self, id: TabId, at: Ref) {
+        if self
+            .workspace
+            .tab(id)
+            .is_some_and(|tab| tab.kind.follows_verse())
+        {
+            let window = self.window_of(id);
+            if let Some(passage) = self.workspace.focused_passage_in(window) {
+                self.apply_passage_ref(passage, at, false, true);
+            } else {
+                self.go_in(window, at, false);
+            }
+            return;
+        }
+        self.present_study(id, at, PlaceMemory::Navigate);
+    }
+
+    fn study_history(&mut self, id: TabId, forward: bool) {
+        if self
+            .workspace
+            .tab(id)
+            .is_some_and(|tab| tab.kind.follows_verse())
+        {
+            self.passage_history(self.window_of(id), forward);
+            return;
+        }
+        let at = study_history_move(self.hosted.get(&id).map(|hosted| &hosted.content), forward);
+        if let Some(at) = at {
+            self.present_study(id, at, PlaceMemory::Keep);
+        }
+    }
+
+    fn library_step(&mut self, id: TabId, forward: bool) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let key = match self.hosted.get(&id).map(|hosted| &hosted.content) {
+            Some(TabContent::Library(widgets)) => dict::step(widgets, conn, forward),
+            _ => None,
+        };
+        if let Some(key) = key {
+            self.workspace.set_library_headword(id, Some(key));
+        }
+    }
+
+    fn library_history(&mut self, id: TabId, forward: bool) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let key = match self.hosted.get(&id).map(|hosted| &hosted.content) {
+            Some(TabContent::Library(widgets)) => dict::history_step(widgets, conn, forward),
+            _ => None,
+        };
+        if let Some(key) = key {
+            self.workspace.set_library_headword(id, Some(key));
+        }
+    }
+
+    fn open_dict_hit(&mut self, idx: i32) {
+        let Some(id) = self
+            .workspace
+            .find_kind(|kind| matches!(kind, TabKind::Library { .. }))
+        else {
+            return;
+        };
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let key = match self.hosted.get(&id).map(|hosted| &hosted.content) {
+            Some(TabContent::Library(widgets)) => dict::open_hit(widgets, conn, idx),
+            _ => None,
+        };
+        if let Some(key) = key {
+            self.workspace.set_library_headword(id, Some(key));
+        }
+        self.sync_open_tab_title();
+    }
+
+    fn sync_study_bar(&self, id: TabId) {
+        let Some(at) = self.workspace.tab(id).and_then(|tab| tab.kind.at()) else {
+            return;
+        };
+        let follow = self
+            .workspace
+            .tab(id)
+            .is_some_and(|tab| tab.kind.follows_verse());
+        let chapters = self
+            .conn
+            .as_ref()
+            .and_then(|conn| bible_app_db::max_chapter(conn, at.book).ok())
+            .unwrap_or(1);
+        let passage_hist = if follow {
+            self.workspace
+                .focused_passage_in(self.window_of(id))
+                .and_then(|passage_id| self.passage(passage_id))
+                .map(|passage| (passage.history.can_back(), passage.history.can_forward()))
+        } else {
+            None
+        };
+        let Some(hosted) = self.hosted.get(&id) else {
+            return;
+        };
+        let (book, chapter, back, forward, syncing, history) = match &hosted.content {
+            TabContent::Mhc(widgets) => (
+                &widgets.book,
+                &widgets.chapter,
+                &widgets.back,
+                &widgets.forward,
+                &widgets.syncing,
+                &widgets.history,
+            ),
+            TabContent::Tsk(widgets) => (
+                &widgets.book,
+                &widgets.chapter,
+                &widgets.back,
+                &widgets.forward,
+                &widgets.syncing,
+                &widgets.history,
+            ),
+            _ => return,
+        };
+        syncing.set(true);
+        picker::select_book(book, &self.books, at.book);
+        picker::sync_chapters(chapter, chapters, at.chapter);
+        syncing.set(false);
+        let (can_back, can_forward) = passage_hist.unwrap_or_else(|| {
+            let history = history.borrow();
+            (history.can_back(), history.can_forward())
+        });
+        back.set_sensitive(can_back);
+        forward.set_sensitive(can_forward);
+    }
+}
+
+enum AltStep {
+    Prev,
+    Next,
+    Back,
+    Forward,
+}
+
+enum PlaceMemory {
+    Restart,
+    Retarget,
+    Navigate,
+    Keep,
+}
+
+fn study_history_move(content: Option<&TabContent>, forward: bool) -> Option<Ref> {
+    let history = match content {
+        Some(TabContent::Mhc(widgets)) => &widgets.history,
+        Some(TabContent::Tsk(widgets)) => &widgets.history,
+        _ => return None,
+    };
+    let mut history = history.borrow_mut();
+    if forward {
+        history.forward()
+    } else {
+        history.back()
+    }
+}
+
+fn remember_study(
+    history: &RefCell<crate::history::History<Ref>>,
+    placed: &Cell<bool>,
+    at: Ref,
+    memory: PlaceMemory,
+) {
+    let mut history = history.borrow_mut();
+    match memory {
+        PlaceMemory::Restart => {
+            history.restart(at);
+            placed.set(true);
+        }
+        PlaceMemory::Retarget => history.retarget(at),
+        PlaceMemory::Navigate => {
+            if placed.get() {
+                history.navigate(at);
+            } else {
+                history.restart(at);
+                placed.set(true);
+            }
+        }
+        PlaceMemory::Keep => {}
     }
 }
 
