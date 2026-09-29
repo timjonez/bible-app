@@ -27,7 +27,7 @@ pub struct ChapterCtx<'a> {
 
 pub struct PassageView {
     pub at: Ref,
-    pub history: History,
+    pub history: History<Ref>,
     pub buffer: gtk::TextBuffer,
     pub view: gtk::TextView,
     /// Column overlay. Width and the edge handles stay on this widget.
@@ -98,14 +98,7 @@ impl PassageView {
         place_column_edges(&root, &left_handle, &right_handle, &preferred_px);
 
         let bar = passage_bar();
-        let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
-        separator.set_hexpand(true);
-        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        page.set_hexpand(true);
-        page.set_vexpand(true);
-        page.append(&bar.row);
-        page.append(&separator);
-        page.append(&root);
+        let page = crate::shell::bar_page(&bar.row, &root);
 
         let strongs_popover = strongs::create(&view);
         let tsk_popover = tsk::create_popover(&view);
@@ -339,32 +332,16 @@ impl PassageView {
         sender: relm4::Sender<crate::app::Msg>,
         books: &[bible_app_db::Book],
     ) {
-        picker::prepare(&self.book, gtk::StringFilterMatchMode::Substring);
-        picker::prepare(&self.chapter, gtk::StringFilterMatchMode::Prefix);
-        picker::fill_books(&self.book, books);
-
-        let syncing = self.bar_syncing.clone();
-        let tx = sender.clone();
-        self.book.connect_selected_notify(move |dd| {
-            if syncing.get() {
-                return;
-            }
-            let pos = dd.selected();
-            if pos != gtk::INVALID_LIST_POSITION {
-                tx.emit(crate::app::Msg::SelectPassageBook(id, pos));
-            }
-        });
-        let syncing = self.bar_syncing.clone();
-        let tx = sender.clone();
-        self.chapter.connect_selected_notify(move |dd| {
-            if syncing.get() {
-                return;
-            }
-            let pos = dd.selected();
-            if pos != gtk::INVALID_LIST_POSITION {
-                tx.emit(crate::app::Msg::SelectPassageChapter(id, pos));
-            }
-        });
+        let book_tx = sender.clone();
+        let chapter_tx = sender.clone();
+        picker::wire_place(
+            &self.book,
+            &self.chapter,
+            &self.bar_syncing,
+            books,
+            move |pos| book_tx.emit(crate::app::Msg::SelectPassageBook(id, pos)),
+            move |pos| chapter_tx.emit(crate::app::Msg::SelectPassageChapter(id, pos)),
+        );
         let tx = sender.clone();
         self.prev
             .connect_clicked(move |_| tx.emit(crate::app::Msg::PassagePrev(id)));
@@ -872,60 +849,24 @@ struct PassageBar {
 }
 
 fn passage_bar() -> PassageBar {
-    let book = gtk::DropDown::from_strings(&[]);
-    book.set_tooltip_text(Some("Book"));
-    book.add_css_class("passage-picker");
-    book.set_valign(gtk::Align::Center);
-    book.update_property(&[gtk::accessible::Property::Label("Book")]);
-
-    let chapter = gtk::DropDown::from_strings(&[]);
-    chapter.set_tooltip_text(Some("Chapter"));
-    chapter.add_css_class("chapter-picker");
-    chapter.set_valign(gtk::Align::Center);
-    chapter.update_property(&[gtk::accessible::Property::Label("Chapter")]);
-
-    let prev = gtk::Button::from_icon_name("go-previous-symbolic");
-    prev.set_tooltip_text(Some("Previous chapter (Alt+Left)"));
-    prev.add_css_class("flat");
-    prev.set_valign(gtk::Align::Center);
-    prev.update_property(&[gtk::accessible::Property::Label("Previous chapter")]);
-    let next = gtk::Button::from_icon_name("go-next-symbolic");
-    next.set_tooltip_text(Some("Next chapter (Alt+Right)"));
-    next.add_css_class("flat");
-    next.set_valign(gtk::Align::Center);
-    next.update_property(&[gtk::accessible::Property::Label("Next chapter")]);
-
-    let pickers = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    pickers.set_valign(gtk::Align::Center);
-    pickers.append(&book);
-    pickers.append(&chapter);
-
-    let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    cluster.set_halign(gtk::Align::Center);
-    cluster.set_valign(gtk::Align::Center);
-    cluster.append(&prev);
-    cluster.append(&pickers);
-    cluster.append(&next);
-
-    let history = crate::shell::history_nav();
-    let row = gtk::CenterBox::new();
-    row.set_orientation(gtk::Orientation::Horizontal);
-    row.set_hexpand(true);
-    row.set_margin_top(6);
-    row.set_margin_bottom(6);
-    row.set_margin_start(12);
-    row.set_margin_end(12);
-    row.set_start_widget(Some(&history.row));
-    row.set_center_widget(Some(&cluster));
-
+    let bar = crate::shell::location_bar(
+        "Previous chapter (Alt+Left)",
+        "Next chapter (Alt+Right)",
+        "Previous chapter",
+        "Next chapter",
+    );
+    let book = picker::book_dropdown();
+    let chapter = picker::chapter_dropdown();
+    bar.pickers.append(&book);
+    bar.pickers.append(&chapter);
     PassageBar {
-        row,
+        row: bar.row,
         book,
         chapter,
-        prev,
-        next,
-        back: history.back,
-        forward: history.forward,
+        prev: bar.prev,
+        next: bar.next,
+        back: bar.back,
+        forward: bar.forward,
         syncing: Rc::new(Cell::new(false)),
     }
 }

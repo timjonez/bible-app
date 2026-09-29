@@ -2,6 +2,8 @@ use bible_app_db::Book;
 use gtk::gio::prelude::ListModelExt;
 use gtk::prelude::*;
 use relm4::gtk;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Once;
 
 pub fn book_index(books: &[Book], id: u8) -> Option<u32> {
@@ -90,6 +92,60 @@ pub fn select_book(dropdown: &gtk::DropDown, books: &[Book], book: u8) {
     if dropdown.selected() != idx {
         dropdown.set_selected(idx);
     }
+}
+
+pub fn book_dropdown() -> gtk::DropDown {
+    let book = gtk::DropDown::from_strings(&[]);
+    book.set_tooltip_text(Some("Book"));
+    book.add_css_class("passage-picker");
+    book.set_valign(gtk::Align::Center);
+    book.update_property(&[gtk::accessible::Property::Label("Book")]);
+    book
+}
+
+pub fn chapter_dropdown() -> gtk::DropDown {
+    let chapter = gtk::DropDown::from_strings(&[]);
+    chapter.set_tooltip_text(Some("Chapter"));
+    chapter.add_css_class("chapter-picker");
+    chapter.set_valign(gtk::Align::Center);
+    chapter.update_property(&[gtk::accessible::Property::Label("Chapter")]);
+    chapter
+}
+
+/// Book menu (substring search) and chapter menu (prefix search).
+/// `on_book` and `on_chapter` receive the selected index. Calls made while
+/// `syncing` is set are ignored.
+pub fn wire_place(
+    book: &gtk::DropDown,
+    chapter: &gtk::DropDown,
+    syncing: &Rc<Cell<bool>>,
+    books: &[Book],
+    on_book: impl Fn(u32) + 'static,
+    on_chapter: impl Fn(u32) + 'static,
+) {
+    prepare(book, gtk::StringFilterMatchMode::Substring);
+    prepare(chapter, gtk::StringFilterMatchMode::Prefix);
+    fill_books(book, books);
+    let sync = syncing.clone();
+    book.connect_selected_notify(move |dd| {
+        if sync.get() {
+            return;
+        }
+        let pos = dd.selected();
+        if pos != gtk::INVALID_LIST_POSITION {
+            on_book(pos);
+        }
+    });
+    let sync = syncing.clone();
+    chapter.connect_selected_notify(move |dd| {
+        if sync.get() {
+            return;
+        }
+        let pos = dd.selected();
+        if pos != gtk::INVALID_LIST_POSITION {
+            on_chapter(pos);
+        }
+    });
 }
 
 pub fn sync_chapters(dropdown: &gtk::DropDown, max_chapter: u8, chapter: u8) {

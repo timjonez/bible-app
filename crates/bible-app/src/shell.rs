@@ -132,6 +132,78 @@ pub fn history_nav() -> HistoryNav {
     HistoryNav { row, back, forward }
 }
 
+/// The passage bar: history on the left, previous and next around the widgets
+/// the caller packs into `pickers` (book and chapter, or a headword search).
+pub struct LocationBar {
+    pub row: gtk::CenterBox,
+    pub prev: gtk::Button,
+    pub next: gtk::Button,
+    pub back: gtk::Button,
+    pub forward: gtk::Button,
+    pub pickers: gtk::Box,
+}
+
+pub fn location_bar(
+    prev_tip: &str,
+    next_tip: &str,
+    prev_label: &str,
+    next_label: &str,
+) -> LocationBar {
+    let prev = gtk::Button::from_icon_name("go-previous-symbolic");
+    prev.set_tooltip_text(Some(prev_tip));
+    prev.add_css_class("flat");
+    prev.set_valign(gtk::Align::Center);
+    prev.update_property(&[gtk::accessible::Property::Label(prev_label)]);
+    let next = gtk::Button::from_icon_name("go-next-symbolic");
+    next.set_tooltip_text(Some(next_tip));
+    next.add_css_class("flat");
+    next.set_valign(gtk::Align::Center);
+    next.update_property(&[gtk::accessible::Property::Label(next_label)]);
+
+    let pickers = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    pickers.set_valign(gtk::Align::Center);
+
+    let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    cluster.set_halign(gtk::Align::Center);
+    cluster.set_valign(gtk::Align::Center);
+    cluster.append(&prev);
+    cluster.append(&pickers);
+    cluster.append(&next);
+
+    let history = history_nav();
+    let row = gtk::CenterBox::new();
+    row.set_orientation(gtk::Orientation::Horizontal);
+    row.set_hexpand(true);
+    row.set_margin_top(6);
+    row.set_margin_bottom(6);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.set_start_widget(Some(&history.row));
+    row.set_center_widget(Some(&cluster));
+
+    LocationBar {
+        row,
+        prev,
+        next,
+        back: history.back,
+        forward: history.forward,
+        pickers,
+    }
+}
+
+/// Navigation row, a separator, then the tab body.
+pub fn bar_page(bar: &impl IsA<gtk::Widget>, body: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.set_hexpand(true);
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.set_hexpand(true);
+    page.set_vexpand(true);
+    page.append(bar);
+    page.append(&separator);
+    page.append(body);
+    page
+}
+
 /// A reader window other than the main one.
 pub struct SideChrome {
     pub window: adw::ApplicationWindow,

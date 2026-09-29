@@ -127,6 +127,49 @@ pub fn format_ref(books: &[Book], at: Ref) -> String {
     format!("{} {}:{}", book_name(books, at.book), at.chapter, at.verse)
 }
 
+/// One chapter of a commentary or treasury, as a single document.
+pub struct StackedText {
+    pub text: String,
+    /// Character offset where each section heading starts, in input order.
+    pub heading_at: Vec<i32>,
+    pub heading_len: Vec<i32>,
+}
+
+/// Join `(heading, body)` sections with a blank line between them.
+pub fn stack_sections(sections: &[(&str, &str)]) -> StackedText {
+    let mut text = String::new();
+    let mut heading_at = Vec::with_capacity(sections.len());
+    let mut heading_len = Vec::with_capacity(sections.len());
+    for (i, (head, body)) in sections.iter().enumerate() {
+        if i > 0 {
+            text.push_str("\n\n");
+        }
+        heading_at.push(text.chars().count() as i32);
+        heading_len.push(head.chars().count() as i32);
+        text.push_str(head);
+        text.push_str("\n\n");
+        text.push_str(body.trim());
+    }
+    StackedText {
+        text,
+        heading_at,
+        heading_len,
+    }
+}
+
+/// Offset of the section that covers `verse` (the last heading at or before it).
+pub fn section_offset(verses: &[u8], offsets: &[i32], verse: u8) -> Option<i32> {
+    let mut chosen = None;
+    for (v, off) in verses.iter().zip(offsets) {
+        if *v <= verse {
+            chosen = Some(*off);
+        } else {
+            break;
+        }
+    }
+    chosen.or_else(|| offsets.first().copied())
+}
+
 fn book_name(books: &[Book], book: u8) -> &str {
     books
         .iter()
@@ -279,5 +322,30 @@ mod tests {
             ),
             "John 3:16"
         );
+    }
+
+    #[test]
+    fn stack_sections_records_heading_offsets() {
+        let stacked = stack_sections(&[
+            ("Genesis 1:1", "In the beginning"),
+            ("Genesis 1:3", "And God said"),
+        ]);
+        assert!(stacked.text.starts_with("Genesis 1:1\n\nIn the beginning"));
+        assert_eq!(stacked.heading_at.len(), 2);
+        assert_eq!(stacked.heading_len[0], "Genesis 1:1".chars().count() as i32);
+        let second = stacked.heading_at[1] as usize;
+        let len = stacked.heading_len[1] as usize;
+        let head: String = stacked.text.chars().skip(second).take(len).collect();
+        assert_eq!(head, "Genesis 1:3");
+    }
+
+    #[test]
+    fn section_offset_uses_the_covering_verse() {
+        let verses = [1, 3, 6];
+        let offsets = [0, 40, 80];
+        assert_eq!(section_offset(&verses, &offsets, 1), Some(0));
+        assert_eq!(section_offset(&verses, &offsets, 4), Some(40));
+        assert_eq!(section_offset(&verses, &offsets, 9), Some(80));
+        assert_eq!(section_offset(&[], &[], 1), None);
     }
 }

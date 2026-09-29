@@ -463,6 +463,31 @@ impl Workspace {
         }
     }
 
+    pub fn focused_in(&self, window: WindowId) -> Option<TabId> {
+        let id = self.window(window)?.focused;
+        self.tab(id).filter(|t| t.window == window).map(|t| t.id)
+    }
+
+    /// Move a Matthew Henry or Treasury tab without changing whether it follows.
+    pub fn set_study_at(&mut self, id: TabId, at: Ref) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        match &mut tab.kind {
+            TabKind::Mhc { at: slot, .. } | TabKind::Tsk { at: slot, .. } => *slot = at,
+            _ => {}
+        }
+    }
+
+    pub fn set_library_headword(&mut self, id: TabId, headword: Option<String>) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        if let TabKind::Library { headword: slot, .. } = &mut tab.kind {
+            *slot = headword;
+        }
+    }
+
     pub fn set_follow(&mut self, id: TabId, follow: bool) {
         let last_at = self.last_at;
         if let Some(tab) = self.tab_mut(id) {
@@ -996,6 +1021,19 @@ mod tests {
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
         assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 2, 3)));
         assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert!(ws.tab(tsk).unwrap().kind.follows_verse());
+    }
+
+    #[test]
+    fn set_study_at_keeps_follow() {
+        let mut ws = start();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        ws.set_follow(mhc, false);
+        ws.set_study_at(mhc, r(19, 23, 1));
+        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(19, 23, 1)));
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 1, 1)));
         assert!(ws.tab(tsk).unwrap().kind.follows_verse());
     }
 
