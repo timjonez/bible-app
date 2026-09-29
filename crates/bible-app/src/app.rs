@@ -74,15 +74,14 @@ pub struct App {
     shell: Option<SplitShell>,
     sides: Rc<RefCell<Vec<SideWindow>>>,
     menu_tab: Rc<Cell<Option<TabId>>>,
-    /// Study views opened from a menu land beside the chapter. A blank tab opens them in place.
+    /// Verse clicks and search move a new view into the other pane.
+    /// The app menu and a blank tab turn this off and stay in the current tab bar.
     open_beside: bool,
     goto_entry: gtk::Entry,
     goto_popover: gtk::Popover,
     actions: gio::SimpleActionGroup,
     msg_tx: relm4::Sender<Msg>,
     copy_offset: Rc<Cell<i32>>,
-    history_back: gtk::Button,
-    history_forward: gtk::Button,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +135,8 @@ pub enum Msg {
     SelectPassageChapter(TabId, u32),
     PassagePrev(TabId),
     PassageNext(TabId),
+    PassageBack(TabId),
+    PassageForward(TabId),
     CopyVerses,
     CopyAtOffset(i32),
     FontSmaller,
@@ -171,7 +172,6 @@ pub enum Msg {
         pane: Pane,
     },
     SplitTab(TabId),
-    DetachTab(TabId),
     WireSide(WindowId),
     SetupTabMenu(Option<TabId>),
     DetachMenuTab,
@@ -202,10 +202,11 @@ impl SimpleComponent for App {
 
             #[wrap(Some)]
             set_content = &adw::ToolbarView {
+                set_top_bar_style: adw::ToolbarStyle::Flat,
+
                 #[name(header_bar)]
                 add_top_bar = &adw::HeaderBar {
-                    set_show_title: false,
-
+                    #[name(menu_btn)]
                     pack_end = &gtk::MenuButton {
                         set_icon_name: "open-menu-symbolic",
                         set_tooltip_text: Some("Menu"),
@@ -451,7 +452,6 @@ impl SimpleComponent for App {
         let theme_tx = sender.input_sender().clone();
         let _theme_watch = theme::install(move || theme_tx.emit(Msg::ThemeChanged));
 
-        let history = shell::history_nav();
         let mut model = App {
             conn,
             books,
@@ -480,8 +480,6 @@ impl SimpleComponent for App {
             actions: gio::SimpleActionGroup::new(),
             msg_tx: sender.input_sender().clone(),
             copy_offset,
-            history_back: history.back.clone(),
-            history_forward: history.forward.clone(),
         };
         model.apply_font();
         picker::install_css();
@@ -494,15 +492,6 @@ impl SimpleComponent for App {
         action_group.add_action(&copy_here);
         root.insert_action_group("win", Some(&action_group));
         model.actions = action_group;
-        widgets.header_bar.pack_start(&history.row);
-        let tx = model.msg_tx.clone();
-        history
-            .back
-            .connect_clicked(move |_| tx.emit(Msg::Back(WindowId::MAIN)));
-        let tx = model.msg_tx.clone();
-        history
-            .forward
-            .connect_clicked(move |_| tx.emit(Msg::Forward(WindowId::MAIN)));
         model.goto_popover.set_parent(&widgets.header_bar);
         let goto_on_destroy = model.goto_popover.clone();
         root.connect_destroy(move |_| {
@@ -511,6 +500,7 @@ impl SimpleComponent for App {
 
         if model.error.is_none() {
             let shell = SplitShell::new();
+            shell.attach_header(&widgets.header_bar, &widgets.menu_btn);
             let ctx = model.wire_ctx();
             wire_host(&shell.left, WindowId::MAIN, Pane::Left, &ctx);
             wire_host(&shell.right, WindowId::MAIN, Pane::Right, &ctx);
@@ -743,18 +733,22 @@ impl SimpleComponent for App {
                 self.open_hit(id, idx, true, true);
             }
             Msg::ToggleMhc => {
-                if let Some(id) = self.workspace.find_kind(|k| k.is_mhc()) {
-                    self.request_close(id);
-                } else {
-                    self.ensure_mhc();
-                }
+                self.in_current_tabs(|app| {
+                    if let Some(id) = app.workspace.find_kind(|k| k.is_mhc()) {
+                        app.request_close(id);
+                    } else {
+                        app.ensure_mhc();
+                    }
+                });
             }
             Msg::ToggleTsk => {
-                if let Some(id) = self.workspace.find_kind(|k| k.is_tsk()) {
-                    self.request_close(id);
-                } else {
-                    self.ensure_tsk();
-                }
+                self.in_current_tabs(|app| {
+                    if let Some(id) = app.workspace.find_kind(|k| k.is_tsk()) {
+                        app.request_close(id);
+                    } else {
+                        app.ensure_tsk();
+                    }
+                });
             }
             Msg::OpenTskXref(idx) => {
                 let Some(at) = self.tsk_widgets().and_then(|w| tsk::xref_at(w, idx)) else {
@@ -778,7 +772,7 @@ impl SimpleComponent for App {
                 self.handle_click(id, offset);
             }
             Msg::OpenDict(id) => {
-                self.open_library(&id, None);
+                self.in_current_tabs(|app| app.open_library(&id, None));
             }
             Msg::OpenDictWord { module, headword } => {
                 self.popdown_passage_popovers();
@@ -897,6 +891,20 @@ impl SimpleComponent for App {
                 };
                 self.apply_passage_ref(id, at, false, true);
             }
+            Msg::PassageBack(id) => {
+                let Some(at) = self.passage_mut(id).and_then(|p| p.history.back()) else {
+                    return;
+                };
+                self.workspace.focus(id);
+                self.apply_passage_ref(id, at, true, false);
+            }
+            Msg::PassageForward(id) => {
+                let Some(at) = self.passage_mut(id).and_then(|p| p.history.forward()) else {
+                    return;
+                };
+                self.workspace.focus(id);
+                self.apply_passage_ref(id, at, true, false);
+            }
             Msg::CopyVerses => {
                 self.copy_from_selection_or_current();
             }
@@ -935,8 +943,8 @@ impl SimpleComponent for App {
                 self.save_state();
                 self.reload_all_passages(false);
             }
-            Msg::OpenBookmarks => self.ensure_marks("bookmarks"),
-            Msg::OpenNotes => self.ensure_marks("notes"),
+            Msg::OpenBookmarks => self.in_current_tabs(|app| app.ensure_marks("bookmarks")),
+            Msg::OpenNotes => self.in_current_tabs(|app| app.ensure_marks("notes")),
             Msg::MarksBookmarkActivated(idx) => {
                 if let Some(at) = self
                     .marks_widgets()
@@ -1044,7 +1052,6 @@ impl SimpleComponent for App {
                 self.sync_shells();
             }
             Msg::SplitTab(id) => self.split_tab(id),
-            Msg::DetachTab(id) => self.detach_tab(id),
             Msg::WireSide(id) => self.wire_side(id),
             Msg::SetupTabMenu(id) => {
                 self.menu_tab.set(id);
@@ -1991,6 +1998,14 @@ impl App {
         }
     }
 
+    /// App-menu study links stay in the current tab bar instead of splitting.
+    fn in_current_tabs(&mut self, open: impl FnOnce(&mut Self)) {
+        let beside = self.open_beside;
+        self.open_beside = false;
+        open(self);
+        self.open_beside = beside;
+    }
+
     fn ensure_mhc(&mut self) {
         if self.error.is_some() {
             return;
@@ -2652,8 +2667,6 @@ impl App {
                     "Already beside another view"
                 });
             }
-            host.popout_btn
-                .set_sensitive(shell::selected_tab_id(&host.view).is_some());
         }
     }
 
@@ -2700,7 +2713,7 @@ impl App {
     }
 
     fn wire_side(&mut self, id: WindowId) {
-        let Some((goto_entry, goto_popover, window, back, forward)) = ({
+        let Some((goto_entry, goto_popover, window)) = ({
             let sides = self.sides.borrow();
             let Some(side) = sides.iter().find(|side| side.id == id) else {
                 return;
@@ -2709,16 +2722,10 @@ impl App {
                 side.chrome.goto_entry.clone(),
                 side.chrome.goto_popover.clone(),
                 side.chrome.window.clone(),
-                side.chrome.back.clone(),
-                side.chrome.forward.clone(),
             ))
         }) else {
             return;
         };
-        let tx = self.msg_tx.clone();
-        back.connect_clicked(move |_| tx.emit(Msg::Back(id)));
-        let tx = self.msg_tx.clone();
-        forward.connect_clicked(move |_| tx.emit(Msg::Forward(id)));
         let tx = self.msg_tx.clone();
         goto_entry.connect_activate(move |entry| tx.emit(Msg::GoTo(id, entry.text().to_string())));
         let shift = gtk::EventControllerKey::new();
@@ -3041,37 +3048,6 @@ impl App {
         for id in ids {
             self.sync_passage_bar(id);
         }
-        self.sync_history_buttons();
-    }
-
-    fn sync_history_buttons(&self) {
-        self.set_history_sensitive(WindowId::MAIN, &self.history_back, &self.history_forward);
-        let sides: Vec<(WindowId, gtk::Button, gtk::Button)> = self
-            .sides
-            .borrow()
-            .iter()
-            .map(|side| {
-                (
-                    side.id,
-                    side.chrome.back.clone(),
-                    side.chrome.forward.clone(),
-                )
-            })
-            .collect();
-        for (id, back, forward) in sides {
-            self.set_history_sensitive(id, &back, &forward);
-        }
-    }
-
-    fn set_history_sensitive(&self, window: WindowId, back: &gtk::Button, forward: &gtk::Button) {
-        let (can_back, can_forward) = self
-            .workspace
-            .focused_passage_in(window)
-            .and_then(|id| self.passage(id))
-            .map(|p| (p.history.can_back(), p.history.can_forward()))
-            .unwrap_or((false, false));
-        back.set_sensitive(can_back);
-        forward.set_sensitive(can_forward);
     }
 
     fn sync_passage_bar(&self, id: TabId) {
@@ -3090,6 +3066,7 @@ impl App {
         picker::select_book(&p.book, &self.books, at.book);
         picker::sync_chapters(&p.chapter, chapters, at.chapter);
         p.bar_syncing.set(false);
+        p.sync_history_buttons();
     }
 }
 
@@ -3230,13 +3207,6 @@ fn wire_host(host: &shell::PaneHost, window: WindowId, pane: Pane, ctx: &WireCtx
     view.connect_indicator_activated(move |_view, page| {
         if let Some(id) = page.keyword().as_deref().and_then(TabId::from_keyword) {
             send.emit(Msg::SplitTab(id));
-        }
-    });
-    let pop_view = host.view.clone();
-    let send = ctx.sender.clone();
-    host.popout_btn.connect_clicked(move |_| {
-        if let Some(id) = shell::selected_tab_id(&pop_view) {
-            send.emit(Msg::DetachTab(id));
         }
     });
     let ctx = ctx.clone();

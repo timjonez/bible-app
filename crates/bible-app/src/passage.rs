@@ -38,6 +38,8 @@ pub struct PassageView {
     pub chapter: gtk::DropDown,
     prev: gtk::Button,
     next: gtk::Button,
+    back: gtk::Button,
+    forward: gtk::Button,
     pub bar_syncing: Rc<Cell<bool>>,
     pub layout: ChapterLayout,
     pub xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
@@ -132,6 +134,8 @@ impl PassageView {
             chapter: bar.chapter,
             prev: bar.prev,
             next: bar.next,
+            back: bar.back,
+            forward: bar.forward,
             bar_syncing: bar.syncing,
             layout: ChapterLayout::default(),
             xref_tips: Rc::new(RefCell::new(Vec::new())),
@@ -358,9 +362,20 @@ impl PassageView {
         let tx = sender.clone();
         self.prev
             .connect_clicked(move |_| tx.emit(crate::app::Msg::PassagePrev(id)));
-        let tx = sender;
+        let tx = sender.clone();
         self.next
             .connect_clicked(move |_| tx.emit(crate::app::Msg::PassageNext(id)));
+        let tx = sender.clone();
+        self.back
+            .connect_clicked(move |_| tx.emit(crate::app::Msg::PassageBack(id)));
+        let tx = sender;
+        self.forward
+            .connect_clicked(move |_| tx.emit(crate::app::Msg::PassageForward(id)));
+    }
+
+    pub fn sync_history_buttons(&self) {
+        self.back.set_sensitive(self.history.can_back());
+        self.forward.set_sensitive(self.history.can_forward());
     }
 
     pub fn load(&mut self, ctx: &ChapterCtx<'_>, highlight: bool) {
@@ -840,11 +855,13 @@ fn pointer_x(widget: &impl gtk::prelude::IsA<gtk::Widget>) -> Option<f64> {
 }
 
 struct PassageBar {
-    row: gtk::Box,
+    row: gtk::CenterBox,
     book: gtk::DropDown,
     chapter: gtk::DropDown,
     prev: gtk::Button,
     next: gtk::Button,
+    back: gtk::Button,
+    forward: gtk::Button,
     syncing: Rc<Cell<bool>>,
 }
 
@@ -852,34 +869,48 @@ fn passage_bar() -> PassageBar {
     let book = gtk::DropDown::from_strings(&[]);
     book.set_tooltip_text(Some("Book"));
     book.add_css_class("passage-picker");
+    book.set_valign(gtk::Align::Center);
     book.update_property(&[gtk::accessible::Property::Label("Book")]);
 
     let chapter = gtk::DropDown::from_strings(&[]);
     chapter.set_tooltip_text(Some("Chapter"));
     chapter.add_css_class("chapter-picker");
+    chapter.set_valign(gtk::Align::Center);
     chapter.update_property(&[gtk::accessible::Property::Label("Chapter")]);
 
     let prev = gtk::Button::from_icon_name("go-previous-symbolic");
     prev.set_tooltip_text(Some("Previous chapter (Alt+Left)"));
     prev.add_css_class("flat");
+    prev.set_valign(gtk::Align::Center);
     prev.update_property(&[gtk::accessible::Property::Label("Previous chapter")]);
     let next = gtk::Button::from_icon_name("go-next-symbolic");
     next.set_tooltip_text(Some("Next chapter (Alt+Right)"));
     next.add_css_class("flat");
+    next.set_valign(gtk::Align::Center);
     next.update_property(&[gtk::accessible::Property::Label("Next chapter")]);
-    let chapters = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    chapters.add_css_class("linked");
-    chapters.append(&prev);
-    chapters.append(&next);
 
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let pickers = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    pickers.set_valign(gtk::Align::Center);
+    pickers.append(&book);
+    pickers.append(&chapter);
+
+    let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    cluster.set_halign(gtk::Align::Center);
+    cluster.set_valign(gtk::Align::Center);
+    cluster.append(&prev);
+    cluster.append(&pickers);
+    cluster.append(&next);
+
+    let history = crate::shell::history_nav();
+    let row = gtk::CenterBox::new();
+    row.set_orientation(gtk::Orientation::Horizontal);
+    row.set_hexpand(true);
     row.set_margin_top(6);
     row.set_margin_bottom(6);
     row.set_margin_start(12);
     row.set_margin_end(12);
-    row.append(&chapters);
-    row.append(&book);
-    row.append(&chapter);
+    row.set_start_widget(Some(&history.row));
+    row.set_center_widget(Some(&cluster));
 
     PassageBar {
         row,
@@ -887,6 +918,8 @@ fn passage_bar() -> PassageBar {
         chapter,
         prev,
         next,
+        back: history.back,
+        forward: history.forward,
         syncing: Rc::new(Cell::new(false)),
     }
 }
@@ -920,6 +953,26 @@ pub fn install_css() {
               border: none;
               box-shadow: none;
               min-width: 9px;
+            }
+            headerbar {
+              min-height: 0;
+              padding-top: 0;
+              padding-bottom: 0;
+            }
+            headerbar > windowhandle > box {
+              padding-left: 0;
+              padding-right: 0;
+            }
+            headerbar windowcontrols {
+              margin-top: 6px;
+              margin-bottom: 6px;
+            }
+            paned.header-tabs > separator {
+              min-width: 0;
+              min-height: 0;
+              background: none;
+              border: none;
+              opacity: 0;
             }
             paned.pane-split > separator:hover {
               background-image: linear-gradient(
