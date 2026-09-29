@@ -160,28 +160,34 @@ impl PassageView {
         self.fit_column();
     }
 
-    /// Column-edge drags apply only while this chapter is the only view.
-    /// Beside a split or the search list the text fills the pane.
+    /// Column-edge drags apply only while this chapter fills its tab.
+    /// Inside a split the text fills its side of that tab.
     pub fn set_column_resize(&self, on: bool) {
-        if self.column_resize.get() == on {
-            return;
+        if self.column_resize.get() != on {
+            self.column_resize.set(on);
+            self.left_handle.set_visible(on);
+            self.right_handle.set_visible(on);
         }
-        self.column_resize.set(on);
-        self.left_handle.set_visible(on);
-        self.right_handle.set_visible(on);
+        // Refit even when the flag is unchanged. Closing a split gives the
+        // chapter its width back after this flag was already turned on.
         self.fit_column();
     }
 
     fn fit_column(&self) {
         let pane = self.root.width();
-        if pane <= 0 {
+        // Filling a split must drop the centering insets even when this view
+        // has no width yet. Those insets are the text view's minimum, and a
+        // paned will not put the divider inside them.
+        if pane <= 0 && self.column_resize.get() {
             return;
         }
         let (left, right) =
             layout::column_margins(pane, self.preferred_px.get(), self.column_resize.get());
         self.view.set_left_margin(left);
         self.view.set_right_margin(right);
-        self.root.queue_allocate();
+        if pane > 0 {
+            self.root.queue_allocate();
+        }
     }
 
     fn track_pane_width(&self) {
@@ -967,12 +973,12 @@ pub fn install_css() {
               margin-top: 6px;
               margin-bottom: 6px;
             }
-            paned.header-tabs > separator {
-              min-width: 0;
-              min-height: 0;
-              background: none;
-              border: none;
-              opacity: 0;
+            button.split-close {
+              background-color: alpha(@window_bg_color, 0.92);
+              border-radius: 999px;
+              min-width: 28px;
+              min-height: 28px;
+              padding: 0;
             }
             paned.pane-split > separator:hover {
               background-image: linear-gradient(

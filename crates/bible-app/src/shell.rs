@@ -1,9 +1,6 @@
-use crate::workspace::Pane;
 use adw::prelude::*;
 use gtk::gio;
 use relm4::{adw, gtk};
-use std::cell::Cell;
-use std::rc::Rc;
 
 pub struct PaneHost {
     pub root: gtk::Box,
@@ -72,56 +69,17 @@ fn tab_strip(bar: &adw::TabBar) -> Option<gtk::ScrolledWindow> {
 }
 
 pub struct SplitShell {
-    pub paned: gtk::Paned,
-    /// Left and right tab bars, shown in the window's top row.
-    pub tabs: gtk::Paned,
-    pub left: PaneHost,
-    pub right: PaneHost,
+    pub host: PaneHost,
 }
 
 impl SplitShell {
     pub fn new() -> Self {
-        let left = PaneHost::new();
-        let right = PaneHost::new();
-        right.root.set_visible(false);
-        let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-        paned.set_hexpand(true);
-        paned.set_vexpand(true);
-        paned.set_wide_handle(true);
-        paned.add_css_class("pane-split");
-        paned.set_resize_start_child(true);
-        paned.set_resize_end_child(true);
-        paned.set_shrink_start_child(false);
-        paned.set_shrink_end_child(false);
-        paned.set_start_child(Some(&left.root));
-        paned.set_end_child(Some(&right.root));
-        mark_split_handle(&paned);
-
-        // The tab bars share the header row. The content divider is the one
-        // the pointer drags; this one only keeps the bars above their panes.
-        let tabs = gtk::Paned::new(gtk::Orientation::Horizontal);
-        tabs.set_hexpand(true);
-        tabs.set_valign(gtk::Align::Fill);
-        tabs.add_css_class("header-tabs");
-        tabs.set_wide_handle(false);
-        tabs.set_can_focus(false);
-        tabs.set_resize_start_child(true);
-        tabs.set_resize_end_child(true);
-        tabs.set_shrink_start_child(false);
-        tabs.set_shrink_end_child(true);
-        tabs.set_start_child(Some(&left.bar));
-        mute_header_handle(&tabs);
-        track_tab_split(&paned, &tabs);
-
         Self {
-            paned,
-            tabs,
-            left,
-            right,
+            host: PaneHost::new(),
         }
     }
 
-    /// Place both tab bars on the left of the header, with the menu after them.
+    /// Place the tab bar on the left of the header, with the menu after it.
     ///
     /// The header centers its title against the trailing controls, which
     /// insets the first tab. Hiding those controls and putting the menu in
@@ -137,8 +95,8 @@ impl SplitShell {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         row.set_hexpand(true);
         row.set_valign(gtk::Align::Fill);
-        self.tabs.set_hexpand(true);
-        row.append(&self.tabs);
+        self.host.bar.set_hexpand(true);
+        row.append(&self.host.bar);
         menu.set_valign(gtk::Align::Center);
         row.append(menu);
         let controls = gtk::WindowControls::new(gtk::PackType::End);
@@ -146,78 +104,6 @@ impl SplitShell {
         row.append(&controls);
         header.set_title_widget(Some(&row));
     }
-
-    pub fn host(&self, pane: Pane) -> &PaneHost {
-        match pane {
-            Pane::Left => &self.left,
-            Pane::Right => &self.right,
-        }
-    }
-
-    pub fn sync_split(&self) {
-        let split = self.right.view.n_pages() > 0;
-        if split && !self.right.root.is_visible() {
-            let width = self.paned.width();
-            if width > 0 {
-                self.paned.set_position(width / 2);
-            } else {
-                self.paned.set_position(480);
-            }
-        }
-        self.right.root.set_visible(split);
-        if split {
-            if self.tabs.end_child().is_none() {
-                self.tabs.set_end_child(Some(&self.right.bar));
-            }
-            self.right.bar.set_visible(true);
-        } else {
-            self.tabs.set_end_child(None::<&gtk::Widget>);
-            let width = self.tabs.width();
-            if width > 0 {
-                self.tabs.set_position(width);
-            }
-        }
-    }
-}
-
-/// Keep the header tab split lined up with the content divider.
-fn track_tab_split(paned: &gtk::Paned, tabs: &gtk::Paned) {
-    let paned = paned.clone();
-    let seen = Rc::new(Cell::new((0i32, 0i32, 0i32)));
-    tabs.add_tick_callback(move |tabs, _| {
-        let content_w = paned.width();
-        let header_w = tabs.width();
-        let pos = paned.position();
-        let key = (content_w, header_w, pos);
-        if key != seen.get() && content_w > 0 && header_w > 0 {
-            seen.set(key);
-            let split = paned.end_child().is_some_and(|child| child.is_visible());
-            if split {
-                let aligned = (pos as i64) * (header_w as i64) / (content_w as i64);
-                tabs.set_position(aligned as i32);
-            } else {
-                tabs.set_position(header_w);
-            }
-        }
-        gtk::glib::ControlFlow::Continue
-    });
-}
-
-fn mute_header_handle(paned: &gtk::Paned) {
-    fn apply(paned: &gtk::Paned) {
-        let mut child = paned.first_child();
-        while let Some(widget) = child {
-            if widget.css_name().as_str() == "separator" {
-                widget.set_can_target(false);
-                widget.set_visible(false);
-                return;
-            }
-            child = widget.next_sibling();
-        }
-    }
-    apply(paned);
-    let paned = paned.clone();
-    paned.connect_realize(apply);
 }
 
 /// Back and forward through one passage's history, at the start of its bar.
@@ -287,7 +173,7 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     let toolbar = adw::ToolbarView::new();
     toolbar.set_top_bar_style(adw::ToolbarStyle::Flat);
     toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&shell.paned));
+    toolbar.set_content(Some(&shell.host.root));
     window.set_content(Some(&toolbar));
     window.present();
 
@@ -299,7 +185,7 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     }
 }
 
-/// The paned handle is the only resize control once a second view is open.
+/// The paned handle is the only resize control once a tab is split.
 pub fn mark_split_handle(paned: &gtk::Paned) {
     fn apply(paned: &gtk::Paned) {
         let mut child = paned.first_child();
