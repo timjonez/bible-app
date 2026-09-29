@@ -6,7 +6,7 @@ use relm4::{adw, gtk};
 pub struct PaneHost {
     pub root: gtk::Box,
     pub view: adw::TabView,
-    pub split_btn: gtk::Button,
+    pub new_btn: gtk::Button,
     pub popout_btn: gtk::Button,
 }
 
@@ -20,17 +20,26 @@ impl PaneHost {
         bar.set_autohide(false);
         bar.set_expand_tabs(false);
 
-        let split_btn = gtk::Button::from_icon_name("view-dual-symbolic");
-        split_btn.set_tooltip_text(Some("Split this view"));
-        split_btn.add_css_class("flat");
-        split_btn.update_property(&[gtk::accessible::Property::Label("Split this view")]);
+        let new_btn = gtk::Button::from_icon_name("list-add-symbolic");
+        new_btn.set_tooltip_text(Some("New tab (Ctrl+T)"));
+        new_btn.add_css_class("flat");
+        new_btn.update_property(&[gtk::accessible::Property::Label("New tab")]);
         let popout_btn = gtk::Button::from_icon_name("window-new-symbolic");
         popout_btn.set_tooltip_text(Some("Open in a new window"));
         popout_btn.add_css_class("flat");
         popout_btn.update_property(&[gtk::accessible::Property::Label("Open in a new window")]);
+        // The tab strip normally takes the leftover width, which pins the
+        // new-tab button to the far end. Size the strip to the tabs so the
+        // button sits against the last one, and let the gap before pop-out grow.
+        if let Some(strip) = tab_strip(&bar) {
+            strip.set_hexpand(false);
+            strip.set_propagate_natural_width(true);
+        }
+        let gap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        gap.set_hexpand(true);
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        actions.add_css_class("linked");
-        actions.append(&split_btn);
+        actions.append(&new_btn);
+        actions.append(&gap);
         actions.append(&popout_btn);
         bar.set_end_action_widget(Some(&actions));
 
@@ -42,19 +51,30 @@ impl PaneHost {
         Self {
             root,
             view,
-            split_btn,
+            new_btn,
             popout_btn,
         }
     }
+}
 
-    pub fn set_split_sensitive(&self, on: bool) {
-        self.split_btn.set_sensitive(on);
-        self.split_btn.set_tooltip_text(Some(if on {
-            "Split this view"
-        } else {
-            "Already beside another view"
-        }));
+/// The scrollable tab strip. The pinned strip does not expand.
+fn tab_strip(bar: &adw::TabBar) -> Option<gtk::ScrolledWindow> {
+    fn walk(widget: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
+        if let Ok(scrolled) = widget.clone().downcast::<gtk::ScrolledWindow>() {
+            if scrolled.hexpands() {
+                return Some(scrolled);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = walk(&widget) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
     }
+    walk(bar.upcast_ref())
 }
 
 pub struct SplitShell {
@@ -104,20 +124,40 @@ impl SplitShell {
     }
 }
 
-/// Header controls for a reader window other than the main one.
+/// Back and forward through the focused passage's history, above the tabs.
+pub struct HistoryNav {
+    pub row: gtk::Box,
+    pub back: gtk::Button,
+    pub forward: gtk::Button,
+}
+
+pub fn history_nav() -> HistoryNav {
+    let back = gtk::Button::from_icon_name("edit-undo-symbolic");
+    back.set_tooltip_text(Some("Back in history (Alt+Shift+Left)"));
+    back.add_css_class("flat");
+    back.set_sensitive(false);
+    back.update_property(&[gtk::accessible::Property::Label("Back")]);
+    let forward = gtk::Button::from_icon_name("edit-redo-symbolic");
+    forward.set_tooltip_text(Some("Forward in history (Alt+Shift+Right)"));
+    forward.add_css_class("flat");
+    forward.set_sensitive(false);
+    forward.update_property(&[gtk::accessible::Property::Label("Forward")]);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("linked");
+    row.set_valign(gtk::Align::Center);
+    row.append(&back);
+    row.append(&forward);
+    HistoryNav { row, back, forward }
+}
+
+/// A reader window other than the main one.
 pub struct SideChrome {
     pub window: adw::ApplicationWindow,
     pub shell: SplitShell,
-    pub book: gtk::DropDown,
-    pub chapter: gtk::DropDown,
-    pub search_btn: gtk::ToggleButton,
-    pub prev: gtk::Button,
-    pub next: gtk::Button,
-    pub back: gtk::Button,
-    pub forward: gtk::Button,
-    pub history: gtk::Box,
     pub goto_entry: gtk::Entry,
     pub goto_popover: gtk::Popover,
+    pub back: gtk::Button,
+    pub forward: gtk::Button,
 }
 
 pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
@@ -125,54 +165,6 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     let window = adw::ApplicationWindow::new(&app);
     window.set_title(Some("bible-app"));
     window.set_default_size(960, 720);
-
-    let book = gtk::DropDown::from_strings(&[]);
-    book.set_enable_search(true);
-    book.set_search_match_mode(gtk::StringFilterMatchMode::Substring);
-    book.set_tooltip_text(Some("Book"));
-    book.add_css_class("passage-picker");
-    book.update_property(&[gtk::accessible::Property::Label("Book")]);
-
-    let chapter = gtk::DropDown::from_strings(&[]);
-    chapter.set_enable_search(true);
-    chapter.set_search_match_mode(gtk::StringFilterMatchMode::Prefix);
-    chapter.set_tooltip_text(Some("Chapter"));
-    chapter.add_css_class("chapter-picker");
-    chapter.update_property(&[gtk::accessible::Property::Label("Chapter")]);
-
-    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    title_box.set_valign(gtk::Align::Center);
-    title_box.set_halign(gtk::Align::Center);
-    title_box.add_css_class("passage-title");
-    title_box.append(&book);
-    title_box.append(&chapter);
-
-    let prev = gtk::Button::from_icon_name("go-previous-symbolic");
-    prev.set_tooltip_text(Some("Previous chapter (Alt+Left)"));
-    let next = gtk::Button::from_icon_name("go-next-symbolic");
-    next.set_tooltip_text(Some("Next chapter (Alt+Right)"));
-    let chapters = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    chapters.add_css_class("linked");
-    chapters.append(&prev);
-    chapters.append(&next);
-
-    let back = gtk::Button::from_icon_name("edit-undo-symbolic");
-    back.set_tooltip_text(Some("Back in history (Alt+Shift+Left)"));
-    let forward = gtk::Button::from_icon_name("edit-redo-symbolic");
-    forward.set_tooltip_text(Some("Forward in history (Alt+Shift+Right)"));
-    let history = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    history.add_css_class("linked");
-    history.append(&back);
-    history.append(&forward);
-    history.set_visible(false);
-
-    let start = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    start.append(&chapters);
-    start.append(&history);
-
-    let search_btn = gtk::ToggleButton::new();
-    search_btn.set_icon_name("edit-find-symbolic");
-    search_btn.set_tooltip_text(Some("Search (Ctrl+F)"));
 
     let menu_btn = gtk::MenuButton::new();
     menu_btn.set_icon_name("open-menu-symbolic");
@@ -182,10 +174,10 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     menu_btn.set_menu_model(Some(menu));
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title_box));
-    header.pack_start(&start);
+    header.set_show_title(false);
+    let nav = history_nav();
+    header.pack_start(&nav.row);
     header.pack_end(&menu_btn);
-    header.pack_end(&search_btn);
 
     let goto_entry = gtk::Entry::new();
     goto_entry.set_placeholder_text(Some("John 3:16"));
@@ -198,7 +190,7 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     goto_popover.set_autohide(true);
     goto_popover.add_css_class("goto-popover");
     goto_popover.set_child(Some(&goto_entry));
-    goto_popover.set_parent(&title_box);
+    goto_popover.set_parent(&header);
 
     let shell = SplitShell::new();
     let toolbar = adw::ToolbarView::new();
@@ -210,16 +202,10 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
     SideChrome {
         window,
         shell,
-        book,
-        chapter,
-        search_btn,
-        prev,
-        next,
-        back,
-        forward,
-        history,
         goto_entry,
         goto_popover,
+        back: nav.back,
+        forward: nav.forward,
     }
 }
 
