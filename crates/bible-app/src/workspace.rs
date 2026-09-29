@@ -94,6 +94,8 @@ pub enum TabKind {
         code: String,
     },
     Search,
+    /// An empty tab with ways to open a passage or a study view.
+    Blank,
 }
 
 impl TabKind {
@@ -111,6 +113,10 @@ impl TabKind {
 
     pub fn is_search(&self) -> bool {
         matches!(self, Self::Search)
+    }
+
+    pub fn is_blank(&self) -> bool {
+        matches!(self, Self::Blank)
     }
 
     pub fn follows_verse(&self) -> bool {
@@ -573,6 +579,12 @@ impl Workspace {
         )
     }
 
+    /// A new empty tab in `pane`. Blank tabs are not unique.
+    pub fn open_blank(&mut self, window: WindowId, pane: Pane) -> OpenResult {
+        let id = self.add_tab(TabKind::Blank, window, pane);
+        OpenResult { id, created: true }
+    }
+
     /// One search tab in `window`. A second call focuses the one already there.
     pub fn open_search(&mut self, window: WindowId) -> OpenResult {
         if let Some(id) = self.find_search(window) {
@@ -836,6 +848,33 @@ mod tests {
         assert_eq!(ws.visible().len(), 1);
         assert_eq!(ws.focused_passage_ref(), Some(r(1, 1, 1)));
         assert!(ws.tabs()[0].kind.is_passage());
+    }
+
+    #[test]
+    fn new_tab_is_blank_and_not_unique() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let first = ws.open_blank(WindowId::MAIN, Pane::Left);
+        let second = ws.open_blank(WindowId::MAIN, Pane::Left);
+        assert!(first.created && second.created);
+        assert_ne!(first.id, second.id);
+        assert!(ws.tab(first.id).unwrap().kind.is_blank());
+        assert_eq!(ws.tab(first.id).unwrap().pane, Pane::Left);
+        assert_eq!(ws.focused(), second.id);
+        assert_eq!(ws.focused_passage_id(), Some(passage));
+        assert_eq!(ws.tabs().len(), 3);
+    }
+
+    #[test]
+    fn new_tab_on_an_empty_window() {
+        let mut ws = start();
+        let id = ws.focused();
+        assert_eq!(ws.close(id), CloseOutcome::Closed);
+        let blank = ws.open_blank(WindowId::MAIN, Pane::Left);
+        assert_eq!(ws.tabs().len(), 1);
+        assert!(ws.tab(blank.id).unwrap().kind.is_blank());
+        assert!(ws.focused_passage_id().is_none());
+        assert_eq!(ws.focused(), blank.id);
     }
 
     #[test]

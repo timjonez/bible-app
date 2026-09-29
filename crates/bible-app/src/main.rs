@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod dict;
 mod history;
+mod launcher;
 mod layout;
 mod marks;
 mod mhc;

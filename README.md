@@ -14,15 +14,15 @@ cargo run -p bible-app
 Override the database path with `BIBLE_APP_DB` if you already have an unpacked copy.
 
 - Paragraphs (default) flows consecutive verses as prose; turn it off from the menu for one verse per block. Alt+Left / Alt+Right still change chapter.
-- Header book and chapter dropdowns jump to a passage; type in the popup to search
-- Alt+Left / Alt+Right: previous / next chapter
-- History back / forward appears in the header after you leave a passage (Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward)
+- Book and chapter dropdowns on each passage jump to a chapter; type in the popup to search
+- Alt+Left / Alt+Right: previous / next chapter of the focused passage
+- History back and forward sit in the header above the tabs and follow the focused passage (Alt+Shift+Left / Alt+Shift+Right, or mouse back/forward). They stay visible and turn on once that passage has somewhere to go
 - Ctrl+L then type `John 3:16` and Enter (Shift+Enter opens that passage beside the current one)
 - Ctrl+F opens a Search tab beside the chapter. A phrase is the default; the match menu also offers all words, any word, and a prefix such as `lov*`. `H430` lists King James verses for that Strong's number, `John 3:16` offers Go to, and `John/light` limits the search to that book. Book chips and a range menu narrow a long hit list. The scope menu covers the KJV, commentary, dictionaries, topics, notes, and the whole library. Arrow keys preview a hit in the chapter. Enter stays on the hit and closes Search. Esc, while Search is the selected tab, returns to the previous passage. Shift+Enter opens a verse beside the current one
-- The chapter opens as a tab. The tab bar stays visible and can be empty: closing the last tab leaves the window open. Book and chapter in the header open a passage again. Tabs hold KJV passages and study views (Matthew Henry, TSK, library, bookmarks/notes, Strong’s occurrences, search). Each bar has Split and Open in a new window for the selected tab
-- Split shows two views side by side, one split per window. Splitting a chapter opens the same chapter on the other side. Splitting a study tab places it beside the chapter. The tab menu still has Open beside
+- The chapter opens as a tab. The tab bar stays visible and can be empty: closing the last tab leaves the window open. Tabs hold KJV passages and study views (Matthew Henry, TSK, library, bookmarks/notes, Strong’s occurrences, search). Each bar has New tab and Open in a new window. Split is the icon on the tab. New tab (+) or Ctrl+T opens a blank tab, which is how an empty window gets a passage again: the book and chapter menus match a passage (type in the book menu to filter), or choose Search, Matthew Henry, the Treasury, the library, notes, or bookmarks. That choice replaces the blank tab
+- Split is the icon on a tab. It shows two views side by side, one split per window. Splitting a chapter opens the same chapter on the other side. Splitting a study tab places it beside the chapter. The tab menu still has Open beside
 - Open in a new window moves the selected tab into another reader window with the same tab bar and buttons. Dragging a tab out does the same. That window can be split once too
-- Header book/chapter pickers, history, font, paragraphs, copy, and marks apply to the focused passage tab
+- Previous and next chapter stay on each passage, beside its book and chapter pickers. The header also has the menu. Font, paragraphs, copy, and marks apply to the focused passage tab
 - Ctrl+- / Ctrl++: smaller / larger text
 - Drag either edge of the chapter to set the column width. That width is remembered. The edges hide while the window is split; drag the divider between the two views to resize them
 - Copy the current verse with citation (Ctrl+C / right-click), not a header button. A chapter selection copies that verse range.

@@ -2,6 +2,7 @@ use crate::history::History;
 use crate::layout::{self, ChapterLayout};
 use crate::marks;
 use crate::nav::Ref;
+use crate::picker;
 use crate::strongs;
 use crate::theme;
 use crate::tsk;
@@ -29,7 +30,15 @@ pub struct PassageView {
     pub history: History,
     pub buffer: gtk::TextBuffer,
     pub view: gtk::TextView,
+    /// Column overlay. Width and the edge handles stay on this widget.
     pub root: gtk::Overlay,
+    /// Navigation row, separator, then `root`. This is the tab page.
+    pub page: gtk::Box,
+    pub book: gtk::DropDown,
+    pub chapter: gtk::DropDown,
+    prev: gtk::Button,
+    next: gtk::Button,
+    pub bar_syncing: Rc<Cell<bool>>,
     pub layout: ChapterLayout,
     pub xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
     pub strongs_popover: gtk::Popover,
@@ -86,6 +95,16 @@ impl PassageView {
         let preferred_px = Rc::new(Cell::new(column_px.clamp(1, layout::MAX_COLUMN_PX)));
         place_column_edges(&root, &left_handle, &right_handle, &preferred_px);
 
+        let bar = passage_bar();
+        let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+        separator.set_hexpand(true);
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        page.set_hexpand(true);
+        page.set_vexpand(true);
+        page.append(&bar.row);
+        page.append(&separator);
+        page.append(&root);
+
         let strongs_popover = strongs::create(&view);
         let tsk_popover = tsk::create_popover(&view);
         let verse_menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
@@ -108,6 +127,12 @@ impl PassageView {
             buffer,
             view,
             root,
+            page,
+            book: bar.book,
+            chapter: bar.chapter,
+            prev: bar.prev,
+            next: bar.next,
+            bar_syncing: bar.syncing,
             layout: ChapterLayout::default(),
             xref_tips: Rc::new(RefCell::new(Vec::new())),
             strongs_popover,
@@ -295,6 +320,47 @@ impl PassageView {
             view.set_cursor(None);
         });
         self.view.add_controller(motion);
+    }
+
+    /// Book, chapter, and previous/next chapter on this passage. Clicks name this tab.
+    pub fn wire_nav(
+        &self,
+        id: TabId,
+        sender: relm4::Sender<crate::app::Msg>,
+        books: &[bible_app_db::Book],
+    ) {
+        picker::prepare(&self.book, gtk::StringFilterMatchMode::Substring);
+        picker::prepare(&self.chapter, gtk::StringFilterMatchMode::Prefix);
+        picker::fill_books(&self.book, books);
+
+        let syncing = self.bar_syncing.clone();
+        let tx = sender.clone();
+        self.book.connect_selected_notify(move |dd| {
+            if syncing.get() {
+                return;
+            }
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(crate::app::Msg::SelectPassageBook(id, pos));
+            }
+        });
+        let syncing = self.bar_syncing.clone();
+        let tx = sender.clone();
+        self.chapter.connect_selected_notify(move |dd| {
+            if syncing.get() {
+                return;
+            }
+            let pos = dd.selected();
+            if pos != gtk::INVALID_LIST_POSITION {
+                tx.emit(crate::app::Msg::SelectPassageChapter(id, pos));
+            }
+        });
+        let tx = sender.clone();
+        self.prev
+            .connect_clicked(move |_| tx.emit(crate::app::Msg::PassagePrev(id)));
+        let tx = sender;
+        self.next
+            .connect_clicked(move |_| tx.emit(crate::app::Msg::PassageNext(id)));
     }
 
     pub fn load(&mut self, ctx: &ChapterCtx<'_>, highlight: bool) {
@@ -771,6 +837,58 @@ fn pointer_x(widget: &impl gtk::prelude::IsA<gtk::Widget>) -> Option<f64> {
     let pointer = surface.display().default_seat()?.pointer()?;
     let (x, _, _) = surface.device_position(&pointer)?;
     Some(x)
+}
+
+struct PassageBar {
+    row: gtk::Box,
+    book: gtk::DropDown,
+    chapter: gtk::DropDown,
+    prev: gtk::Button,
+    next: gtk::Button,
+    syncing: Rc<Cell<bool>>,
+}
+
+fn passage_bar() -> PassageBar {
+    let book = gtk::DropDown::from_strings(&[]);
+    book.set_tooltip_text(Some("Book"));
+    book.add_css_class("passage-picker");
+    book.update_property(&[gtk::accessible::Property::Label("Book")]);
+
+    let chapter = gtk::DropDown::from_strings(&[]);
+    chapter.set_tooltip_text(Some("Chapter"));
+    chapter.add_css_class("chapter-picker");
+    chapter.update_property(&[gtk::accessible::Property::Label("Chapter")]);
+
+    let prev = gtk::Button::from_icon_name("go-previous-symbolic");
+    prev.set_tooltip_text(Some("Previous chapter (Alt+Left)"));
+    prev.add_css_class("flat");
+    prev.update_property(&[gtk::accessible::Property::Label("Previous chapter")]);
+    let next = gtk::Button::from_icon_name("go-next-symbolic");
+    next.set_tooltip_text(Some("Next chapter (Alt+Right)"));
+    next.add_css_class("flat");
+    next.update_property(&[gtk::accessible::Property::Label("Next chapter")]);
+    let chapters = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    chapters.add_css_class("linked");
+    chapters.append(&prev);
+    chapters.append(&next);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_margin_top(6);
+    row.set_margin_bottom(6);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.append(&chapters);
+    row.append(&book);
+    row.append(&chapter);
+
+    PassageBar {
+        row,
+        book,
+        chapter,
+        prev,
+        next,
+        syncing: Rc::new(Cell::new(false)),
+    }
 }
 
 pub fn install_css() {
