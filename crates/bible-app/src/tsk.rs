@@ -2,9 +2,12 @@ use crate::history::History;
 use crate::nav::{self, Ref};
 use crate::picker;
 use crate::shell;
+use crate::theme;
+use crate::tsk_parse::{self, Citation};
 use crate::workspace::TabId;
 use adw::prelude::*;
 use bible_app_db::{Book, Resource};
+use gtk::gio;
 use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
@@ -19,12 +22,12 @@ pub struct TskWidgets {
     pub next: gtk::Button,
     pub back: gtk::Button,
     pub forward: gtk::Button,
-    pub hint: gtk::Label,
-    pub xref_scroll: gtk::ScrolledWindow,
     pub buffer: gtk::TextBuffer,
     pub view: gtk::TextView,
-    pub xref_list: gtk::ListBox,
-    pub xrefs: RefCell<Vec<Ref>>,
+    pub menu: gtk::PopoverMenu,
+    pub links: Rc<RefCell<Vec<Citation>>>,
+    /// Passage opened from a citation when this view could not sit beside one.
+    pub companion: Cell<Option<TabId>>,
     pub syncing: Rc<Cell<bool>>,
     pub history: RefCell<History<Ref>>,
     pub placed: Cell<bool>,
@@ -32,7 +35,7 @@ pub struct TskWidgets {
     sections: RefCell<Vec<(u8, i32)>>,
 }
 
-pub fn build(sender: relm4::Sender<super::app::Msg>) -> TskWidgets {
+pub fn build() -> TskWidgets {
     let bar = shell::location_bar(
         "Previous chapter (Alt+Left)",
         "Next chapter (Alt+Right)",
@@ -44,38 +47,15 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> TskWidgets {
     bar.pickers.append(&book);
     bar.pickers.append(&chapter);
 
-    let hint = gtk::Label::new(Some("Cross-references"));
-    hint.set_xalign(0.0);
-    hint.add_css_class("heading");
-    hint.set_margin_start(12);
-    hint.set_margin_end(12);
-    hint.set_margin_top(8);
-
-    let xref_list = gtk::ListBox::new();
-    xref_list.set_selection_mode(gtk::SelectionMode::Single);
-    xref_list.add_css_class("boxed-list");
-    xref_list.set_accessible_role(gtk::AccessibleRole::List);
-    let list = xref_list.clone();
-    let send = sender.clone();
-    xref_list.connect_row_activated(move |_, row| {
-        send.emit(super::app::Msg::OpenTskXref(row.index()));
-    });
-
-    let xref_scroll = gtk::ScrolledWindow::new();
-    xref_scroll.set_margin_start(12);
-    xref_scroll.set_margin_end(12);
-    xref_scroll.set_margin_bottom(4);
-    xref_scroll.set_min_content_height(80);
-    xref_scroll.set_max_content_height(220);
-    xref_scroll.set_propagate_natural_height(true);
-    xref_scroll.set_child(Some(&list));
-
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let heading = gtk::TextTag::new(Some("section"));
     heading.set_weight(700);
     heading.set_pixels_above_lines(16);
     heading.set_pixels_below_lines(4);
     buffer.tag_table().add(&heading);
+    let cite = gtk::TextTag::new(Some("cite"));
+    buffer.tag_table().add(&cite);
+    cite.set_underline(gtk::pango::Underline::Single);
 
     let view = gtk::TextView::new();
     view.set_buffer(Some(&buffer));
@@ -84,23 +64,28 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> TskWidgets {
     view.set_wrap_mode(gtk::WrapMode::WordChar);
     view.set_left_margin(20);
     view.set_right_margin(20);
-    view.set_top_margin(4);
+    view.set_top_margin(8);
     view.set_bottom_margin(16);
     view.set_hexpand(true);
     view.set_vexpand(true);
     view.set_accessible_role(gtk::AccessibleRole::Document);
+
+    let menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
+    menu.set_parent(&view);
+    menu.set_has_arrow(false);
+    menu.set_halign(gtk::Align::Start);
+    let menu_on_destroy = menu.clone();
+    view.connect_destroy(move |_| {
+        menu_on_destroy.unparent();
+    });
 
     let text_scroll = gtk::ScrolledWindow::new();
     text_scroll.set_hexpand(true);
     text_scroll.set_vexpand(true);
     text_scroll.set_child(Some(&view));
 
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    body.append(&hint);
-    body.append(&xref_scroll);
-    body.append(&text_scroll);
-
-    let page = shell::bar_page(&bar.row, &body);
+    let page = shell::bar_page(&bar.row, &text_scroll);
+    let links = Rc::new(RefCell::new(Vec::new()));
     TskWidgets {
         root: page.upcast(),
         book,
@@ -109,12 +94,11 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> TskWidgets {
         next: bar.next,
         back: bar.back,
         forward: bar.forward,
-        hint,
-        xref_scroll,
         buffer,
         view,
-        xref_list,
-        xrefs: RefCell::new(Vec::new()),
+        menu,
+        links,
+        companion: Cell::new(None),
         syncing: Rc::new(Cell::new(false)),
         history: RefCell::new(History::new(Ref {
             book: 1,
@@ -127,7 +111,12 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> TskWidgets {
     }
 }
 
-pub fn wire(widgets: &TskWidgets, id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) {
+pub fn wire(
+    widgets: &TskWidgets,
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+    books: &[Book],
+) {
     widgets.syncing.set(true);
     let book_tx = sender.clone();
     let chapter_tx = sender.clone();
@@ -152,19 +141,83 @@ pub fn wire(widgets: &TskWidgets, id: TabId, sender: relm4::Sender<super::app::M
     widgets
         .back
         .connect_clicked(move |_| tx.emit(super::app::Msg::StudyBack(id)));
-    let tx = sender;
+    let tx = sender.clone();
     widgets
         .forward
         .connect_clicked(move |_| tx.emit(super::app::Msg::StudyForward(id)));
+
+    let view = widgets.view.clone();
+    let links = widgets.links.clone();
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    let tx = sender.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        let Some(offset) = offset_at(&view, x, y) else {
+            return;
+        };
+        if !hit(&links, offset) {
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        tx.emit(super::app::Msg::ClickCite { id, offset });
+    });
+    widgets.view.add_controller(click);
+
+    let view = widgets.view.clone();
+    let links = widgets.links.clone();
+    let right = gtk::GestureClick::new();
+    right.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let tx = sender;
+    right.connect_pressed(move |gesture, _, x, y| {
+        let Some(offset) = offset_at(&view, x, y) else {
+            return;
+        };
+        if !hit(&links, offset) {
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        tx.emit(super::app::Msg::CiteMenu {
+            id,
+            offset,
+            x: x as i32,
+            y: y as i32,
+        });
+    });
+    widgets.view.add_controller(right);
+
+    let view = widgets.view.clone();
+    let links = widgets.links.clone();
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(move |_, x, y| {
+        let over = offset_at(&view, x, y).is_some_and(|offset| hit(&links, offset));
+        let cursor = if over {
+            gtk::gdk::Cursor::from_name("pointer", None)
+        } else {
+            None
+        };
+        view.set_cursor(cursor.as_ref());
+    });
+    let view = widgets.view.clone();
+    motion.connect_leave(move |_| {
+        view.set_cursor(None);
+    });
+    widgets.view.add_controller(motion);
 }
 
-pub fn show(
-    widgets: &TskWidgets,
-    conn: &Connection,
-    books: &[Book],
-    at: Ref,
-    sender: relm4::Sender<super::app::Msg>,
-) {
+fn offset_at(view: &gtk::TextView, x: f64, y: f64) -> Option<i32> {
+    let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+    view.iter_at_location(bx, by).map(|iter| iter.offset())
+}
+
+fn hit(links: &RefCell<Vec<Citation>>, offset: i32) -> bool {
+    links
+        .borrow()
+        .iter()
+        .any(|link| offset >= link.start && offset < link.end)
+}
+
+pub fn show(widgets: &TskWidgets, conn: &Connection, books: &[Book], at: Ref) {
     let key = (at.book, at.chapter);
     if widgets.loaded.get() != key {
         let rows =
@@ -172,32 +225,13 @@ pub fn show(
         paint(widgets, books, &rows, at);
         widgets.loaded.set(key);
     }
-    let xrefs = bible_app_db::xrefs_from(conn, at.book, at.chapter, at.verse)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|x| Ref {
-            book: x.book,
-            chapter: x.chapter,
-            verse: x.verse,
-        })
-        .collect::<Vec<_>>();
-    let has = !xrefs.is_empty();
-    widgets.hint.set_visible(has);
-    widgets.xref_scroll.set_visible(has);
-    if has {
-        widgets.hint.set_label(&format!(
-            "Cross-references · {}",
-            nav::format_ref(books, at)
-        ));
-    }
-    refill_xrefs(&widgets.xref_list, &xrefs, books, sender);
-    widgets.xrefs.replace(xrefs);
     scroll_to(widgets, at.verse);
 }
 
 fn paint(widgets: &TskWidgets, books: &[Book], rows: &[Resource], at: Ref) {
     if rows.is_empty() {
         widgets.sections.borrow_mut().clear();
+        widgets.links.borrow_mut().clear();
         widgets.buffer.set_text(&format!(
             "No Treasury of Scripture Knowledge on {}.",
             nav::format_chapter(books, at.book, at.chapter)
@@ -230,6 +264,29 @@ fn paint(widgets: &TskWidgets, books: &[Book], rows: &[Resource], at: Ref) {
             widgets.buffer.apply_tag(&tag, &s, &e);
         }
     }
+    let mut links = Vec::new();
+    for ((_, body), (head_at, head_len)) in borrowed
+        .iter()
+        .zip(stacked.heading_at.iter().zip(&stacked.heading_len))
+    {
+        let body_at = head_at + head_len + 2;
+        for link in tsk_parse::citations(body.trim(), books) {
+            links.push(Citation {
+                start: body_at + link.start,
+                end: body_at + link.end,
+                at: link.at,
+            });
+        }
+    }
+    if let Some(tag) = widgets.buffer.tag_table().lookup("cite") {
+        for link in &links {
+            let s = widgets.buffer.iter_at_offset(link.start);
+            let e = widgets.buffer.iter_at_offset(link.end);
+            widgets.buffer.apply_tag(&tag, &s, &e);
+        }
+    }
+    theme::paint_buffer(&widgets.buffer);
+    widgets.links.replace(links);
     widgets.sections.replace(
         rows.iter()
             .map(|row| row.verse)
@@ -253,12 +310,44 @@ fn scroll_to(widgets: &TskWidgets, verse: u8) {
     });
 }
 
-pub fn xref_at(widgets: &TskWidgets, idx: i32) -> Option<Ref> {
+pub fn cite_at(widgets: &TskWidgets, offset: i32) -> Option<Ref> {
     widgets
-        .xrefs
+        .links
         .borrow()
-        .get(usize::try_from(idx).ok()?)
-        .copied()
+        .iter()
+        .find(|link| offset >= link.start && offset < link.end)
+        .map(|link| link.at)
+}
+
+pub fn popup_cite_menu(
+    widgets: &TskWidgets,
+    x: i32,
+    y: i32,
+    at: Ref,
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+) {
+    let menu = gio::Menu::new();
+    menu.append(Some("Open in new tab"), Some("cite.tab"));
+    menu.append(Some("Open in new window"), Some("cite.window"));
+    let group = gio::SimpleActionGroup::new();
+    let tab = gio::SimpleAction::new("tab", None);
+    let tx = sender.clone();
+    tab.connect_activate(move |_, _| {
+        tx.emit(super::app::Msg::OpenCiteTab { id, at });
+    });
+    let window = gio::SimpleAction::new("window", None);
+    window.connect_activate(move |_, _| {
+        sender.emit(super::app::Msg::OpenCiteWindow { id, at });
+    });
+    group.add_action(&tab);
+    group.add_action(&window);
+    widgets.menu.insert_action_group("cite", Some(&group));
+    widgets.menu.set_menu_model(Some(&menu));
+    widgets
+        .menu
+        .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
+    widgets.menu.popup();
 }
 
 pub fn create_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
@@ -351,18 +440,4 @@ fn dest_row(at: Ref, books: &[Book], sender: relm4::Sender<super::app::Msg>) -> 
     row.set_child(Some(&box_));
     row.set_activatable(true);
     row
-}
-
-fn refill_xrefs(
-    list: &gtk::ListBox,
-    xrefs: &[Ref],
-    books: &[Book],
-    sender: relm4::Sender<super::app::Msg>,
-) {
-    while let Some(child) = list.row_at_index(0) {
-        list.remove(&child);
-    }
-    for at in xrefs {
-        list.append(&dest_row(*at, books, sender.clone()));
-    }
 }

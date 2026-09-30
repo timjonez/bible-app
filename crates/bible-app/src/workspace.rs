@@ -246,6 +246,15 @@ impl Workspace {
             .map(|t| t.id)
     }
 
+    /// The passage on the other side of `id`'s split, when that side is a passage.
+    pub fn passage_beside(&self, id: TabId) -> Option<TabId> {
+        let tab = self.tab(id)?;
+        let partner = tab.host.or_else(|| self.guest_of(id))?;
+        self.tab(partner)
+            .filter(|partner| partner.kind.is_passage())
+            .map(|partner| partner.id)
+    }
+
     /// False once this window already has a split. The split belongs to one tab.
     pub fn can_split(&self, id: TabId) -> bool {
         let Some(tab) = self.tab(id) else {
@@ -422,17 +431,43 @@ impl Workspace {
     }
 
     pub fn navigate_passage(&mut self, id: TabId, at: Ref) {
-        let Some(tab) = self.tab_mut(id) else {
-            return;
-        };
-        if let TabKind::Passage { at: slot } = &mut tab.kind {
-            *slot = at;
-        } else {
+        if self.set_passage_at(id, at) {
+            self.follow_verse(at);
+        }
+    }
+
+    /// Move a passage, and study tabs that follow it, without moving `keep`.
+    pub fn navigate_passage_except(&mut self, id: TabId, at: Ref, keep: TabId) {
+        if !self.set_passage_at(id, at) {
             return;
         }
+        for tab in &mut self.tabs {
+            if tab.id == keep {
+                continue;
+            }
+            match &mut tab.kind {
+                TabKind::Mhc {
+                    at: slot, follow, ..
+                }
+                | TabKind::Tsk {
+                    at: slot, follow, ..
+                } if *follow => *slot = at,
+                _ => {}
+            }
+        }
+    }
+
+    fn set_passage_at(&mut self, id: TabId, at: Ref) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        let TabKind::Passage { at: slot } = &mut tab.kind else {
+            return false;
+        };
+        *slot = at;
         self.last_passage = id;
         self.last_at = at;
-        self.follow_verse(at);
+        true
     }
 
     pub fn set_passage_verse(&mut self, id: TabId, verse: u8) {
@@ -1218,5 +1253,37 @@ mod tests {
         assert!(there.created);
         assert_ne!(there.id, first.id);
         assert!(ws.has_search(other));
+    }
+
+    #[test]
+    fn passage_beside_finds_the_bible_on_either_side() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.move_beside(tsk));
+        assert_eq!(ws.passage_beside(tsk), Some(passage));
+        assert_eq!(ws.passage_beside(passage), None);
+
+        let mut ws = start();
+        let passage = ws.focused();
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert_eq!(ws.close(passage), CloseOutcome::Closed);
+        let guest = ws.open_passage_beside(tsk, r(19, 23, 1)).id;
+        assert_eq!(ws.passage_beside(tsk), Some(guest));
+        assert_eq!(ws.tab(guest).unwrap().host, Some(tsk));
+    }
+
+    #[test]
+    fn navigating_the_split_can_leave_the_treasury_in_place() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.move_beside(tsk));
+        assert!(ws.tab(tsk).unwrap().kind.follows_verse());
+        ws.navigate_passage_except(passage, r(43, 3, 16), tsk);
+        assert_eq!(ws.tab(passage).unwrap().kind.at(), Some(r(43, 3, 16)));
+        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 1, 1)));
+        ws.navigate_passage(passage, r(19, 23, 1));
+        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(19, 23, 1)));
     }
 }
