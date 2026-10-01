@@ -69,8 +69,6 @@ pub struct App {
     paragraphs: bool,
     font_provider: gtk::CssProvider,
     _theme_watch: theme::Watch,
-    mhc_action: gio::SimpleAction,
-    tsk_action: gio::SimpleAction,
     follow_action: gio::SimpleAction,
     user: Option<Connection>,
     workspace: Workspace,
@@ -116,8 +114,8 @@ pub enum Msg {
     SearchActivate(TabId),
     OpenHit(TabId, i32),
     OpenHitBeside(TabId, i32),
-    ToggleMhc,
-    ToggleTsk,
+    OpenMhc,
+    OpenTsk,
     OpenTskDest(Ref),
     OpenTskDestBeside(Ref),
     ClickCite {
@@ -370,21 +368,15 @@ impl SimpleComponent for App {
         };
         let mhc_action: RelmAction<MhcAction> = {
             let sender = sender.clone();
-            RelmAction::new_stateful(&false, move |_, _state: &mut bool| {
-                sender.input(Msg::ToggleMhc);
-            })
+            RelmAction::new_stateless(move |_| sender.input(Msg::OpenMhc))
         };
         let tsk_action: RelmAction<TskAction> = {
             let sender = sender.clone();
-            RelmAction::new_stateful(&false, move |_, _state: &mut bool| {
-                sender.input(Msg::ToggleTsk);
-            })
+            RelmAction::new_stateless(move |_| sender.input(Msg::OpenTsk))
         };
-        let mhc_gio = mhc_action.gio_action().clone();
-        let tsk_gio = tsk_action.gio_action().clone();
         if error.is_some() {
-            mhc_gio.set_enabled(false);
-            tsk_gio.set_enabled(false);
+            mhc_action.gio_action().set_enabled(false);
+            tsk_action.gio_action().set_enabled(false);
         }
 
         let dict_modules = conn
@@ -498,8 +490,6 @@ impl SimpleComponent for App {
             paragraphs,
             font_provider,
             _theme_watch,
-            mhc_action: mhc_gio,
-            tsk_action: tsk_gio,
             follow_action: follow_gio,
             user,
             workspace: Workspace::new(at),
@@ -753,24 +743,8 @@ impl SimpleComponent for App {
                 };
                 self.open_hit(id, idx, true, true);
             }
-            Msg::ToggleMhc => {
-                self.in_current_tabs(|app| {
-                    if let Some(id) = app.workspace.find_kind(|k| k.is_mhc()) {
-                        app.request_close(id);
-                    } else {
-                        app.ensure_mhc();
-                    }
-                });
-            }
-            Msg::ToggleTsk => {
-                self.in_current_tabs(|app| {
-                    if let Some(id) = app.workspace.find_kind(|k| k.is_tsk()) {
-                        app.request_close(id);
-                    } else {
-                        app.ensure_tsk();
-                    }
-                });
-            }
+            Msg::OpenMhc => self.in_current_tabs(|app| app.ensure_mhc()),
+            Msg::OpenTsk => self.in_current_tabs(|app| app.ensure_tsk()),
             Msg::OpenTskDest(at) => {
                 self.popdown_passage_popovers();
                 self.go(at, true);
@@ -1111,7 +1085,6 @@ impl SimpleComponent for App {
             Msg::BlankSelectChapter(id, idx) => self.blank_select_chapter(id, idx),
             Msg::BlankLaunch { id, choice } => self.launch_from_blank(id, choice),
         }
-        self.sync_study_actions();
         self.apply_column_mode();
         self.sync_shells();
         let _ = sender;
@@ -1919,13 +1892,6 @@ impl App {
         state.search_mode = self.search_mode.index();
         state.column_width = self.column_width;
         config::save_state(&state);
-    }
-
-    fn sync_study_actions(&self) {
-        self.mhc_action
-            .set_state(&self.workspace.has_mhc().to_variant());
-        self.tsk_action
-            .set_state(&self.workspace.has_tsk().to_variant());
     }
 
     fn apply_font(&self) {
@@ -3929,8 +3895,8 @@ relm4::new_stateful_action!(ParagraphsAction, WindowActionGroup, "paragraphs", (
 relm4::new_stateless_action!(CopyVerseAction, WindowActionGroup, "copy-verse");
 relm4::new_stateless_action!(FontLargerAction, WindowActionGroup, "font-larger");
 relm4::new_stateless_action!(FontSmallerAction, WindowActionGroup, "font-smaller");
-relm4::new_stateful_action!(MhcAction, WindowActionGroup, "mhc", (), bool);
-relm4::new_stateful_action!(TskAction, WindowActionGroup, "tsk", (), bool);
+relm4::new_stateless_action!(MhcAction, WindowActionGroup, "mhc");
+relm4::new_stateless_action!(TskAction, WindowActionGroup, "tsk");
 relm4::new_stateless_action!(BookmarksAction, WindowActionGroup, "bookmarks");
 relm4::new_stateless_action!(NotesAction, WindowActionGroup, "notes");
 relm4::new_stateless_action!(ExportNotesAction, WindowActionGroup, "export-notes");

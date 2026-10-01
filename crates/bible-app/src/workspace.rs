@@ -348,14 +348,6 @@ impl Workspace {
             .collect()
     }
 
-    pub fn has_mhc(&self) -> bool {
-        self.find_kind(|k| k.is_mhc()).is_some()
-    }
-
-    pub fn has_tsk(&self) -> bool {
-        self.find_kind(|k| k.is_tsk()).is_some()
-    }
-
     pub fn has_search(&self, window: WindowId) -> bool {
         self.find_search(window).is_some()
     }
@@ -954,7 +946,7 @@ mod tests {
         assert_eq!(a.id, b.id);
         assert_eq!(ws.tabs().len(), 2);
         assert_eq!(ws.tab(a.id).and_then(|t| t.kind.at()), Some(r(1, 2, 4)));
-        assert!(ws.has_mhc());
+        assert!(ws.find_kind(|k| k.is_mhc()).is_some());
         let c = ws.open_tsk(r(1, 1, 1));
         assert!(c.created);
         let d = ws.open_tsk(r(43, 1, 1));
@@ -1110,7 +1102,7 @@ mod tests {
         let passage = ws.focused();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
         assert_eq!(ws.close(mhc), CloseOutcome::Closed);
-        assert!(!ws.has_mhc());
+        assert!(ws.find_kind(|k| k.is_mhc()).is_none());
         assert_eq!(ws.tabs().len(), 1);
         assert_eq!(ws.focused(), passage);
     }
