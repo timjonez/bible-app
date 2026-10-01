@@ -58,7 +58,9 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     list_scroll.set_child(Some(&list));
 
     let popover = gtk::Popover::new();
-    popover.set_autohide(true);
+    // A modal popover takes keyboard focus when it opens, so the first
+    // letter of a headword would land on the top hit instead of the entry.
+    popover.set_autohide(false);
     popover.set_has_arrow(false);
     popover.set_position(gtk::PositionType::Bottom);
     popover.set_offset(0, 4);
@@ -84,33 +86,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
         send_row.emit(super::app::Msg::DictOpen(row.index()));
     });
 
-    let keys = gtk::EventControllerKey::new();
-    let list_keys = list.clone();
-    keys.connect_key_pressed(move |_, keyval, _, _| {
-        if keyval == gtk::gdk::Key::Down {
-            if let Some(row) = list_keys
-                .selected_row()
-                .or_else(|| list_keys.row_at_index(0))
-            {
-                let next = list_keys.row_at_index(row.index() + 1).unwrap_or(row);
-                list_keys.select_row(Some(&next));
-                next.grab_focus();
-            }
-            return glib::Propagation::Stop;
-        }
-        if keyval == gtk::gdk::Key::Up {
-            if let Some(row) = list_keys.selected_row() {
-                let prev = list_keys
-                    .row_at_index((row.index() - 1).max(0))
-                    .unwrap_or(row);
-                list_keys.select_row(Some(&prev));
-                prev.grab_focus();
-            }
-            return glib::Propagation::Stop;
-        }
-        glib::Propagation::Proceed
-    });
-    search.add_controller(keys);
+    wire_suggestions(&search, &popover, &list);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let view = gtk::TextView::new();
@@ -152,6 +128,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     let page = shell::bar_page(&bar.row, &body);
 
     install_css();
+    wire_suggestion_dismiss(&search, &popover, &page);
 
     let popover_destroy = popover.clone();
     page.connect_destroy(move |_| {
@@ -430,6 +407,140 @@ pub fn history_step(widgets: &DictWidgets, conn: &Connection, forward: bool) -> 
     let key = display(widgets, conn, i);
     sync_history(widgets);
     key
+}
+
+/// Keys while the suggestion list is open. The entry keeps the caret;
+/// Down moves into the highlighted hit, and Escape closes the list.
+fn wire_suggestions(search: &gtk::SearchEntry, popover: &gtk::Popover, list: &gtk::ListBox) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let pop_keys = popover.clone();
+    let list_keys = list.clone();
+    keys.connect_key_pressed(move |_, keyval, _, _| {
+        if !pop_keys.is_visible() || focus_inside(&pop_keys) {
+            return glib::Propagation::Proceed;
+        }
+        if keyval == gtk::gdk::Key::Escape {
+            pop_keys.popdown();
+            return glib::Propagation::Stop;
+        }
+        if matches!(keyval, gtk::gdk::Key::Down | gtk::gdk::Key::KP_Down) {
+            if let Some(row) = list_keys
+                .selected_row()
+                .or_else(|| list_keys.row_at_index(0))
+            {
+                list_keys.select_row(Some(&row));
+                row.grab_focus();
+            }
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    search.add_controller(keys);
+
+    let list_keys = gtk::EventControllerKey::new();
+    list_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let list_nav = list.clone();
+    let search_nav = search.clone();
+    let pop_nav = popover.clone();
+    list_keys.connect_key_pressed(move |_, keyval, _, _| {
+        if keyval == gtk::gdk::Key::Escape {
+            pop_nav.popdown();
+            search_nav.grab_focus();
+            return glib::Propagation::Stop;
+        }
+        let at_top = list_nav
+            .selected_row()
+            .map(|row| row.index() <= 0)
+            .unwrap_or(true);
+        if at_top && matches!(keyval, gtk::gdk::Key::Up | gtk::gdk::Key::KP_Up) {
+            search_nav.grab_focus();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    list.add_controller(list_keys);
+}
+
+/// Close the non-modal suggestion list when it is no longer the thing in use.
+fn wire_suggestion_dismiss(search: &gtk::SearchEntry, popover: &gtk::Popover, page: &gtk::Box) {
+    let focus = gtk::EventControllerFocus::new();
+    let pop_leave = popover.clone();
+    focus.connect_leave(move |_| {
+        let pop = pop_leave.clone();
+        glib::idle_add_local_once(move || {
+            if pop.is_visible() && !focus_inside(&pop) {
+                pop.popdown();
+            }
+        });
+    });
+    search.add_controller(focus);
+
+    let pop_unmap = popover.clone();
+    search.connect_unmap(move |_| {
+        pop_unmap.popdown();
+    });
+
+    let click = gtk::GestureClick::new();
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let pop_click = popover.clone();
+    let search_click = search.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        if !pop_click.is_visible() {
+            return;
+        }
+        let Some(widget) = gesture.widget() else {
+            return;
+        };
+        if let Some(picked) = widget.pick(x, y, gtk::PickFlags::DEFAULT) {
+            if contains_widget(&search_click, &picked) {
+                return;
+            }
+        }
+        pop_click.popdown();
+    });
+    page.add_controller(click);
+
+    let active_watch: Rc<RefCell<Option<(gtk::Window, glib::SignalHandlerId)>>> =
+        Rc::new(RefCell::new(None));
+    let watch = active_watch.clone();
+    let pop_active = popover.clone();
+    search.connect_root_notify(move |entry| {
+        let previous = watch.borrow_mut().take();
+        if let Some((window, id)) = previous {
+            window.disconnect(id);
+        }
+        let Some(window) = entry.root().and_downcast::<gtk::Window>() else {
+            return;
+        };
+        let pop = pop_active.clone();
+        let id = window.connect_is_active_notify(move |window| {
+            if !window.is_active() {
+                pop.popdown();
+            }
+        });
+        *watch.borrow_mut() = Some((window, id));
+    });
+    let watch = active_watch.clone();
+    page.connect_destroy(move |_| {
+        let previous = watch.borrow_mut().take();
+        if let Some((window, id)) = previous {
+            window.disconnect(id);
+        }
+    });
+}
+
+fn focus_inside(container: &impl IsA<gtk::Widget>) -> bool {
+    let container = container.as_ref();
+    container
+        .root()
+        .and_then(|root| root.focus())
+        .is_some_and(|focus| &focus == container || focus.is_ancestor(container))
+}
+
+fn contains_widget(ancestor: &impl IsA<gtk::Widget>, widget: &gtk::Widget) -> bool {
+    let ancestor = ancestor.as_ref();
+    widget == ancestor || ancestor.is_ancestor(widget)
 }
 
 fn refill_list(list: &gtk::ListBox, hits: &[DictHit]) {
