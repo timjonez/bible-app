@@ -88,10 +88,12 @@ impl TabKind {
         matches!(self, Self::Passage { .. })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_mhc(&self) -> bool {
         matches!(self, Self::Mhc { .. })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_tsk(&self) -> bool {
         matches!(self, Self::Tsk { .. })
     }
@@ -348,6 +350,7 @@ impl Workspace {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn has_search(&self, window: WindowId) -> bool {
         self.find_search(window).is_some()
     }
@@ -359,6 +362,7 @@ impl Workspace {
             .map(|t| t.id)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn find_kind(&self, pred: impl Fn(&TabKind) -> bool) -> Option<TabId> {
         self.tabs.iter().find(|t| pred(&t.kind)).map(|t| t.id)
     }
@@ -573,85 +577,41 @@ impl Workspace {
     }
 
     pub fn open_mhc(&mut self, at: Ref) -> OpenResult {
-        self.open_unique(
-            |k| k.is_mhc(),
-            TabKind::Mhc { at, follow: true },
-            |kind| {
-                if let TabKind::Mhc { at: slot, .. } = kind {
-                    *slot = at;
-                }
-            },
-        )
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Mhc { at, follow: true }, window);
+        OpenResult { id, created: true }
     }
 
     pub fn open_tsk(&mut self, at: Ref) -> OpenResult {
-        self.open_unique(
-            |k| k.is_tsk(),
-            TabKind::Tsk { at, follow: true },
-            |kind| {
-                if let TabKind::Tsk { at: slot, .. } = kind {
-                    *slot = at;
-                }
-            },
-        )
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Tsk { at, follow: true }, window);
+        OpenResult { id, created: true }
     }
 
     pub fn open_library(&mut self, module: String, headword: Option<String>) -> OpenResult {
-        self.open_unique(
-            |k| matches!(k, TabKind::Library { .. }),
-            TabKind::Library {
-                module: module.clone(),
-                headword: headword.clone(),
-            },
-            |kind| {
-                if let TabKind::Library {
-                    module: m,
-                    headword: h,
-                } = kind
-                {
-                    *m = module.clone();
-                    *h = headword.clone();
-                }
-            },
-        )
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Library { module, headword }, window);
+        OpenResult { id, created: true }
     }
 
     pub fn open_marks(&mut self, page: MarksPage) -> OpenResult {
-        self.open_unique(
-            |k| matches!(k, TabKind::Marks { .. }),
-            TabKind::Marks { page },
-            |kind| {
-                if let TabKind::Marks { page: slot } = kind {
-                    *slot = page;
-                }
-            },
-        )
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Marks { page }, window);
+        OpenResult { id, created: true }
     }
 
     pub fn open_occurrences(&mut self, code: String) -> OpenResult {
-        self.open_unique(
-            |k| matches!(k, TabKind::Occurrences { .. }),
-            TabKind::Occurrences { code: code.clone() },
-            |kind| {
-                if let TabKind::Occurrences { code: slot } = kind {
-                    *slot = code.clone();
-                }
-            },
-        )
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Occurrences { code }, window);
+        OpenResult { id, created: true }
     }
 
-    /// A new empty tab. Blank tabs are not unique.
     pub fn open_blank(&mut self, window: WindowId) -> OpenResult {
         let id = self.add_tab(TabKind::Blank, window);
         OpenResult { id, created: true }
     }
 
-    /// One search tab in `window`. A second call focuses the one already there.
     pub fn open_search(&mut self, window: WindowId) -> OpenResult {
-        if let Some(id) = self.find_search(window) {
-            self.focus(id);
-            return OpenResult { id, created: false };
-        }
         let id = self.add_tab(TabKind::Search, window);
         OpenResult { id, created: true }
     }
@@ -749,25 +709,6 @@ impl Workspace {
         }
         self.repair(window);
         CloseOutcome::Closed
-    }
-
-    fn open_unique(
-        &mut self,
-        pred: impl Fn(&TabKind) -> bool,
-        kind: TabKind,
-        update: impl FnOnce(&mut TabKind),
-    ) -> OpenResult {
-        if let Some(id) = self.find_kind(pred) {
-            if let Some(tab) = self.tab_mut(id) {
-                update(&mut tab.kind);
-            }
-            self.focus(id);
-            OpenResult { id, created: false }
-        } else {
-            let window = self.focused_window();
-            let id = self.add_tab(kind, window);
-            OpenResult { id, created: true }
-        }
     }
 
     fn add_tab(&mut self, kind: TabKind, window: WindowId) -> TabId {
@@ -937,31 +878,39 @@ mod tests {
     }
 
     #[test]
-    fn open_mhc_reuses_the_same_tab() {
+    fn open_mhc_creates_another_tab() {
         let mut ws = start();
         let a = ws.open_mhc(r(1, 1, 1));
         assert!(a.created);
         let b = ws.open_mhc(r(1, 2, 4));
-        assert!(!b.created);
-        assert_eq!(a.id, b.id);
-        assert_eq!(ws.tabs().len(), 2);
-        assert_eq!(ws.tab(a.id).and_then(|t| t.kind.at()), Some(r(1, 2, 4)));
-        assert!(ws.find_kind(|k| k.is_mhc()).is_some());
+        assert!(b.created);
+        assert_ne!(a.id, b.id);
+        assert_eq!(ws.tabs().len(), 3);
+        assert_eq!(ws.tab(a.id).and_then(|t| t.kind.at()), Some(r(1, 1, 1)));
+        assert_eq!(ws.tab(b.id).and_then(|t| t.kind.at()), Some(r(1, 2, 4)));
+        assert_eq!(ws.tabs().iter().filter(|t| t.kind.is_mhc()).count(), 2);
         let c = ws.open_tsk(r(1, 1, 1));
         assert!(c.created);
         let d = ws.open_tsk(r(43, 1, 1));
-        assert!(!d.created);
-        assert_eq!(c.id, d.id);
-        assert_eq!(ws.tabs().iter().filter(|t| t.kind.is_tsk()).count(), 1);
+        assert!(d.created);
+        assert_ne!(c.id, d.id);
+        assert_eq!(ws.tabs().iter().filter(|t| t.kind.is_tsk()).count(), 2);
     }
 
     #[test]
-    fn library_marks_and_occurrences_reuse() {
+    fn library_marks_and_occurrences_each_open_a_tab() {
         let mut ws = start();
         let lib = ws.open_library("Easton".into(), Some("God".into()));
         let lib2 = ws.open_library("Webster".into(), Some("Divide".into()));
-        assert_eq!(lib.id, lib2.id);
+        assert_ne!(lib.id, lib2.id);
         match &ws.tab(lib.id).unwrap().kind {
+            TabKind::Library { module, headword } => {
+                assert_eq!(module, "Easton");
+                assert_eq!(headword.as_deref(), Some("God"));
+            }
+            other => panic!("expected library, got {other:?}"),
+        }
+        match &ws.tab(lib2.id).unwrap().kind {
             TabKind::Library { module, headword } => {
                 assert_eq!(module, "Webster");
                 assert_eq!(headword.as_deref(), Some("Divide"));
@@ -970,17 +919,27 @@ mod tests {
         }
         let marks = ws.open_marks(MarksPage::Bookmarks);
         let notes = ws.open_marks(MarksPage::Notes);
-        assert_eq!(marks.id, notes.id);
+        assert_ne!(marks.id, notes.id);
         assert!(matches!(
             ws.tab(marks.id).unwrap().kind,
+            TabKind::Marks {
+                page: MarksPage::Bookmarks
+            }
+        ));
+        assert!(matches!(
+            ws.tab(notes.id).unwrap().kind,
             TabKind::Marks {
                 page: MarksPage::Notes
             }
         ));
         let occ = ws.open_occurrences("H430".into());
         let occ2 = ws.open_occurrences("G26".into());
-        assert_eq!(occ.id, occ2.id);
+        assert_ne!(occ.id, occ2.id);
         match &ws.tab(occ.id).unwrap().kind {
+            TabKind::Occurrences { code } => assert_eq!(code, "H430"),
+            other => panic!("expected occurrences, got {other:?}"),
+        }
+        match &ws.tab(occ2.id).unwrap().kind {
             TabKind::Occurrences { code } => assert_eq!(code, "G26"),
             other => panic!("expected occurrences, got {other:?}"),
         }
@@ -1065,13 +1024,16 @@ mod tests {
     }
 
     #[test]
-    fn menu_open_mhc_updates_even_when_follow_is_off() {
+    fn opening_mhc_again_leaves_the_first_tab() {
         let mut ws = start();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
         ws.set_follow(mhc, false);
-        ws.open_mhc(r(19, 23, 1));
-        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(19, 23, 1)));
+        let second = ws.open_mhc(r(19, 23, 1)).id;
+        assert_ne!(mhc, second);
+        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(1, 1, 1)));
         assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert_eq!(ws.tab(second).unwrap().kind.at(), Some(r(19, 23, 1)));
+        assert!(ws.tab(second).unwrap().kind.follows_verse());
     }
 
     #[test]
@@ -1231,15 +1193,15 @@ mod tests {
     }
 
     #[test]
-    fn opening_search_twice_reuses_one_tab() {
+    fn opening_search_twice_creates_two_tabs() {
         let mut ws = start();
         let first = ws.open_search(WindowId::MAIN);
         assert!(first.created);
         let second = ws.open_search(WindowId::MAIN);
-        assert!(!second.created);
-        assert_eq!(first.id, second.id);
+        assert!(second.created);
+        assert_ne!(first.id, second.id);
         assert!(ws.has_search(WindowId::MAIN));
-        assert_eq!(ws.tabs().iter().filter(|t| t.kind.is_search()).count(), 1);
+        assert_eq!(ws.tabs().iter().filter(|t| t.kind.is_search()).count(), 2);
         let other = ws.detach(ws.focused_passage_id().unwrap()).unwrap().window;
         let there = ws.open_search(other);
         assert!(there.created);

@@ -32,7 +32,7 @@ pub struct DictWidgets {
     syncing: Rc<Cell<bool>>,
 }
 
-pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
+pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     let bar = shell::location_bar(
         "Previous entry (Alt+Left)",
         "Next entry (Alt+Right)",
@@ -75,15 +75,15 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
         if sync_search.get() {
             return;
         }
-        send_q.emit(super::app::Msg::DictSearch(entry.text().to_string()));
+        send_q.emit(super::app::Msg::DictSearch(id, entry.text().to_string()));
     });
     let send_activate = sender.clone();
     search.connect_activate(move |_| {
-        send_activate.emit(super::app::Msg::DictOpen(0));
+        send_activate.emit(super::app::Msg::DictOpen(id, 0));
     });
     let send_row = sender.clone();
     list.connect_row_activated(move |_, row| {
-        send_row.emit(super::app::Msg::DictOpen(row.index()));
+        send_row.emit(super::app::Msg::DictOpen(id, row.index()));
     });
 
     wire_suggestions(&search, &popover, &list);

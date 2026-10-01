@@ -88,7 +88,12 @@ pub fn build() -> MhcWidgets {
     }
 }
 
-pub fn wire(widgets: &MhcWidgets, id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) {
+pub fn wire(
+    widgets: &MhcWidgets,
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+    books: &[Book],
+) {
     widgets.syncing.set(true);
     let book_tx = sender.clone();
     let chapter_tx = sender.clone();
@@ -122,8 +127,8 @@ pub fn wire(widgets: &MhcWidgets, id: TabId, sender: relm4::Sender<super::app::M
 pub fn show(widgets: &MhcWidgets, conn: &Connection, books: &[Book], at: Ref) {
     let key = (at.book, at.chapter);
     if widgets.loaded.get() != key {
-        let rows = bible_app_db::chapter_resources(conn, "MHC", at.book, at.chapter)
-            .unwrap_or_default();
+        let rows =
+            bible_app_db::chapter_resources(conn, "MHC", at.book, at.chapter).unwrap_or_default();
         paint(widgets, books, &rows, at);
         widgets.loaded.set(key);
     }
