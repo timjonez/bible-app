@@ -146,10 +146,10 @@ pub enum Msg {
         module: String,
         headword: String,
     },
-    DictSearch(String),
-    DictOpen(i32),
+    DictSearch(TabId, String),
+    DictOpen(TabId, i32),
     OpenStrongsOccurrences(String),
-    OpenOccurrenceHit(i32),
+    OpenOccurrenceHit(TabId, i32),
     Back(WindowId),
     Forward(WindowId),
     SelectPassageBook(TabId, u32),
@@ -177,13 +177,13 @@ pub enum Msg {
     SetParagraphs(bool),
     OpenBookmarks,
     OpenNotes,
-    MarksBookmarkActivated(i32),
-    MarksBookmarkSelected,
-    MarksNoteActivated(i32),
-    MarksNoteSelected(i32),
-    SaveNote,
-    DeleteEditingNote,
-    RemoveSelectedBookmark,
+    MarksBookmarkActivated(TabId, i32),
+    MarksBookmarkSelected(TabId),
+    MarksNoteActivated(TabId, i32),
+    MarksNoteSelected(TabId, i32),
+    SaveNote(TabId),
+    DeleteEditingNote(TabId),
+    RemoveSelectedBookmark(TabId),
     ToggleBookmark,
     SetHighlight(String),
     AddNote,
@@ -743,8 +743,12 @@ impl SimpleComponent for App {
                 };
                 self.open_hit(id, idx, true, true);
             }
-            Msg::OpenMhc => self.in_current_tabs(|app| app.ensure_mhc()),
-            Msg::OpenTsk => self.in_current_tabs(|app| app.ensure_tsk()),
+            Msg::OpenMhc => {
+                self.in_current_tabs(|app| app.ensure_mhc());
+            }
+            Msg::OpenTsk => {
+                self.in_current_tabs(|app| app.ensure_tsk());
+            }
             Msg::OpenTskDest(at) => {
                 self.popdown_passage_popovers();
                 self.go(at, true);
@@ -781,15 +785,9 @@ impl SimpleComponent for App {
             }
             Msg::OpenDictWord { module, headword } => {
                 self.popdown_passage_popovers();
-                self.open_library(&module, Some(&headword));
+                let _ = self.open_library(&module, Some(&headword));
             }
-            Msg::DictSearch(query) => {
-                let Some(id) = self
-                    .workspace
-                    .find_kind(|k| matches!(k, TabKind::Library { .. }))
-                else {
-                    return;
-                };
+            Msg::DictSearch(id, query) => {
                 if let Some(TabContent::Library(widgets)) =
                     self.hosted.get_mut(&id).map(|h| &mut h.content)
                 {
@@ -799,13 +797,16 @@ impl SimpleComponent for App {
                     }
                 }
             }
-            Msg::DictOpen(idx) => self.open_dict_hit(idx),
+            Msg::DictOpen(id, idx) => self.open_dict_hit(id, idx),
             Msg::OpenStrongsOccurrences(code) => {
                 self.popdown_passage_popovers();
-                self.open_occurrences(&code);
+                let _ = self.open_occurrences(&code);
             }
-            Msg::OpenOccurrenceHit(idx) => {
-                let Some(at) = self.occ_widgets().and_then(|w| occurrences::hit_at(w, idx)) else {
+            Msg::OpenOccurrenceHit(id, idx) => {
+                let Some(at) = self
+                    .occ_widgets(id)
+                    .and_then(|w| occurrences::hit_at(w, idx))
+                else {
                     return;
                 };
                 self.go(at, true);
@@ -936,32 +937,36 @@ impl SimpleComponent for App {
                 self.save_state();
                 self.reload_all_passages(false);
             }
-            Msg::OpenBookmarks => self.in_current_tabs(|app| app.ensure_marks("bookmarks")),
-            Msg::OpenNotes => self.in_current_tabs(|app| app.ensure_marks("notes")),
-            Msg::MarksBookmarkActivated(idx) => {
+            Msg::OpenBookmarks => {
+                self.in_current_tabs(|app| app.ensure_marks("bookmarks"));
+            }
+            Msg::OpenNotes => {
+                self.in_current_tabs(|app| app.ensure_marks("notes"));
+            }
+            Msg::MarksBookmarkActivated(id, idx) => {
                 if let Some(at) = self
-                    .marks_widgets()
+                    .marks_widgets(id)
                     .and_then(|w| marks::bookmark_at(w, idx))
                 {
                     self.go(at, true);
                 }
             }
-            Msg::MarksBookmarkSelected => {
-                if let Some(w) = self.marks_widgets() {
+            Msg::MarksBookmarkSelected(id) => {
+                if let Some(w) = self.marks_widgets(id) {
                     w.remove_bookmark
                         .set_sensitive(w.bookmark_list.selected_row().is_some());
                 }
             }
-            Msg::MarksNoteActivated(idx) => {
-                if let Some(at) = self.marks_widgets().and_then(|w| marks::note_at(w, idx)) {
+            Msg::MarksNoteActivated(id, idx) => {
+                if let Some(at) = self.marks_widgets(id).and_then(|w| marks::note_at(w, idx)) {
                     self.go(at, true);
                 }
             }
-            Msg::MarksNoteSelected(idx) => {
-                if self.marks_widgets().is_some_and(|w| w.syncing.get()) {
+            Msg::MarksNoteSelected(id, idx) => {
+                if self.marks_widgets(id).is_some_and(|w| w.syncing.get()) {
                     return;
                 }
-                let Some(at) = self.marks_widgets().and_then(|w| marks::note_at(w, idx)) else {
+                let Some(at) = self.marks_widgets(id).and_then(|w| marks::note_at(w, idx)) else {
                     return;
                 };
                 let text = self
@@ -969,19 +974,14 @@ impl SimpleComponent for App {
                     .as_ref()
                     .and_then(|u| user_db::get_note(u, at).ok().flatten())
                     .unwrap_or_default();
-                if let Some(id) = self
-                    .workspace
-                    .find_kind(|k| matches!(k, TabKind::Marks { .. }))
+                if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
                 {
-                    if let Some(TabContent::Marks(w)) =
-                        self.hosted.get_mut(&id).map(|h| &mut h.content)
-                    {
-                        marks::load_note(w, &self.books, at, &text);
-                    }
+                    marks::load_note(w, &self.books, at, &text);
                 }
             }
-            Msg::SaveNote => {
-                let Some(TabContent::Marks(widgets)) = self.marks() else {
+            Msg::SaveNote(id) => {
+                let Some(TabContent::Marks(widgets)) = self.hosted.get(&id).map(|h| &h.content)
+                else {
                     return;
                 };
                 if widgets.syncing.get() {
@@ -995,24 +995,25 @@ impl SimpleComponent for App {
                     let _ = user_db::upsert_note(user, at, &text);
                 }
                 self.reload_user_marks(was_present != now_present);
-                if let Some(TabContent::Marks(w)) = self.marks() {
+                if let Some(TabContent::Marks(w)) = self.hosted.get(&id).map(|h| &h.content) {
                     w.delete_note.set_sensitive(now_present);
                 }
             }
-            Msg::DeleteEditingNote => {
-                let Some(at) = self.marks_widgets().and_then(|w| w.editing) else {
+            Msg::DeleteEditingNote(id) => {
+                let Some(at) = self.marks_widgets(id).and_then(|w| w.editing) else {
                     return;
                 };
                 if let Some(user) = &self.user {
                     let _ = user_db::delete_note(user, at);
                 }
-                if let Some(TabContent::Marks(w)) = self.marks_mut() {
+                if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
+                {
                     marks::clear_editor(w);
                 }
                 self.reload_user_marks(true);
             }
-            Msg::RemoveSelectedBookmark => {
-                let Some(at) = self.marks_widgets().and_then(marks::selected_bookmark) else {
+            Msg::RemoveSelectedBookmark(id) => {
+                let Some(at) = self.marks_widgets(id).and_then(marks::selected_bookmark) else {
                     return;
                 };
                 if let Some(user) = &self.user {
@@ -1124,22 +1125,8 @@ impl App {
             .and_then(|id| self.passage(id))
     }
 
-    fn marks(&self) -> Option<&TabContent> {
-        let id = self
-            .workspace
-            .find_kind(|k| matches!(k, TabKind::Marks { .. }))?;
-        self.hosted.get(&id).map(|h| &h.content)
-    }
-
-    fn marks_mut(&mut self) -> Option<&mut TabContent> {
-        let id = self
-            .workspace
-            .find_kind(|k| matches!(k, TabKind::Marks { .. }))?;
-        self.hosted.get_mut(&id).map(|h| &mut h.content)
-    }
-
-    fn marks_widgets(&self) -> Option<&marks::MarksWidgets> {
-        match self.marks() {
+    fn marks_widgets(&self, id: TabId) -> Option<&marks::MarksWidgets> {
+        match self.hosted.get(&id).map(|h| &h.content) {
             Some(TabContent::Marks(w)) => Some(w),
             _ => None,
         }
@@ -1157,10 +1144,7 @@ impl App {
             .and_then(|widgets| tsk::cite_at(widgets, offset))
     }
 
-    fn occ_widgets(&self) -> Option<&occurrences::OccWidgets> {
-        let id = self
-            .workspace
-            .find_kind(|k| matches!(k, TabKind::Occurrences { .. }))?;
+    fn occ_widgets(&self, id: TabId) -> Option<&occurrences::OccWidgets> {
         match self.hosted.get(&id).map(|h| &h.content) {
             Some(TabContent::Occurrences(w)) => Some(w),
             _ => None,
@@ -1193,11 +1177,11 @@ impl App {
             self.popdown_goto(window);
             return;
         }
-        let Some(id) = self.workspace.find_search(window) else {
+        let Some(id) = self.workspace.focused_in(window) else {
             return;
         };
-        if self.workspace.focused() == id {
-            self.set_search(window, false);
+        if self.workspace.tab(id).is_some_and(|t| t.kind.is_search()) {
+            self.request_close(id);
         }
     }
 
@@ -1225,39 +1209,37 @@ impl App {
         if self.error.is_some() {
             return;
         }
-        if self.workspace.has_search(window) == open {
-            if open {
-                if let Some(id) = self.workspace.find_search(window) {
-                    self.select_tab(id);
-                    self.focus_search(id);
-                }
-            }
+        if open {
+            let _ = self.open_search_tab(window);
             return;
         }
-        if open {
-            self.open_search_tab(window);
-        } else if let Some(id) = self.workspace.find_search(window) {
+        let id = self
+            .workspace
+            .focused_in(window)
+            .filter(|&id| self.workspace.tab(id).is_some_and(|t| t.kind.is_search()))
+            .or_else(|| self.workspace.find_search(window));
+        if let Some(id) = id {
             self.request_close(id);
         }
     }
 
-    fn open_search_tab(&mut self, window: WindowId) {
+    fn open_search_tab(&mut self, window: WindowId) -> Option<TabId> {
+        if self.error.is_some() {
+            return None;
+        }
         let was_split = self.workspace.is_window_split(window);
         let at = self.at_in(window);
         let opened = self.workspace.open_search(window);
-        if opened.created {
-            let mut pane = search::build_pane(self.search_mode);
-            pane.origin = Some(at);
-            self.wire_search(opened.id, &pane);
-            let root = pane.root.clone();
-            self.add_page(opened.id, &root, "Search", TabContent::Search(pane));
-            if self.open_beside && !was_split {
-                self.move_tab_beside(opened.id);
-            }
-        } else {
-            self.select_tab(opened.id);
+        let mut pane = search::build_pane(self.search_mode);
+        pane.origin = Some(at);
+        self.wire_search(opened.id, &pane);
+        let root = pane.root.clone();
+        self.add_page(opened.id, &root, "Search", TabContent::Search(pane));
+        if self.open_beside && !was_split {
+            self.move_tab_beside(opened.id);
         }
         self.focus_search(opened.id);
+        Some(opened.id)
     }
 
     fn wire_search(&self, id: TabId, pane: &search::Pane) {
@@ -1747,16 +1729,16 @@ impl App {
                     self.preview_at_in(window, at);
                 }
                 if hit.module == "TSK" {
-                    self.ensure_tsk();
+                    let _ = self.ensure_tsk();
                 } else {
-                    self.ensure_mhc();
+                    let _ = self.ensure_mhc();
                 }
             }
             LibraryKind::Dictionary | LibraryKind::Topic | LibraryKind::Lexicon => {
                 let Some(headword) = hit.headword.as_deref() else {
                     return;
                 };
-                self.open_library(&hit.module, Some(headword));
+                let _ = self.open_library(&hit.module, Some(headword));
             }
         }
     }
@@ -2010,7 +1992,7 @@ impl App {
             if let Some(p) = self.passage_mut(id) {
                 p.select_verse(verse);
             }
-            self.ensure_mhc();
+            let _ = self.ensure_mhc();
             return;
         }
         let note = self
@@ -2059,182 +2041,114 @@ impl App {
     }
 
     /// App-menu study links stay in the current tab bar instead of splitting.
-    fn in_current_tabs(&mut self, open: impl FnOnce(&mut Self)) {
+    fn in_current_tabs<T>(&mut self, open: impl FnOnce(&mut Self) -> T) -> T {
         let beside = self.open_beside;
         self.open_beside = false;
-        open(self);
+        let opened = open(self);
         self.open_beside = beside;
+        opened
     }
 
-    fn ensure_mhc(&mut self) {
+    fn ensure_mhc(&mut self) -> Option<TabId> {
         if self.error.is_some() {
-            return;
+            return None;
         }
         let at = self.at();
         let opened = self.workspace.open_mhc(at);
-        if opened.created {
-            let widgets = mhc::build();
-            mhc::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
-            let root = widgets.root.clone();
-            self.add_page(opened.id, &root, "Matthew Henry", TabContent::Mhc(widgets));
-            if self.open_beside {
-                self.move_tab_beside(opened.id);
-            }
-        } else {
-            self.select_tab(opened.id);
+        let widgets = mhc::build();
+        mhc::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
+        let root = widgets.root.clone();
+        self.add_page(opened.id, &root, "Matthew Henry", TabContent::Mhc(widgets));
+        if self.open_beside {
+            self.move_tab_beside(opened.id);
         }
-        let follow = self
-            .workspace
-            .tab(opened.id)
-            .is_some_and(|tab| tab.kind.follows_verse());
-        let memory = if opened.created {
-            PlaceMemory::Restart
-        } else if follow {
-            PlaceMemory::Retarget
-        } else {
-            PlaceMemory::Navigate
-        };
-        self.present_study(opened.id, at, memory);
+        self.present_study(opened.id, at, PlaceMemory::Restart);
         self.sync_tab_title(opened.id);
+        Some(opened.id)
     }
 
-    fn ensure_tsk(&mut self) {
+    fn ensure_tsk(&mut self) -> Option<TabId> {
         if self.error.is_some() {
-            return;
+            return None;
         }
         let at = self.at();
         let opened = self.workspace.open_tsk(at);
-        if opened.created {
-            let widgets = tsk::build();
-            tsk::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
-            let root = widgets.root.clone();
-            self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
-            if self.open_beside {
-                self.move_tab_beside(opened.id);
-            }
-        } else {
-            self.select_tab(opened.id);
+        let widgets = tsk::build();
+        tsk::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
+        let root = widgets.root.clone();
+        self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
+        if self.open_beside {
+            self.move_tab_beside(opened.id);
         }
-        let follow = self
-            .workspace
-            .tab(opened.id)
-            .is_some_and(|tab| tab.kind.follows_verse());
-        let memory = if opened.created {
-            PlaceMemory::Restart
-        } else if follow {
-            PlaceMemory::Retarget
-        } else {
-            PlaceMemory::Navigate
-        };
-        self.present_study(opened.id, at, memory);
+        self.present_study(opened.id, at, PlaceMemory::Restart);
         self.sync_tab_title(opened.id);
+        Some(opened.id)
     }
 
-    fn open_library(&mut self, module: &str, headword: Option<&str>) {
+    fn open_library(&mut self, module: &str, headword: Option<&str>) -> Option<TabId> {
         if self.error.is_some() {
-            return;
+            return None;
         }
         let opened = self
             .workspace
             .open_library(module.to_string(), headword.map(str::to_string));
-        if opened.created {
-            let mut widgets = dict::build(self.msg_tx.clone());
-            dict::wire(&widgets, opened.id, self.msg_tx.clone());
-            if let Some(conn) = &self.conn {
-                dict::load_modules(&mut widgets, conn);
-            }
-            if let (Some(conn), Some(head)) = (&self.conn, headword) {
-                dict::open_headword(&mut widgets, conn, module, head);
-            } else {
-                dict::select_module(&mut widgets, module);
-            }
-            let title = dict::tab_title(&widgets);
-            let root = widgets.root.clone();
-            self.add_page(opened.id, &root, &title, TabContent::Library(widgets));
-            if self.open_beside {
-                self.move_tab_beside(opened.id);
-            }
-        } else if let Some(TabContent::Library(widgets)) =
-            self.hosted.get_mut(&opened.id).map(|h| &mut h.content)
-        {
-            if let (Some(conn), Some(head)) = (&self.conn, headword) {
-                dict::open_headword(widgets, conn, module, head);
-            } else {
-                dict::select_module(widgets, module);
-            }
-            let title = dict::tab_title(widgets);
-            if let Some(page) = self.page_of(opened.id) {
-                page.set_title(&title);
-            }
-            self.select_tab(opened.id);
+        let mut widgets = dict::build(opened.id, self.msg_tx.clone());
+        dict::wire(&widgets, opened.id, self.msg_tx.clone());
+        if let Some(conn) = &self.conn {
+            dict::load_modules(&mut widgets, conn);
         }
+        if let (Some(conn), Some(head)) = (&self.conn, headword) {
+            dict::open_headword(&mut widgets, conn, module, head);
+        } else {
+            dict::select_module(&mut widgets, module);
+        }
+        let title = dict::tab_title(&widgets);
+        let root = widgets.root.clone();
+        self.add_page(opened.id, &root, &title, TabContent::Library(widgets));
+        if self.open_beside {
+            self.move_tab_beside(opened.id);
+        }
+        Some(opened.id)
     }
 
-    fn open_occurrences(&mut self, code: &str) {
+    fn open_occurrences(&mut self, code: &str) -> Option<TabId> {
         if self.error.is_some() {
-            return;
+            return None;
         }
         let opened = self.workspace.open_occurrences(code.to_string());
-        if opened.created {
-            let mut widgets = occurrences::build(self.msg_tx.clone());
-            if let Some(conn) = &self.conn {
-                occurrences::fill(&mut widgets, conn, &self.books, code);
-            }
-            let title = format!("{code} in the KJV");
-            let root = widgets.root.clone();
-            self.add_page(opened.id, &root, &title, TabContent::Occurrences(widgets));
-            self.move_tab_beside(opened.id);
-        } else if let Some(TabContent::Occurrences(widgets)) =
-            self.hosted.get_mut(&opened.id).map(|h| &mut h.content)
-        {
-            if let Some(conn) = &self.conn {
-                occurrences::fill(widgets, conn, &self.books, code);
-            }
-            if let Some(page) = self.page_of(opened.id) {
-                page.set_title(&format!("{code} in the KJV"));
-            }
-            self.select_tab(opened.id);
+        let mut widgets = occurrences::build(opened.id, self.msg_tx.clone());
+        if let Some(conn) = &self.conn {
+            occurrences::fill(&mut widgets, conn, &self.books, code);
         }
+        let title = format!("{code} in the KJV");
+        let root = widgets.root.clone();
+        self.add_page(opened.id, &root, &title, TabContent::Occurrences(widgets));
+        self.move_tab_beside(opened.id);
+        Some(opened.id)
     }
 
-    fn ensure_marks(&mut self, page: &str) {
+    fn ensure_marks(&mut self, page: &str) -> Option<TabId> {
         if self.error.is_some() || self.user.is_none() {
-            return;
+            return None;
         }
         let opened = self.workspace.open_marks(MarksPage::from_str(page));
-        if opened.created {
-            let mut widgets = marks::build(self.msg_tx.clone());
-            if let Some(user) = &self.user {
-                marks::fill(&mut widgets, user, &self.books);
-            }
-            marks::show_page(&widgets, page);
-            let title = MarksPage::from_str(page).as_str();
-            let title = if title == "notes" {
-                "Notes"
-            } else {
-                "Bookmarks"
-            };
-            let root = widgets.root.clone();
-            self.add_page(opened.id, &root, title, TabContent::Marks(widgets));
-            if self.open_beside {
-                self.move_tab_beside(opened.id);
-            }
-        } else if let Some(TabContent::Marks(widgets)) =
-            self.hosted.get_mut(&opened.id).map(|h| &mut h.content)
-        {
-            marks::show_page(widgets, page);
-            if let Some(user) = &self.user {
-                marks::fill(widgets, user, &self.books);
-            }
-            if let Some(tab_page) = self.page_of(opened.id) {
-                tab_page.set_title(if page == "notes" {
-                    "Notes"
-                } else {
-                    "Bookmarks"
-                });
-            }
-            self.select_tab(opened.id);
+        let mut widgets = marks::build(opened.id, self.msg_tx.clone());
+        if let Some(user) = &self.user {
+            marks::fill(&mut widgets, user, &self.books);
         }
+        marks::show_page(&widgets, page);
+        let title = MarksPage::from_str(page).as_str();
+        let title = if title == "notes" {
+            "Notes"
+        } else {
+            "Bookmarks"
+        };
+        let root = widgets.root.clone();
+        self.add_page(opened.id, &root, title, TabContent::Marks(widgets));
+        if self.open_beside {
+            self.move_tab_beside(opened.id);
+        }
+        Some(opened.id)
     }
 
     fn open_strongs(&mut self, id: TabId, offset: i32) {
@@ -2578,18 +2492,9 @@ impl App {
         let window = self.window_of(id);
         self.open_beside = false;
         let target = match choice {
-            launcher::Launch::Search => {
-                self.open_search_tab(window);
-                self.workspace.find_search(window)
-            }
-            launcher::Launch::Mhc => {
-                self.ensure_mhc();
-                self.workspace.find_kind(|k| k.is_mhc())
-            }
-            launcher::Launch::Tsk => {
-                self.ensure_tsk();
-                self.workspace.find_kind(|k| k.is_tsk())
-            }
+            launcher::Launch::Search => self.open_search_tab(window),
+            launcher::Launch::Mhc => self.ensure_mhc(),
+            launcher::Launch::Tsk => self.ensure_tsk(),
             launcher::Launch::Library => {
                 let module = self
                     .dict_modules
@@ -2597,24 +2502,10 @@ impl App {
                     .find(|module| module.kind == "dictionary")
                     .or_else(|| self.dict_modules.first())
                     .map(|module| module.id.clone());
-                if let Some(module) = module {
-                    self.open_library(&module, None);
-                    self.workspace
-                        .find_kind(|k| matches!(k, TabKind::Library { .. }))
-                } else {
-                    None
-                }
+                module.and_then(|module| self.open_library(&module, None))
             }
-            launcher::Launch::Notes => {
-                self.ensure_marks("notes");
-                self.workspace
-                    .find_kind(|k| matches!(k, TabKind::Marks { .. }))
-            }
-            launcher::Launch::Bookmarks => {
-                self.ensure_marks("bookmarks");
-                self.workspace
-                    .find_kind(|k| matches!(k, TabKind::Marks { .. }))
-            }
+            launcher::Launch::Notes => self.ensure_marks("notes"),
+            launcher::Launch::Bookmarks => self.ensure_marks("bookmarks"),
         };
         self.open_beside = true;
         let Some(target) = target else {
@@ -2657,15 +2548,6 @@ impl App {
             if !tab.kind.is_passage() {
                 page.set_tooltip(&nav::format_ref(&self.books, at));
             }
-        }
-    }
-
-    fn sync_open_tab_title(&self) {
-        if let Some(id) = self
-            .workspace
-            .find_kind(|k| matches!(k, TabKind::Library { .. }))
-        {
-            self.sync_tab_title(id);
         }
     }
 
@@ -3108,10 +2990,15 @@ impl App {
             }
         }
         if refresh_lists {
-            if let Some(id) = self
-                .workspace
-                .find_kind(|k| matches!(k, TabKind::Marks { .. }))
-            {
+            let ids: Vec<TabId> = self
+                .hosted
+                .iter()
+                .filter_map(|(id, h)| match h.content {
+                    TabContent::Marks(_) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            for id in ids {
                 if let (Some(TabContent::Marks(widgets)), Some(user)) = (
                     self.hosted.get_mut(&id).map(|h| &mut h.content),
                     self.user.as_ref(),
@@ -3149,20 +3036,17 @@ impl App {
     }
 
     fn add_note(&mut self) {
-        self.ensure_marks("notes");
+        let Some(id) = self.ensure_marks("notes") else {
+            return;
+        };
         let at = self.at();
         let text = self
             .user
             .as_ref()
             .and_then(|u| user_db::get_note(u, at).ok().flatten())
             .unwrap_or_default();
-        if let Some(id) = self
-            .workspace
-            .find_kind(|k| matches!(k, TabKind::Marks { .. }))
-        {
-            if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
-                marks::edit_note(w, &self.books, at, &text);
-            }
+        if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+            marks::edit_note(w, &self.books, at, &text);
         }
     }
 
@@ -3456,13 +3340,7 @@ impl App {
         }
     }
 
-    fn open_dict_hit(&mut self, idx: i32) {
-        let Some(id) = self
-            .workspace
-            .find_kind(|kind| matches!(kind, TabKind::Library { .. }))
-        else {
-            return;
-        };
+    fn open_dict_hit(&mut self, id: TabId, idx: i32) {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
@@ -3473,7 +3351,7 @@ impl App {
         if let Some(key) = key {
             self.workspace.set_library_headword(id, Some(key));
         }
-        self.sync_open_tab_title();
+        self.sync_tab_title(id);
     }
 
     fn sync_study_bar(&self, id: TabId) {

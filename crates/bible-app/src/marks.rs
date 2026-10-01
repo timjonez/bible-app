@@ -1,6 +1,7 @@
 use crate::layout::{self, ChapterLayout};
 use crate::nav::{self, Ref};
 use crate::user_db::{self, Bookmark, Note, VerseMarks};
+use crate::workspace::TabId;
 use adw::prelude::*;
 use bible_app_db::Book;
 use gtk::gio;
@@ -126,7 +127,7 @@ pub fn verse_menu_model(bookmarked: bool, has_note: bool) -> gio::Menu {
     menu
 }
 
-pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
+pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     let stack = adw::ViewStack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
@@ -141,11 +142,11 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     bookmark_list.set_accessible_role(gtk::AccessibleRole::List);
     let send_bm = sender.clone();
     bookmark_list.connect_row_activated(move |_, row| {
-        send_bm.emit(super::app::Msg::MarksBookmarkActivated(row.index()));
+        send_bm.emit(super::app::Msg::MarksBookmarkActivated(id, row.index()));
     });
     let send_bm_sel = sender.clone();
     bookmark_list.connect_row_selected(move |_, _| {
-        send_bm_sel.emit(super::app::Msg::MarksBookmarkSelected);
+        send_bm_sel.emit(super::app::Msg::MarksBookmarkSelected(id));
     });
 
     let bookmarks_empty = gtk::Label::new(Some(
@@ -167,7 +168,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     remove_bookmark.set_sensitive(false);
     let send_rm = sender.clone();
     remove_bookmark.connect_clicked(move |_| {
-        send_rm.emit(super::app::Msg::RemoveSelectedBookmark);
+        send_rm.emit(super::app::Msg::RemoveSelectedBookmark(id));
     });
 
     let bookmarks_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -185,12 +186,12 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     note_list.set_accessible_role(gtk::AccessibleRole::List);
     let send_note = sender.clone();
     note_list.connect_row_activated(move |_, row| {
-        send_note.emit(super::app::Msg::MarksNoteActivated(row.index()));
+        send_note.emit(super::app::Msg::MarksNoteActivated(id, row.index()));
     });
     let send_note_sel = sender.clone();
     note_list.connect_row_selected(move |_, row| {
         if let Some(row) = row {
-            send_note_sel.emit(super::app::Msg::MarksNoteSelected(row.index()));
+            send_note_sel.emit(super::app::Msg::MarksNoteSelected(id, row.index()));
         }
     });
 
@@ -238,7 +239,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
         if sync_save.get() {
             return;
         }
-        send_save.emit(super::app::Msg::SaveNote);
+        send_save.emit(super::app::Msg::SaveNote(id));
     });
 
     let delete_note = gtk::Button::with_label("Delete note");
@@ -246,7 +247,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
     delete_note.set_sensitive(false);
     let send_del = sender.clone();
     delete_note.connect_clicked(move |_| {
-        send_del.emit(super::app::Msg::DeleteEditingNote);
+        send_del.emit(super::app::Msg::DeleteEditingNote(id));
     });
 
     let export_notes = gtk::Button::with_label("Export notes…");

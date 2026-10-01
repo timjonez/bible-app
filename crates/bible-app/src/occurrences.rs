@@ -1,5 +1,6 @@
 use crate::layout;
 use crate::nav::{self, Ref};
+use crate::workspace::TabId;
 use adw::prelude::*;
 use bible_app_db::{Book, Occurrence};
 use relm4::{adw, gtk};
@@ -13,7 +14,7 @@ pub struct OccWidgets {
     pub hits: Vec<Occurrence>,
 }
 
-pub fn build(sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
+pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
     let heading = gtk::Label::new(Some("Strong's in the KJV"));
     heading.add_css_class("heading");
     heading.set_xalign(0.0);
@@ -30,7 +31,7 @@ pub fn build(sender: relm4::Sender<super::app::Msg>) -> OccWidgets {
     list.set_accessible_role(gtk::AccessibleRole::List);
     let send = sender.clone();
     list.connect_row_activated(move |_, row| {
-        send.emit(super::app::Msg::OpenOccurrenceHit(row.index()));
+        send.emit(super::app::Msg::OpenOccurrenceHit(id, row.index()));
     });
 
     let list_scroll = gtk::ScrolledWindow::new();
