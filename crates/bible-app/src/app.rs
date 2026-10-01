@@ -183,6 +183,7 @@ pub enum Msg {
     MarksNoteSelected(TabId, i32),
     SaveNote(TabId),
     DeleteEditingNote(TabId),
+    OpenSelectedBookmark(TabId),
     RemoveSelectedBookmark(TabId),
     ToggleBookmark,
     SetHighlight(String),
@@ -948,13 +949,12 @@ impl SimpleComponent for App {
                     .marks_widgets(id)
                     .and_then(|w| marks::bookmark_at(w, idx))
                 {
-                    self.go(at, true);
+                    self.show_verse(self.window_of(id), at);
                 }
             }
             Msg::MarksBookmarkSelected(id) => {
                 if let Some(w) = self.marks_widgets(id) {
-                    w.remove_bookmark
-                        .set_sensitive(w.bookmark_list.selected_row().is_some());
+                    marks::sync_bookmark_actions(w);
                 }
             }
             Msg::MarksNoteActivated(id, idx) => {
@@ -1011,6 +1011,11 @@ impl SimpleComponent for App {
                     marks::clear_editor(w);
                 }
                 self.reload_user_marks(true);
+            }
+            Msg::OpenSelectedBookmark(id) => {
+                if let Some(at) = self.marks_widgets(id).and_then(marks::selected_bookmark) {
+                    self.show_verse(self.window_of(id), at);
+                }
             }
             Msg::RemoveSelectedBookmark(id) => {
                 let Some(at) = self.marks_widgets(id).and_then(marks::selected_bookmark) else {
@@ -1752,7 +1757,7 @@ impl App {
         self.go_in(window, at, highlight);
     }
 
-    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) {
+    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) -> TabId {
         let id = match self.workspace.focused_passage_in(window) {
             Some(id) => id,
             None => {
@@ -1762,6 +1767,12 @@ impl App {
             }
         };
         self.apply_passage_ref(id, at, highlight, true);
+        id
+    }
+
+    fn show_verse(&mut self, window: WindowId, at: Ref) {
+        let id = self.go_in(window, at, true);
+        self.focus_tab(id);
     }
 
     /// Open `at` beside the Treasury. Later clicks reuse that same passage.

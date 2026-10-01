@@ -36,6 +36,7 @@ pub struct MarksWidgets {
     pub editor_title: gtk::Label,
     pub editing: Option<Ref>,
     pub syncing: Rc<Cell<bool>>,
+    pub open_bookmark: gtk::Button,
     pub remove_bookmark: gtk::Button,
     pub delete_note: gtk::Button,
     pub export_notes: gtk::Button,
@@ -163,13 +164,26 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
     bookmark_scroll.set_vexpand(true);
     bookmark_scroll.set_child(Some(&bookmark_list));
 
+    let open_bookmark = gtk::Button::with_label("Open");
+    open_bookmark.set_sensitive(false);
+    open_bookmark.add_css_class("suggested-action");
+    open_bookmark.set_tooltip_text(Some("Open this verse in the Bible"));
+    let send_open = sender.clone();
+    open_bookmark.connect_clicked(move |_| {
+        send_open.emit(super::app::Msg::OpenSelectedBookmark(id));
+    });
+
     let remove_bookmark = gtk::Button::with_label("Remove");
-    remove_bookmark.set_halign(gtk::Align::Start);
     remove_bookmark.set_sensitive(false);
     let send_rm = sender.clone();
     remove_bookmark.connect_clicked(move |_| {
         send_rm.emit(super::app::Msg::RemoveSelectedBookmark(id));
     });
+
+    let bookmark_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    bookmark_actions.set_halign(gtk::Align::Start);
+    bookmark_actions.append(&open_bookmark);
+    bookmark_actions.append(&remove_bookmark);
 
     let bookmarks_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     bookmarks_page.set_margin_start(12);
@@ -178,7 +192,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
     bookmarks_page.set_margin_bottom(8);
     bookmarks_page.append(&bookmarks_empty);
     bookmarks_page.append(&bookmark_scroll);
-    bookmarks_page.append(&remove_bookmark);
+    bookmarks_page.append(&bookmark_actions);
 
     let note_list = gtk::ListBox::new();
     note_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -296,6 +310,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
         editor_title,
         editing: None,
         syncing,
+        open_bookmark,
         remove_bookmark,
         delete_note,
         export_notes,
@@ -344,10 +359,14 @@ pub fn refresh_lists(widgets: &mut MarksWidgets, user: &Connection, books: &[Boo
     } else {
         widgets.delete_note.set_sensitive(false);
     }
-    widgets
-        .remove_bookmark
-        .set_sensitive(widgets.bookmark_list.selected_row().is_some());
+    sync_bookmark_actions(widgets);
     widgets.syncing.set(false);
+}
+
+pub fn sync_bookmark_actions(widgets: &MarksWidgets) {
+    let on = widgets.bookmark_list.selected_row().is_some();
+    widgets.open_bookmark.set_sensitive(on);
+    widgets.remove_bookmark.set_sensitive(on);
 }
 
 pub fn bookmark_at(widgets: &MarksWidgets, idx: i32) -> Option<Ref> {
