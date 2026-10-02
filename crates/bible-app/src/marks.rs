@@ -36,10 +36,10 @@ pub struct MarksWidgets {
     pub editor_title: gtk::Label,
     pub editing: Option<Ref>,
     pub syncing: Rc<Cell<bool>>,
-    pub open_bookmark: gtk::Button,
-    pub remove_bookmark: gtk::Button,
     pub delete_note: gtk::Button,
     pub export_notes: gtk::Button,
+    tab: TabId,
+    sender: relm4::Sender<super::app::Msg>,
 }
 
 pub fn install_tags(buffer: &gtk::TextBuffer) {
@@ -145,10 +145,6 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
     bookmark_list.connect_row_activated(move |_, row| {
         send_bm.emit(super::app::Msg::MarksBookmarkActivated(id, row.index()));
     });
-    let send_bm_sel = sender.clone();
-    bookmark_list.connect_row_selected(move |_, _| {
-        send_bm_sel.emit(super::app::Msg::MarksBookmarkSelected(id));
-    });
 
     let bookmarks_empty = gtk::Label::new(Some(
         "No bookmarks. Right-click a verse in the chapter to add one.",
@@ -164,27 +160,6 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
     bookmark_scroll.set_vexpand(true);
     bookmark_scroll.set_child(Some(&bookmark_list));
 
-    let open_bookmark = gtk::Button::with_label("Open");
-    open_bookmark.set_sensitive(false);
-    open_bookmark.add_css_class("suggested-action");
-    open_bookmark.set_tooltip_text(Some("Open this verse in the Bible"));
-    let send_open = sender.clone();
-    open_bookmark.connect_clicked(move |_| {
-        send_open.emit(super::app::Msg::OpenSelectedBookmark(id));
-    });
-
-    let remove_bookmark = gtk::Button::with_label("Remove");
-    remove_bookmark.set_sensitive(false);
-    let send_rm = sender.clone();
-    remove_bookmark.connect_clicked(move |_| {
-        send_rm.emit(super::app::Msg::RemoveSelectedBookmark(id));
-    });
-
-    let bookmark_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    bookmark_actions.set_halign(gtk::Align::Start);
-    bookmark_actions.append(&open_bookmark);
-    bookmark_actions.append(&remove_bookmark);
-
     let bookmarks_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     bookmarks_page.set_margin_start(12);
     bookmarks_page.set_margin_end(12);
@@ -192,7 +167,6 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
     bookmarks_page.set_margin_bottom(8);
     bookmarks_page.append(&bookmarks_empty);
     bookmarks_page.append(&bookmark_scroll);
-    bookmarks_page.append(&bookmark_actions);
 
     let note_list = gtk::ListBox::new();
     note_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -310,10 +284,10 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
         editor_title,
         editing: None,
         syncing,
-        open_bookmark,
-        remove_bookmark,
         delete_note,
         export_notes,
+        tab: id,
+        sender,
     }
 }
 
@@ -334,7 +308,13 @@ pub fn fill(widgets: &mut MarksWidgets, user: &Connection, books: &[Book]) {
 pub fn refresh_lists(widgets: &mut MarksWidgets, user: &Connection, books: &[Book]) {
     widgets.syncing.set(true);
     widgets.bookmarks = user_db::list_bookmarks(user).unwrap_or_default();
-    refill_bookmarks(&widgets.bookmark_list, &widgets.bookmarks, books);
+    refill_bookmarks(
+        &widgets.bookmark_list,
+        &widgets.bookmarks,
+        books,
+        widgets.tab,
+        &widgets.sender,
+    );
     let has_bm = !widgets.bookmarks.is_empty();
     widgets.bookmark_list.set_visible(has_bm);
     widgets.bookmarks_empty.set_visible(!has_bm);
@@ -359,14 +339,7 @@ pub fn refresh_lists(widgets: &mut MarksWidgets, user: &Connection, books: &[Boo
     } else {
         widgets.delete_note.set_sensitive(false);
     }
-    sync_bookmark_actions(widgets);
     widgets.syncing.set(false);
-}
-
-pub fn sync_bookmark_actions(widgets: &MarksWidgets) {
-    let on = widgets.bookmark_list.selected_row().is_some();
-    widgets.open_bookmark.set_sensitive(on);
-    widgets.remove_bookmark.set_sensitive(on);
 }
 
 pub fn bookmark_at(widgets: &MarksWidgets, idx: i32) -> Option<Ref> {
@@ -378,11 +351,6 @@ pub fn bookmark_at(widgets: &MarksWidgets, idx: i32) -> Option<Ref> {
 
 pub fn note_at(widgets: &MarksWidgets, idx: i32) -> Option<Ref> {
     widgets.notes.get(usize::try_from(idx).ok()?).map(Note::at)
-}
-
-pub fn selected_bookmark(widgets: &MarksWidgets) -> Option<Ref> {
-    let row = widgets.bookmark_list.selected_row()?;
-    bookmark_at(widgets, row.index())
 }
 
 pub fn edit_note(widgets: &mut MarksWidgets, books: &[Book], at: Ref, text: &str) {
@@ -421,12 +389,24 @@ pub fn clear_editor(widgets: &mut MarksWidgets) {
     widgets.delete_note.set_sensitive(false);
 }
 
-fn refill_bookmarks(list: &gtk::ListBox, bookmarks: &[Bookmark], books: &[Book]) {
+fn refill_bookmarks(
+    list: &gtk::ListBox,
+    bookmarks: &[Bookmark],
+    books: &[Book],
+    id: TabId,
+    sender: &relm4::Sender<super::app::Msg>,
+) {
     while let Some(child) = list.row_at_index(0) {
         list.remove(&child);
     }
     for bm in bookmarks {
-        list.append(&ref_row(bm.at(), books, bm.label.as_str()));
+        list.append(&bookmark_row(
+            bm.at(),
+            books,
+            bm.label.as_str(),
+            id,
+            sender.clone(),
+        ));
     }
 }
 
@@ -437,6 +417,83 @@ fn refill_notes(list: &gtk::ListBox, notes: &[Note], books: &[Book]) {
     for note in notes {
         list.append(&ref_row(note.at(), books, note.text.as_str()));
     }
+}
+
+fn bookmark_row(
+    at: Ref,
+    books: &[Book],
+    extra: &str,
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row_box.set_margin_start(12);
+    row_box.set_margin_end(6);
+    row_box.set_margin_top(8);
+    row_box.set_margin_bottom(8);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    text.set_hexpand(true);
+    let title = gtk::Label::new(Some(&nav::format_ref(books, at)));
+    title.set_xalign(0.0);
+    title.add_css_class("heading");
+    title.set_wrap(true);
+    title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    text.append(&title);
+    let snippet = snippet(extra);
+    if !snippet.is_empty() {
+        let sub = gtk::Label::new(Some(&snippet));
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+        sub.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        sub.add_css_class("dim-label");
+        sub.set_max_width_chars(64);
+        text.append(&sub);
+    }
+    row_box.append(&text);
+
+    let send_open = sender.clone();
+    row_box.append(&icon_button(
+        "view-dual-symbolic",
+        "Open beside",
+        move || send_open.emit(super::app::Msg::OpenBookmark(id, at)),
+    ));
+    let send_tab = sender.clone();
+    row_box.append(&icon_button(
+        "tab-new-symbolic",
+        "Open in a new tab",
+        move || send_tab.emit(super::app::Msg::OpenBookmarkTab(id, at)),
+    ));
+    row_box.append(&icon_button(
+        "edit-delete-symbolic",
+        "Remove bookmark",
+        move || sender.emit(super::app::Msg::RemoveBookmark(at)),
+    ));
+
+    row.set_child(Some(&row_box));
+    row.set_activatable(true);
+    row
+}
+
+fn icon_button(icon: &str, tooltip: &str, on_click: impl Fn() + 'static) -> gtk::Button {
+    let btn = gtk::Button::from_icon_name(icon);
+    btn.set_tooltip_text(Some(tooltip));
+    btn.add_css_class("flat");
+    btn.add_css_class("circular");
+    btn.set_valign(gtk::Align::Center);
+    btn.set_has_frame(false);
+    btn.set_focus_on_click(false);
+    btn.update_property(&[gtk::accessible::Property::Label(tooltip)]);
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_PRIMARY);
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    click.connect_released(move |gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        on_click();
+    });
+    btn.add_controller(click);
+    btn
 }
 
 fn ref_row(at: Ref, books: &[Book], extra: &str) -> gtk::ListBoxRow {
