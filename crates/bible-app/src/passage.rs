@@ -1035,18 +1035,27 @@ fn token_spans(
         if needle.is_empty() {
             continue;
         }
+        let prefix = bible_app_db::is_prefix_token(&needle);
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
             let char_at = lower[..pos].chars().count();
             let char_end = char_at + needle.chars().count();
             let abs = (start + char_at) as i32;
-            let abs_end = (start + char_end) as i32;
+            let mut abs_end = (start + char_end) as i32;
             let before = neighbor_char(&chars, abs as isize - 1, skip, false);
             let after = neighbor_char(&chars, abs_end as isize, skip, true);
-            if before.is_none_or(|c| !c.is_ascii_alphanumeric())
-                && after.is_none_or(|c| !c.is_ascii_alphanumeric())
-            {
+            let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
+            let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
+            if left_ok && (prefix || right_ok) {
+                if prefix {
+                    loop {
+                        match neighbor_char(&chars, abs_end as isize, skip, true) {
+                            Some(c) if c.is_ascii_alphanumeric() => abs_end += 1,
+                            _ => break,
+                        }
+                    }
+                }
                 spans.push(layout::Span {
                     start: abs,
                     end: abs_end,
@@ -1101,5 +1110,12 @@ mod token_span_tests {
             vec![layout::Span { start: 4, end: 9 }],
             "Moses sits at 4..9, before the superscript a"
         );
+    }
+
+    #[test]
+    fn search_prefix_covers_the_whole_word() {
+        let text = "the heaven and the earth";
+        let spans = token_spans(text, 0, text.chars().count() as i32, &["eart".into()], &[]);
+        assert_eq!(spans, vec![layout::Span { start: 19, end: 24 }]);
     }
 }

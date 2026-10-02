@@ -192,6 +192,7 @@ pub fn emphasize(text: &str, tokens: &[String]) -> String {
         if needle.is_empty() {
             continue;
         }
+        let prefix = bible_app_db::is_prefix_token(&needle);
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
@@ -199,8 +200,22 @@ pub fn emphasize(text: &str, tokens: &[String]) -> String {
             let after = lower[pos + needle.len()..].chars().next();
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
-            if left_ok && right_ok {
-                marks.push((pos, pos + needle.len()));
+            if left_ok && (prefix || right_ok) {
+                let mut end = pos + needle.len();
+                if prefix {
+                    while end < lower.len() {
+                        let Some(c) = lower[end..].chars().next() else {
+                            break;
+                        };
+                        if !c.is_ascii_alphanumeric() {
+                            break;
+                        }
+                        end += c.len_utf8();
+                    }
+                }
+                marks.push((pos, end));
+                from = end.max(pos + 1);
+                continue;
             }
             from = pos + needle.len().max(1);
         }
@@ -1156,7 +1171,7 @@ mod tests {
             SearchScope::Kjv,
         ) {
             Plan::Ready(p) => {
-                assert_eq!(p.compiled.fts, "light");
+                assert_eq!(p.compiled.fts, "light*");
                 assert_eq!(p.filter.book, Some(43));
                 assert_eq!(p.filter.chapter, None);
             }
@@ -1174,7 +1189,7 @@ mod tests {
             Plan::Ready(p) => {
                 assert_eq!(p.filter.book, Some(43));
                 assert_eq!(p.filter.chapter, Some(3));
-                assert_eq!(p.compiled.fts, "born");
+                assert_eq!(p.compiled.fts, "born*");
             }
             other => panic!("expected chapter search, got {other:?}"),
         }
@@ -1197,6 +1212,10 @@ mod tests {
         assert_eq!(
             emphasize("the only begotten Son", &["begotten".into()]),
             "the only <b>begotten</b> Son"
+        );
+        assert_eq!(
+            emphasize("the heaven and the earth.", &["eart".into()]),
+            "the heaven and the <b>earth</b>."
         );
         assert!(emphasize("a < b & c", &["b".into()]).contains("&lt;"));
     }

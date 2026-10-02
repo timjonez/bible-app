@@ -4,6 +4,9 @@ use crate::DbError;
 
 pub const DEFAULT_LIMIT: usize = 200;
 
+/// Tokens this long or longer become FTS5 prefixes, so `eart` matches earth.
+pub const SEARCH_PREFIX_MIN: usize = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
     pub book: u8,
@@ -185,7 +188,9 @@ pub fn match_query(input: &str) -> Option<String> {
 ///
 /// Uppercase `AND`, `OR`, `NOT`, and `NEAR/5` are operators. Lowercase
 /// "and" stays a word so a phrase like "bread and wine" still matches.
-/// A trailing `*` is a prefix. Apostrophes break tokens, so "God's" searches God.
+/// Words of three or more letters are prefixes (`eart` matches earth).
+/// A trailing `*` still prefixes a shorter stem. Apostrophes break tokens,
+/// so "God's" searches God.
 pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
     let trimmed = input.trim();
     if let Some(code) = strongs_query(trimmed) {
@@ -327,11 +332,15 @@ fn operator(raw: &str) -> Option<String> {
 }
 
 fn word_fts(text: &str, prefix: bool) -> String {
-    if prefix {
+    if prefix || is_prefix_token(text) {
         format!("{text}*")
     } else {
         text.to_string()
     }
+}
+
+pub fn is_prefix_token(token: &str) -> bool {
+    token.len() >= SEARCH_PREFIX_MIN
 }
 
 fn mode_fts(pieces: &[Piece], mode: MatchMode) -> Option<String> {
@@ -346,14 +355,17 @@ fn mode_fts(pieces: &[Piece], mode: MatchMode) -> Option<String> {
         .iter()
         .any(|p| matches!(p, Piece::Word { prefix: true, .. }));
     if mode == MatchMode::Phrase && words.len() > 1 && !any_prefix {
-        let inner = words
+        let parts: Vec<&str> = words
             .iter()
             .filter_map(|p| match p {
                 Piece::Word { text, .. } => Some(text.as_str()),
                 Piece::Op(_) => None,
             })
-            .collect::<Vec<_>>()
-            .join(" ");
+            .collect();
+        let inner = parts.join(" ");
+        if parts.last().is_some_and(|last| is_prefix_token(last)) {
+            return Some(format!("\"{inner}\"*"));
+        }
         return Some(format!("\"{inner}\""));
     }
     let joiner = match mode {
@@ -798,6 +810,7 @@ pub fn window_snippet(text: &str, tokens: &[String], width: usize) -> String {
 }
 
 fn find_token(haystack: &str, needle: &str) -> Option<usize> {
+    let prefix = is_prefix_token(needle);
     let mut from = 0;
     while let Some(rel) = haystack[from..].find(needle) {
         let pos = from + rel;
@@ -805,7 +818,7 @@ fn find_token(haystack: &str, needle: &str) -> Option<usize> {
         let after = haystack[pos + needle.len()..].chars().next();
         let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
         let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
-        if left_ok && right_ok {
+        if left_ok && (prefix || right_ok) {
             return Some(pos);
         }
         from = pos + needle.len();
@@ -1217,22 +1230,27 @@ mod tests {
     #[test]
     fn compile_keeps_phrase_and_lowercase_and() {
         let phrase = compile_query("only begotten", MatchMode::Phrase).unwrap();
-        assert_eq!(phrase.fts, "\"only begotten\"");
+        assert_eq!(phrase.fts, "\"only begotten\"*");
         assert_eq!(phrase.tokens, ["only", "begotten"]);
         assert!(phrase.strongs.is_none());
         let with_and = compile_query("bread and wine", MatchMode::Phrase).unwrap();
-        assert_eq!(with_and.fts, "\"bread and wine\"");
+        assert_eq!(with_and.fts, "\"bread and wine\"*");
         let explicit = compile_query("faith AND works", MatchMode::Phrase).unwrap();
-        assert_eq!(explicit.fts, "faith AND works");
+        assert_eq!(explicit.fts, "faith* AND works*");
         let any = compile_query("faith works", MatchMode::AnyWord).unwrap();
-        assert_eq!(any.fts, "faith OR works");
+        assert_eq!(any.fts, "faith* OR works*");
         let all = compile_query("faith works", MatchMode::AllWords).unwrap();
-        assert_eq!(all.fts, "faith AND works");
+        assert_eq!(all.fts, "faith* AND works*");
         let prefix = compile_query("lov*", MatchMode::Phrase).unwrap();
         assert_eq!(prefix.fts, "lov*");
         assert_eq!(prefix.tokens, ["lov"]);
+        let partial = compile_query("eart", MatchMode::Phrase).unwrap();
+        assert_eq!(partial.fts, "eart*");
+        assert_eq!(partial.tokens, ["eart"]);
+        let short = compile_query("in", MatchMode::Phrase).unwrap();
+        assert_eq!(short.fts, "in");
         let possessive = compile_query("God's", MatchMode::Phrase).unwrap();
-        assert_eq!(possessive.fts, "God");
+        assert_eq!(possessive.fts, "God*");
         let code = compile_query("h430", MatchMode::Phrase).unwrap();
         assert_eq!(code.strongs.as_deref(), Some("H430"));
         assert!(compile_query("AND OR", MatchMode::Phrase).is_none());
@@ -1335,9 +1353,30 @@ mod tests {
         assert!(search_verses(&conn, "AND OR", 10).unwrap().is_empty());
         assert_eq!(
             match_query("only begotten").as_deref(),
-            Some("\"only begotten\"")
+            Some("\"only begotten\"*")
         );
-        assert_eq!(match_query("begotten").as_deref(), Some("begotten"));
+        assert_eq!(match_query("begotten").as_deref(), Some("begotten*"));
+        assert_eq!(match_query("eart").as_deref(), Some("eart*"));
+        assert_eq!(match_query("in").as_deref(), Some("in"));
+    }
+
+    #[test]
+    fn partial_word_matches_earth() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        let hits = search_verses(&conn, "eart", 20).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.book == 1 && h.chapter == 1 && h.verse == 1),
+            "hits: {hits:?}"
+        );
+        assert!(hits.iter().all(|h| h.text.to_lowercase().contains("eart")));
+        let snippet = window_snippet(
+            "In the beginning God created the heaven and the earth.",
+            &["eart".into()],
+            80,
+        );
+        assert!(snippet.to_lowercase().contains("earth"), "{snippet}");
     }
 
     #[test]
