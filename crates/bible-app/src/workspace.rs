@@ -32,29 +32,6 @@ impl TabId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarksPage {
-    Bookmarks,
-    Notes,
-}
-
-impl MarksPage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Bookmarks => "bookmarks",
-            Self::Notes => "notes",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        if s == "notes" {
-            Self::Notes
-        } else {
-            Self::Bookmarks
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabKind {
     Passage {
@@ -72,9 +49,8 @@ pub enum TabKind {
         module: String,
         headword: Option<String>,
     },
-    Marks {
-        page: MarksPage,
-    },
+    Bookmarks,
+    Notes,
     Occurrences {
         code: String,
     },
@@ -594,9 +570,15 @@ impl Workspace {
         OpenResult { id, created: true }
     }
 
-    pub fn open_marks(&mut self, page: MarksPage) -> OpenResult {
+    pub fn open_bookmarks(&mut self) -> OpenResult {
         let window = self.focused_window();
-        let id = self.add_tab(TabKind::Marks { page }, window);
+        let id = self.add_tab(TabKind::Bookmarks, window);
+        OpenResult { id, created: true }
+    }
+
+    pub fn open_notes(&mut self) -> OpenResult {
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Notes, window);
         OpenResult { id, created: true }
     }
 
@@ -917,20 +899,16 @@ mod tests {
             }
             other => panic!("expected library, got {other:?}"),
         }
-        let marks = ws.open_marks(MarksPage::Bookmarks);
-        let notes = ws.open_marks(MarksPage::Notes);
+        let marks = ws.open_bookmarks();
+        let notes = ws.open_notes();
+        let marks2 = ws.open_bookmarks();
         assert_ne!(marks.id, notes.id);
+        assert_ne!(marks.id, marks2.id);
+        assert!(matches!(ws.tab(marks.id).unwrap().kind, TabKind::Bookmarks));
+        assert!(matches!(ws.tab(notes.id).unwrap().kind, TabKind::Notes));
         assert!(matches!(
-            ws.tab(marks.id).unwrap().kind,
-            TabKind::Marks {
-                page: MarksPage::Bookmarks
-            }
-        ));
-        assert!(matches!(
-            ws.tab(notes.id).unwrap().kind,
-            TabKind::Marks {
-                page: MarksPage::Notes
-            }
+            ws.tab(marks2.id).unwrap().kind,
+            TabKind::Bookmarks
         ));
         let occ = ws.open_occurrences("H430".into());
         let occ2 = ws.open_occurrences("G26".into());
@@ -983,7 +961,7 @@ mod tests {
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
         let tsk = ws.open_tsk(r(1, 1, 1)).id;
         let lib = ws.open_library("Easton".into(), Some("God".into())).id;
-        let marks = ws.open_marks(MarksPage::Notes).id;
+        let notes = ws.open_notes().id;
         let occ = ws.open_occurrences("H430".into()).id;
         ws.navigate_passage(passage, r(43, 3, 16));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
@@ -992,12 +970,7 @@ mod tests {
             TabKind::Library { headword, .. } => assert_eq!(headword.as_deref(), Some("God")),
             other => panic!("{other:?}"),
         }
-        assert!(matches!(
-            ws.tab(marks).unwrap().kind,
-            TabKind::Marks {
-                page: MarksPage::Notes
-            }
-        ));
+        assert!(matches!(ws.tab(notes).unwrap().kind, TabKind::Notes));
         match &ws.tab(occ).unwrap().kind {
             TabKind::Occurrences { code } => assert_eq!(code, "H430"),
             other => panic!("{other:?}"),
