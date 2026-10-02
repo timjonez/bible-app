@@ -14,7 +14,7 @@ use crate::strongs;
 use crate::theme;
 use crate::tsk;
 use crate::user_db;
-use crate::workspace::{MarksPage, SplitOutcome, TabId, TabKind, WindowId, Workspace};
+use crate::workspace::{SplitOutcome, TabId, TabKind, WindowId, Workspace};
 use adw::prelude::*;
 use bible_app_db::{self, Book, DictModule, LibraryKind, MatchMode, SearchScope};
 use gtk::gio;
@@ -43,7 +43,8 @@ enum TabContent {
     Mhc(mhc::MhcWidgets),
     Tsk(tsk::TskWidgets),
     Library(dict::DictWidgets),
-    Marks(marks::MarksWidgets),
+    Bookmarks(marks::BookmarksWidgets),
+    Notes(marks::NotesWidgets),
     Occurrences(occurrences::OccWidgets),
     Search(search::Pane),
     Blank(launcher::BlankPage),
@@ -938,29 +939,29 @@ impl SimpleComponent for App {
                 self.reload_all_passages(false);
             }
             Msg::OpenBookmarks => {
-                self.in_current_tabs(|app| app.ensure_marks("bookmarks"));
+                self.in_current_tabs(|app| app.ensure_bookmarks());
             }
             Msg::OpenNotes => {
-                self.in_current_tabs(|app| app.ensure_marks("notes"));
+                self.in_current_tabs(|app| app.ensure_notes());
             }
             Msg::MarksBookmarkActivated(id, idx) => {
                 if let Some(at) = self
-                    .marks_widgets(id)
+                    .bookmarks_widgets(id)
                     .and_then(|w| marks::bookmark_at(w, idx))
                 {
                     self.open_bookmark_beside(id, at);
                 }
             }
             Msg::MarksNoteActivated(id, idx) => {
-                if let Some(at) = self.marks_widgets(id).and_then(|w| marks::note_at(w, idx)) {
+                if let Some(at) = self.notes_widgets(id).and_then(|w| marks::note_at(w, idx)) {
                     self.go(at, true);
                 }
             }
             Msg::MarksNoteSelected(id, idx) => {
-                if self.marks_widgets(id).is_some_and(|w| w.syncing.get()) {
+                if self.notes_widgets(id).is_some_and(|w| w.syncing.get()) {
                     return;
                 }
-                let Some(at) = self.marks_widgets(id).and_then(|w| marks::note_at(w, idx)) else {
+                let Some(at) = self.notes_widgets(id).and_then(|w| marks::note_at(w, idx)) else {
                     return;
                 };
                 let text = self
@@ -968,13 +969,13 @@ impl SimpleComponent for App {
                     .as_ref()
                     .and_then(|u| user_db::get_note(u, at).ok().flatten())
                     .unwrap_or_default();
-                if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
+                if let Some(TabContent::Notes(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
                 {
                     marks::load_note(w, &self.books, at, &text);
                 }
             }
             Msg::SaveNote(id) => {
-                let Some(TabContent::Marks(widgets)) = self.hosted.get(&id).map(|h| &h.content)
+                let Some(TabContent::Notes(widgets)) = self.hosted.get(&id).map(|h| &h.content)
                 else {
                     return;
                 };
@@ -989,18 +990,18 @@ impl SimpleComponent for App {
                     let _ = user_db::upsert_note(user, at, &text);
                 }
                 self.reload_user_marks(was_present != now_present);
-                if let Some(TabContent::Marks(w)) = self.hosted.get(&id).map(|h| &h.content) {
-                    w.delete_note.set_sensitive(now_present);
+                if let Some(TabContent::Notes(w)) = self.hosted.get(&id).map(|h| &h.content) {
+                    w.delete.set_sensitive(now_present);
                 }
             }
             Msg::DeleteEditingNote(id) => {
-                let Some(at) = self.marks_widgets(id).and_then(|w| w.editing) else {
+                let Some(at) = self.notes_widgets(id).and_then(|w| w.editing) else {
                     return;
                 };
                 if let Some(user) = &self.user {
                     let _ = user_db::delete_note(user, at);
                 }
-                if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
+                if let Some(TabContent::Notes(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
                 {
                     marks::clear_editor(w);
                 }
@@ -1117,9 +1118,16 @@ impl App {
             .and_then(|id| self.passage(id))
     }
 
-    fn marks_widgets(&self, id: TabId) -> Option<&marks::MarksWidgets> {
+    fn bookmarks_widgets(&self, id: TabId) -> Option<&marks::BookmarksWidgets> {
         match self.hosted.get(&id).map(|h| &h.content) {
-            Some(TabContent::Marks(w)) => Some(w),
+            Some(TabContent::Bookmarks(w)) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn notes_widgets(&self, id: TabId) -> Option<&marks::NotesWidgets> {
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Notes(w)) => Some(w),
             _ => None,
         }
     }
@@ -1744,7 +1752,7 @@ impl App {
         self.go_in(window, at, highlight);
     }
 
-    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) -> TabId {
+    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) {
         let id = match self.workspace.focused_passage_in(window) {
             Some(id) => id,
             None => {
@@ -1754,7 +1762,6 @@ impl App {
             }
         };
         self.apply_passage_ref(id, at, highlight, true);
-        id
     }
 
     fn open_bookmark_beside(&mut self, source: TabId, at: Ref) {
@@ -2143,24 +2150,39 @@ impl App {
         Some(opened.id)
     }
 
-    fn ensure_marks(&mut self, page: &str) -> Option<TabId> {
+    fn ensure_bookmarks(&mut self) -> Option<TabId> {
         if self.error.is_some() || self.user.is_none() {
             return None;
         }
-        let opened = self.workspace.open_marks(MarksPage::from_str(page));
-        let mut widgets = marks::build(opened.id, self.msg_tx.clone());
+        let opened = self.workspace.open_bookmarks();
+        let mut widgets = marks::build_bookmarks(opened.id, self.msg_tx.clone());
         if let Some(user) = &self.user {
-            marks::fill(&mut widgets, user, &self.books);
+            marks::fill_bookmarks(&mut widgets, user, &self.books);
         }
-        marks::show_page(&widgets, page);
-        let title = MarksPage::from_str(page).as_str();
-        let title = if title == "notes" {
-            "Notes"
-        } else {
-            "Bookmarks"
-        };
         let root = widgets.root.clone();
-        self.add_page(opened.id, &root, title, TabContent::Marks(widgets));
+        self.add_page(
+            opened.id,
+            &root,
+            "Bookmarks",
+            TabContent::Bookmarks(widgets),
+        );
+        if self.open_beside {
+            self.move_tab_beside(opened.id);
+        }
+        Some(opened.id)
+    }
+
+    fn ensure_notes(&mut self) -> Option<TabId> {
+        if self.error.is_some() || self.user.is_none() {
+            return None;
+        }
+        let opened = self.workspace.open_notes();
+        let mut widgets = marks::build_notes(opened.id, self.msg_tx.clone());
+        if let Some(user) = &self.user {
+            marks::fill_notes(&mut widgets, user, &self.books);
+        }
+        let root = widgets.root.clone();
+        self.add_page(opened.id, &root, "Notes", TabContent::Notes(widgets));
         if self.open_beside {
             self.move_tab_beside(opened.id);
         }
@@ -2520,8 +2542,8 @@ impl App {
                     .map(|module| module.id.clone());
                 module.and_then(|module| self.open_library(&module, None))
             }
-            launcher::Launch::Notes => self.ensure_marks("notes"),
-            launcher::Launch::Bookmarks => self.ensure_marks("bookmarks"),
+            launcher::Launch::Notes => self.ensure_notes(),
+            launcher::Launch::Bookmarks => self.ensure_bookmarks(),
         };
         self.open_beside = true;
         let Some(target) = target else {
@@ -2548,10 +2570,8 @@ impl App {
                 TabContent::Library(w) => dict::tab_title(w),
                 _ => "Library".into(),
             },
-            TabKind::Marks { page } => match page {
-                MarksPage::Notes => "Notes".into(),
-                MarksPage::Bookmarks => "Bookmarks".into(),
-            },
+            TabKind::Bookmarks => "Bookmarks".into(),
+            TabKind::Notes => "Notes".into(),
             TabKind::Occurrences { code } => format!("{code} in the KJV"),
             TabKind::Search => "Search".into(),
             TabKind::Blank => "New".into(),
@@ -3010,16 +3030,22 @@ impl App {
                 .hosted
                 .iter()
                 .filter_map(|(id, h)| match h.content {
-                    TabContent::Marks(_) => Some(*id),
+                    TabContent::Bookmarks(_) | TabContent::Notes(_) => Some(*id),
                     _ => None,
                 })
                 .collect();
             for id in ids {
-                if let (Some(TabContent::Marks(widgets)), Some(user)) = (
+                match (
                     self.hosted.get_mut(&id).map(|h| &mut h.content),
                     self.user.as_ref(),
                 ) {
-                    marks::refresh_lists(widgets, user, &self.books);
+                    (Some(TabContent::Bookmarks(widgets)), Some(user)) => {
+                        marks::fill_bookmarks(widgets, user, &self.books);
+                    }
+                    (Some(TabContent::Notes(widgets)), Some(user)) => {
+                        marks::fill_notes(widgets, user, &self.books);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -3052,7 +3078,7 @@ impl App {
     }
 
     fn add_note(&mut self) {
-        let Some(id) = self.ensure_marks("notes") else {
+        let Some(id) = self.ensure_notes() else {
             return;
         };
         let at = self.at();
@@ -3061,7 +3087,7 @@ impl App {
             .as_ref()
             .and_then(|u| user_db::get_note(u, at).ok().flatten())
             .unwrap_or_default();
-        if let Some(TabContent::Marks(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+        if let Some(TabContent::Notes(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
             marks::edit_note(w, &self.books, at, &text);
         }
     }
