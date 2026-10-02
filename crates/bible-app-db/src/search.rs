@@ -125,6 +125,41 @@ impl MatchMode {
     }
 }
 
+/// How each token matches a word in the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WordMatch {
+    #[default]
+    Prefix,
+    Exact,
+}
+
+impl WordMatch {
+    pub const ALL: [WordMatch; 2] = [Self::Prefix, Self::Exact];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prefix => "Prefix",
+            Self::Exact => "Exact word",
+        }
+    }
+
+    pub fn from_index(index: u32) -> Self {
+        Self::ALL
+            .get(index as usize)
+            .copied()
+            .unwrap_or(Self::Prefix)
+    }
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|&m| m == self).unwrap_or(0) as u32
+    }
+
+    /// Prefix mode treats stems of three or more letters as FTS prefixes.
+    pub fn prefixes(self, token: &str) -> bool {
+        self == Self::Prefix && is_prefix_token(token)
+    }
+}
+
 /// Words to emphasize, plus the FTS5 expression that finds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledQuery {
@@ -177,7 +212,7 @@ pub struct LibraryPage {
 /// Multi-word input becomes a phrase so "only begotten" matches that pair,
 /// not any verse that happens to contain both words.
 pub fn match_query(input: &str) -> Option<String> {
-    let compiled = compile_query(input, MatchMode::Phrase)?;
+    let compiled = compile_query(input, MatchMode::Phrase, WordMatch::Prefix)?;
     if compiled.strongs.is_some() {
         return None;
     }
@@ -188,10 +223,10 @@ pub fn match_query(input: &str) -> Option<String> {
 ///
 /// Uppercase `AND`, `OR`, `NOT`, and `NEAR/5` are operators. Lowercase
 /// "and" stays a word so a phrase like "bread and wine" still matches.
-/// Words of three or more letters are prefixes (`eart` matches earth).
-/// A trailing `*` still prefixes a shorter stem. Apostrophes break tokens,
-/// so "God's" searches God.
-pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
+/// In prefix mode, words of three or more letters are prefixes (`eart`
+/// matches earth). Exact mode keeps whole tokens. A trailing `*` still
+/// prefixes a shorter stem. Apostrophes break tokens, so "God's" searches God.
+pub fn compile_query(input: &str, mode: MatchMode, word_match: WordMatch) -> Option<CompiledQuery> {
     let trimmed = input.trim();
     if let Some(code) = strongs_query(trimmed) {
         return Some(CompiledQuery {
@@ -210,9 +245,9 @@ pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
     }
     let explicit = pieces.iter().any(|p| matches!(p, Piece::Op(_)));
     let fts = if explicit {
-        explicit_fts(&pieces)
+        explicit_fts(&pieces, word_match)
     } else {
-        mode_fts(&pieces, mode)
+        mode_fts(&pieces, mode, word_match)
     };
     let fts = fts?;
     let tokens = pieces
@@ -331,8 +366,8 @@ fn operator(raw: &str) -> Option<String> {
     }
 }
 
-fn word_fts(text: &str, prefix: bool) -> String {
-    if prefix || is_prefix_token(text) {
+fn word_fts(text: &str, prefix: bool, word_match: WordMatch) -> String {
+    if prefix || word_match.prefixes(text) {
         format!("{text}*")
     } else {
         text.to_string()
@@ -343,7 +378,7 @@ pub fn is_prefix_token(token: &str) -> bool {
     token.len() >= SEARCH_PREFIX_MIN
 }
 
-fn mode_fts(pieces: &[Piece], mode: MatchMode) -> Option<String> {
+fn mode_fts(pieces: &[Piece], mode: MatchMode, word_match: WordMatch) -> Option<String> {
     let words: Vec<&Piece> = pieces
         .iter()
         .filter(|p| matches!(p, Piece::Word { .. }))
@@ -363,7 +398,7 @@ fn mode_fts(pieces: &[Piece], mode: MatchMode) -> Option<String> {
             })
             .collect();
         let inner = parts.join(" ");
-        if parts.last().is_some_and(|last| is_prefix_token(last)) {
+        if parts.last().is_some_and(|last| word_match.prefixes(last)) {
             return Some(format!("\"{inner}\"*"));
         }
         return Some(format!("\"{inner}\""));
@@ -376,7 +411,7 @@ fn mode_fts(pieces: &[Piece], mode: MatchMode) -> Option<String> {
         words
             .iter()
             .filter_map(|p| match p {
-                Piece::Word { text, prefix } => Some(word_fts(text, *prefix)),
+                Piece::Word { text, prefix } => Some(word_fts(text, *prefix, word_match)),
                 Piece::Op(_) => None,
             })
             .collect::<Vec<_>>()
@@ -384,7 +419,7 @@ fn mode_fts(pieces: &[Piece], mode: MatchMode) -> Option<String> {
     )
 }
 
-fn explicit_fts(pieces: &[Piece]) -> Option<String> {
+fn explicit_fts(pieces: &[Piece], word_match: WordMatch) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     for piece in pieces {
         match piece {
@@ -404,7 +439,7 @@ fn explicit_fts(pieces: &[Piece]) -> Option<String> {
                 if out.last().is_some_and(|prev| !is_op(prev)) && !out.is_empty() {
                     out.push("AND".into());
                 }
-                out.push(word_fts(text, *prefix));
+                out.push(word_fts(text, *prefix, word_match));
             }
         }
     }
@@ -604,7 +639,7 @@ pub fn search_verses(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchHit>, DbError> {
-    let Some(compiled) = compile_query(query, MatchMode::Phrase) else {
+    let Some(compiled) = compile_query(query, MatchMode::Phrase, WordMatch::Prefix) else {
         return Ok(Vec::new());
     };
     if compiled.strongs.is_some() {
@@ -854,7 +889,7 @@ pub fn search_library(
     scope: SearchScope,
     limit: usize,
 ) -> Result<Vec<LibraryHit>, DbError> {
-    let Some(compiled) = compile_query(query, MatchMode::Phrase) else {
+    let Some(compiled) = compile_query(query, MatchMode::Phrase, WordMatch::Prefix) else {
         return Ok(Vec::new());
     };
     if compiled.strongs.is_some() {
@@ -1229,32 +1264,41 @@ mod tests {
 
     #[test]
     fn compile_keeps_phrase_and_lowercase_and() {
-        let phrase = compile_query("only begotten", MatchMode::Phrase).unwrap();
+        let phrase = compile_query("only begotten", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(phrase.fts, "\"only begotten\"*");
         assert_eq!(phrase.tokens, ["only", "begotten"]);
         assert!(phrase.strongs.is_none());
-        let with_and = compile_query("bread and wine", MatchMode::Phrase).unwrap();
+        let with_and =
+            compile_query("bread and wine", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(with_and.fts, "\"bread and wine\"*");
-        let explicit = compile_query("faith AND works", MatchMode::Phrase).unwrap();
+        let explicit =
+            compile_query("faith AND works", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(explicit.fts, "faith* AND works*");
-        let any = compile_query("faith works", MatchMode::AnyWord).unwrap();
+        let any = compile_query("faith works", MatchMode::AnyWord, WordMatch::Prefix).unwrap();
         assert_eq!(any.fts, "faith* OR works*");
-        let all = compile_query("faith works", MatchMode::AllWords).unwrap();
+        let all = compile_query("faith works", MatchMode::AllWords, WordMatch::Prefix).unwrap();
         assert_eq!(all.fts, "faith* AND works*");
-        let prefix = compile_query("lov*", MatchMode::Phrase).unwrap();
+        let prefix = compile_query("lov*", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(prefix.fts, "lov*");
         assert_eq!(prefix.tokens, ["lov"]);
-        let partial = compile_query("eart", MatchMode::Phrase).unwrap();
+        let partial = compile_query("eart", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(partial.fts, "eart*");
         assert_eq!(partial.tokens, ["eart"]);
-        let short = compile_query("in", MatchMode::Phrase).unwrap();
+        let short = compile_query("in", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(short.fts, "in");
-        let possessive = compile_query("God's", MatchMode::Phrase).unwrap();
+        let exact = compile_query("eart", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        assert_eq!(exact.fts, "eart");
+        let exact_phrase =
+            compile_query("only begotten", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        assert_eq!(exact_phrase.fts, "\"only begotten\"");
+        let starred = compile_query("ear*", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        assert_eq!(starred.fts, "ear*");
+        let possessive = compile_query("God's", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(possessive.fts, "God*");
-        let code = compile_query("h430", MatchMode::Phrase).unwrap();
+        let code = compile_query("h430", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(code.strongs.as_deref(), Some("H430"));
-        assert!(compile_query("AND OR", MatchMode::Phrase).is_none());
-        assert!(compile_query("   ", MatchMode::Phrase).is_none());
+        assert!(compile_query("AND OR", MatchMode::Phrase, WordMatch::Prefix).is_none());
+        assert!(compile_query("   ", MatchMode::Phrase, WordMatch::Prefix).is_none());
     }
 
     #[test]
@@ -1267,11 +1311,11 @@ mod tests {
         )
         .unwrap();
         rebuild_verses_fts(&conn).unwrap();
-        let phrase = compile_query("faith works", MatchMode::Phrase).unwrap();
+        let phrase = compile_query("faith works", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         let phrase_hits =
             search_verse_page(&conn, &phrase, VerseFilter::all(), None, None, 20).unwrap();
         assert!(phrase_hits.hits.is_empty(), "{phrase_hits:?}");
-        let all = compile_query("faith works", MatchMode::AllWords).unwrap();
+        let all = compile_query("faith works", MatchMode::AllWords, WordMatch::Prefix).unwrap();
         let hits = search_verse_page(&conn, &all, VerseFilter::all(), None, None, 20).unwrap();
         assert_eq!(hits.total, 1);
         assert_eq!(hits.hits[0].book, Some(43));
@@ -1377,6 +1421,28 @@ mod tests {
             80,
         );
         assert!(snippet.to_lowercase().contains("earth"), "{snippet}");
+    }
+
+    #[test]
+    fn exact_word_skips_longer_stems() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute(
+            "INSERT INTO verses (book, chapter, verse, text, para_break) VALUES (1, 2, 2, 'So that thou incline thine ear unto wisdom', 0)",
+            [],
+        )
+        .unwrap();
+        rebuild_verses_fts(&conn).unwrap();
+        let exact = compile_query("ear", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        assert_eq!(exact.fts, "ear");
+        let hits = search_verse_page(&conn, &exact, VerseFilter::all(), None, None, 20).unwrap();
+        assert_eq!(hits.total, 1, "{hits:?}");
+        assert_eq!(hits.hits[0].verse, Some(2));
+        let prefix = compile_query("ear", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let wider = search_verse_page(&conn, &prefix, VerseFilter::all(), None, None, 20).unwrap();
+        assert!(wider.total >= 2, "{wider:?}");
+        assert!(wider.hits.iter().any(|h| h.verse == Some(1)));
+        assert!(wider.hits.iter().any(|h| h.verse == Some(2)));
     }
 
     #[test]

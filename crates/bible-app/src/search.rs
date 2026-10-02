@@ -3,7 +3,7 @@ use crate::nav::{self, Ref};
 use crate::workspace::TabId;
 use bible_app_db::{
     Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchScope,
-    VerseFilter,
+    VerseFilter, WordMatch,
 };
 use gtk::gio;
 use gtk::prelude::*;
@@ -178,7 +178,7 @@ pub fn reference_text(hit: &LibraryHit, books: &[Book], scope: SearchScope) -> S
     }
 }
 
-pub fn emphasize(text: &str, tokens: &[String]) -> String {
+pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -192,7 +192,7 @@ pub fn emphasize(text: &str, tokens: &[String]) -> String {
         if needle.is_empty() {
             continue;
         }
-        let prefix = bible_app_db::is_prefix_token(&needle);
+        let prefix = word_match.prefixes(&needle);
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
@@ -255,6 +255,7 @@ pub fn row(
     books: &[Book],
     scope: SearchScope,
     tokens: &[String],
+    word_match: WordMatch,
     id: TabId,
     sender: relm4::Sender<crate::app::Msg>,
 ) -> gtk::ListBoxRow {
@@ -275,7 +276,7 @@ pub fn row(
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let snippet = gtk::Label::new(None);
-    snippet.set_markup(&emphasize(&hit.snippet, tokens));
+    snippet.set_markup(&emphasize(&hit.snippet, tokens, word_match));
     snippet.set_xalign(0.0);
     snippet.set_yalign(0.0);
     snippet.set_hexpand(true);
@@ -347,6 +348,7 @@ pub fn refill_list(pane: &Pane, hits: &[LibraryHit], books: &[Book], append: boo
             books,
             pane.scope,
             &pane.tokens,
+            pane.words,
             pane.tab,
             pane.sender.clone(),
         ));
@@ -450,11 +452,13 @@ pub struct Outcome {
     pub append: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     query: &str,
     books: &[Book],
     current: Ref,
     mode: MatchMode,
+    word_match: WordMatch,
     range: SearchRange,
     chip: BookChip,
     scope: SearchScope,
@@ -465,7 +469,7 @@ pub fn plan(
     }
     let (slash_book, slash_chapter, text) = slash_target(query, books, current);
     let text = text.as_str();
-    if let Some(compiled) = bible_app_db::compile_query(text, mode) {
+    if let Some(compiled) = bible_app_db::compile_query(text, mode, word_match) {
         if compiled.strongs.is_some() {
             return Plan::Ready(Prepared {
                 compiled,
@@ -492,7 +496,7 @@ pub fn plan(
     if letters < 2 {
         return Plan::Short;
     }
-    let Some(compiled) = bible_app_db::compile_query(text, mode) else {
+    let Some(compiled) = bible_app_db::compile_query(text, mode, word_match) else {
         return Plan::Idle;
     };
     Plan::Ready(Prepared {
@@ -922,12 +926,14 @@ pub struct Pane {
     pub chips: gtk::Box,
     pub scope_dd: gtk::DropDown,
     pub mode_dd: gtk::DropDown,
+    pub words_dd: gtk::DropDown,
     pub range_dd: gtk::DropDown,
     pub status: gtk::Label,
     pub empty: gtk::Label,
     pub query: String,
     pub scope: SearchScope,
     pub mode: MatchMode,
+    pub words: WordMatch,
     pub range: SearchRange,
     pub chip: BookChip,
     pub hits: Vec<LibraryHit>,
@@ -944,7 +950,12 @@ pub struct Pane {
     sender: relm4::Sender<crate::app::Msg>,
 }
 
-pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::Msg>) -> Pane {
+pub fn build_pane(
+    mode: MatchMode,
+    words: WordMatch,
+    id: TabId,
+    sender: relm4::Sender<crate::app::Msg>,
+) -> Pane {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
     entry.set_tooltip_text(Some(
@@ -964,6 +975,12 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     mode_dd.set_tooltip_text(Some("Match"));
     mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
 
+    let words_dd = gtk::DropDown::from_strings(&WordMatch::ALL.map(WordMatch::label));
+    words_dd.set_selected(words.index());
+    words_dd.set_enable_search(false);
+    words_dd.set_tooltip_text(Some("Word match"));
+    words_dd.update_property(&[gtk::accessible::Property::Label("Word match")]);
+
     let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));
     range_dd.set_selected(SearchRange::All.index());
     range_dd.set_enable_search(false);
@@ -975,8 +992,10 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     filters.append(&scope_dd);
     let modes = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     mode_dd.set_hexpand(true);
+    words_dd.set_hexpand(true);
     range_dd.set_hexpand(true);
     modes.append(&mode_dd);
+    modes.append(&words_dd);
     modes.append(&range_dd);
 
     let status = gtk::Label::new(Some(&status("", 0, 0, SearchScope::Kjv)));
@@ -1024,12 +1043,14 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
         chips,
         scope_dd,
         mode_dd,
+        words_dd,
         range_dd,
         status,
         empty,
         query: String::new(),
         scope: SearchScope::Kjv,
         mode,
+        words,
         range: SearchRange::All,
         chip: BookChip::Auto,
         hits: Vec::new(),
@@ -1142,6 +1163,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1154,6 +1176,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1166,6 +1189,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1182,6 +1206,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1199,6 +1224,7 @@ mod tests {
                 &books,
                 current,
                 MatchMode::Phrase,
+                WordMatch::Prefix,
                 SearchRange::All,
                 BookChip::Auto,
                 SearchScope::Kjv,
@@ -1210,14 +1236,30 @@ mod tests {
     #[test]
     fn emphasize_bolds_the_match_and_escapes() {
         assert_eq!(
-            emphasize("the only begotten Son", &["begotten".into()]),
+            emphasize(
+                "the only begotten Son",
+                &["begotten".into()],
+                WordMatch::Prefix
+            ),
             "the only <b>begotten</b> Son"
         );
         assert_eq!(
-            emphasize("the heaven and the earth.", &["eart".into()]),
+            emphasize(
+                "the heaven and the earth.",
+                &["eart".into()],
+                WordMatch::Prefix
+            ),
             "the heaven and the <b>earth</b>."
         );
-        assert!(emphasize("a < b & c", &["b".into()]).contains("&lt;"));
+        assert_eq!(
+            emphasize(
+                "the heaven and the earth.",
+                &["ear".into()],
+                WordMatch::Exact
+            ),
+            "the heaven and the earth."
+        );
+        assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix).contains("&lt;"));
     }
 
     #[test]
@@ -1256,6 +1298,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            WordMatch::Prefix,
             SearchRange::ThisChapter,
             BookChip::AllBooks,
             SearchScope::Commentary,
@@ -1270,6 +1313,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            WordMatch::Prefix,
             SearchRange::ThisChapter,
             BookChip::AllBooks,
             SearchScope::Kjv,

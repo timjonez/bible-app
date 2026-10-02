@@ -13,7 +13,7 @@ pub use search::{
     match_query, rebuild_entries_fts, rebuild_resources_fts, rebuild_verses_fts, search_filtered,
     search_library, search_verse_page, search_verses, window_snippet, BookCount, CompiledQuery,
     LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchHit, SearchScope, VerseFilter,
-    DEFAULT_LIMIT, SEARCH_PREFIX_MIN,
+    WordMatch, DEFAULT_LIMIT, SEARCH_PREFIX_MIN,
 };
 
 pub const SCHEMA_VERSION: i32 = 6;

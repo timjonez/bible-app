@@ -9,7 +9,7 @@ use crate::tsk;
 use crate::user_db;
 use crate::workspace::TabId;
 use adw::prelude::*;
-use bible_app_db::Book;
+use bible_app_db::{Book, WordMatch};
 use gtk::gio;
 use gtk::glib;
 use relm4::{adw, gtk};
@@ -589,7 +589,13 @@ impl PassageView {
         });
     }
 
-    pub fn paint_search(&self, verse: u8, tokens: &[String], strongs: Option<&str>) {
+    pub fn paint_search(
+        &self,
+        verse: u8,
+        tokens: &[String],
+        strongs: Option<&str>,
+        word_match: WordMatch,
+    ) {
         let Some(tag) = self.buffer.tag_table().lookup("search-hit") else {
             return;
         };
@@ -611,7 +617,7 @@ impl PassageView {
             return;
         };
         let skip = mark_spans(&self.layout);
-        for span in token_spans(&self.layout.text, body, vend, tokens, &skip) {
+        for span in token_spans(&self.layout.text, body, vend, tokens, word_match, &skip) {
             self.apply_tag("search-hit", span);
         }
     }
@@ -1016,6 +1022,7 @@ fn token_spans(
     start: i32,
     end: i32,
     tokens: &[String],
+    word_match: WordMatch,
     skip: &[layout::Span],
 ) -> Vec<layout::Span> {
     let chars: Vec<char> = text.chars().collect();
@@ -1035,7 +1042,7 @@ fn token_spans(
         if needle.is_empty() {
             continue;
         }
-        let prefix = bible_app_db::is_prefix_token(&needle);
+        let prefix = word_match.prefixes(&needle);
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
@@ -1103,6 +1110,7 @@ mod token_span_tests {
             0,
             text.chars().count() as i32,
             &["moses".into()],
+            WordMatch::Prefix,
             &skip,
         );
         assert_eq!(
@@ -1115,7 +1123,23 @@ mod token_span_tests {
     #[test]
     fn search_prefix_covers_the_whole_word() {
         let text = "the heaven and the earth";
-        let spans = token_spans(text, 0, text.chars().count() as i32, &["eart".into()], &[]);
+        let spans = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["eart".into()],
+            WordMatch::Prefix,
+            &[],
+        );
         assert_eq!(spans, vec![layout::Span { start: 19, end: 24 }]);
+        let exact = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["ear".into()],
+            WordMatch::Exact,
+            &[],
+        );
+        assert!(exact.is_empty(), "{exact:?}");
     }
 }
