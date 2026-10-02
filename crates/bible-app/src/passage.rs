@@ -1042,20 +1042,26 @@ fn token_spans(
         if needle.is_empty() {
             continue;
         }
-        let prefix = word_match.prefixes(&needle);
+        let partial = word_match.partial();
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
             let char_at = lower[..pos].chars().count();
             let char_end = char_at + needle.chars().count();
-            let abs = (start + char_at) as i32;
+            let mut abs = (start + char_at) as i32;
             let mut abs_end = (start + char_end) as i32;
             let before = neighbor_char(&chars, abs as isize - 1, skip, false);
             let after = neighbor_char(&chars, abs_end as isize, skip, true);
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
-            if left_ok && (prefix || right_ok) {
-                if prefix {
+            if partial || (left_ok && right_ok) {
+                if partial {
+                    loop {
+                        match neighbor_char(&chars, abs as isize - 1, skip, false) {
+                            Some(c) if c.is_ascii_alphanumeric() => abs -= 1,
+                            _ => break,
+                        }
+                    }
                     loop {
                         match neighbor_char(&chars, abs_end as isize, skip, true) {
                             Some(c) if c.is_ascii_alphanumeric() => abs_end += 1,
@@ -1141,5 +1147,7 @@ mod token_span_tests {
             &[],
         );
         assert!(exact.is_empty(), "{exact:?}");
+        let hear = token_spans("hear thou", 0, 9, &["ear".into()], WordMatch::Prefix, &[]);
+        assert_eq!(hear, vec![layout::Span { start: 0, end: 4 }]);
     }
 }

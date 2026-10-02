@@ -192,7 +192,7 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
         if needle.is_empty() {
             continue;
         }
-        let prefix = word_match.prefixes(&needle);
+        let partial = word_match.partial();
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
@@ -200,9 +200,19 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
             let after = lower[pos + needle.len()..].chars().next();
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
-            if left_ok && (prefix || right_ok) {
+            if partial || (left_ok && right_ok) {
+                let mut start = pos;
                 let mut end = pos + needle.len();
-                if prefix {
+                if partial {
+                    while start > 0 {
+                        let Some(c) = lower[..start].chars().next_back() else {
+                            break;
+                        };
+                        if !c.is_ascii_alphanumeric() {
+                            break;
+                        }
+                        start -= c.len_utf8();
+                    }
                     while end < lower.len() {
                         let Some(c) = lower[end..].chars().next() else {
                             break;
@@ -213,7 +223,7 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
                         end += c.len_utf8();
                     }
                 }
-                marks.push((pos, end));
+                marks.push((start, end));
                 from = end.max(pos + 1);
                 continue;
             }
@@ -757,6 +767,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
     let Ok(page) = crate::user_db::search_notes(
         &conn,
         &prepared.compiled.fts,
+        prepared.compiled.substring.as_deref(),
         prepared.filter.book_min,
         prepared.filter.book_max,
         book,
@@ -795,6 +806,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
         crate::user_db::search_notes(
             &conn,
             &prepared.compiled.fts,
+            prepared.compiled.substring.as_deref(),
             prepared.filter.book_min,
             prepared.filter.book_max,
             Some(prepared.current_book),
@@ -830,6 +842,7 @@ fn append_notes(prepared: &Prepared, page: &mut LibraryPage) {
     let Ok(found) = crate::user_db::search_notes(
         &conn,
         &prepared.compiled.fts,
+        prepared.compiled.substring.as_deref(),
         prepared.filter.book_min,
         prepared.filter.book_max,
         prepared.filter.book,
@@ -978,7 +991,7 @@ pub fn build_pane(
     let words_dd = gtk::DropDown::from_strings(&WordMatch::ALL.map(WordMatch::label));
     words_dd.set_selected(words.index());
     words_dd.set_enable_search(false);
-    words_dd.set_tooltip_text(Some("Word match"));
+    words_dd.set_tooltip_text(Some("Prefix matches any part of a word"));
     words_dd.update_property(&[gtk::accessible::Property::Label("Word match")]);
 
     let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));
@@ -1258,6 +1271,10 @@ mod tests {
                 WordMatch::Exact
             ),
             "the heaven and the earth."
+        );
+        assert_eq!(
+            emphasize("hear thou in heaven", &["ear".into()], WordMatch::Prefix),
+            "<b>hear</b> thou in heaven"
         );
         assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix).contains("&lt;"));
     }

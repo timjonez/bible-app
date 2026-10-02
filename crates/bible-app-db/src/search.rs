@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 
 use crate::DbError;
 
@@ -154,9 +154,9 @@ impl WordMatch {
         Self::ALL.iter().position(|&m| m == self).unwrap_or(0) as u32
     }
 
-    /// Prefix mode treats stems of three or more letters as FTS prefixes.
-    pub fn prefixes(self, token: &str) -> bool {
-        self == Self::Prefix && is_prefix_token(token)
+    /// Prefix mode matches the token anywhere inside a word (`ear` finds hear).
+    pub fn partial(self) -> bool {
+        self == Self::Prefix
     }
 }
 
@@ -164,6 +164,9 @@ impl WordMatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledQuery {
     pub fts: String,
+    /// `LIKE` fragment with `{c}` for the text column, when Prefix matches
+    /// any part of a word. Exact word and explicit operators keep FTS MATCH.
+    pub substring: Option<String>,
     pub tokens: Vec<String>,
     /// Set when the whole query is a Strong's code such as `H430`.
     pub strongs: Option<String>,
@@ -223,14 +226,15 @@ pub fn match_query(input: &str) -> Option<String> {
 ///
 /// Uppercase `AND`, `OR`, `NOT`, and `NEAR/5` are operators. Lowercase
 /// "and" stays a word so a phrase like "bread and wine" still matches.
-/// In prefix mode, words of three or more letters are prefixes (`eart`
-/// matches earth). Exact mode keeps whole tokens. A trailing `*` still
-/// prefixes a shorter stem. Apostrophes break tokens, so "God's" searches God.
+/// Prefix mode matches a token anywhere in a word (`ear` finds earth and
+/// hear). Exact mode keeps whole tokens. A trailing `*` still prefixes a
+/// shorter stem in Exact mode. Apostrophes break tokens, so "God's" searches God.
 pub fn compile_query(input: &str, mode: MatchMode, word_match: WordMatch) -> Option<CompiledQuery> {
     let trimmed = input.trim();
     if let Some(code) = strongs_query(trimmed) {
         return Some(CompiledQuery {
             fts: String::new(),
+            substring: None,
             tokens: Vec::new(),
             strongs: Some(code),
         });
@@ -250,15 +254,21 @@ pub fn compile_query(input: &str, mode: MatchMode, word_match: WordMatch) -> Opt
         mode_fts(&pieces, mode, word_match)
     };
     let fts = fts?;
-    let tokens = pieces
+    let tokens: Vec<String> = pieces
         .iter()
         .filter_map(|p| match p {
             Piece::Word { text, .. } => Some(text.clone()),
             Piece::Op(_) => None,
         })
         .collect();
+    let substring = if word_match.partial() && !explicit {
+        substring_pred(&tokens, mode)
+    } else {
+        None
+    };
     Some(CompiledQuery {
         fts,
+        substring,
         tokens,
         strongs: None,
     })
@@ -367,10 +377,75 @@ fn operator(raw: &str) -> Option<String> {
 }
 
 fn word_fts(text: &str, prefix: bool, word_match: WordMatch) -> String {
-    if prefix || word_match.prefixes(text) {
+    if prefix || (word_match.partial() && is_prefix_token(text)) {
         format!("{text}*")
     } else {
         text.to_string()
+    }
+}
+
+fn substring_pred(tokens: &[String], mode: MatchMode) -> Option<String> {
+    if tokens.is_empty()
+        || tokens
+            .iter()
+            .any(|t| t.is_empty() || !t.chars().all(|c| c.is_ascii_alphanumeric()))
+    {
+        return None;
+    }
+    let like = |t: &str| format!("{{c}} LIKE '%{t}%' COLLATE NOCASE");
+    Some(match mode {
+        MatchMode::Phrase => like(&tokens.join(" ")),
+        MatchMode::AllWords => tokens
+            .iter()
+            .map(|t| like(t))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+        MatchMode::AnyWord => format!(
+            "({})",
+            tokens
+                .iter()
+                .map(|t| like(t))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        ),
+    })
+}
+
+fn text_pred(compiled: &CompiledQuery, fts_table: &str, text_col: &str) -> String {
+    match &compiled.substring {
+        Some(sql) => sql.replace("{c}", text_col),
+        None => format!("{fts_table} MATCH ?1"),
+    }
+}
+
+fn entry_pred(compiled: &CompiledQuery) -> String {
+    match &compiled.substring {
+        Some(sql) => {
+            let text = sql.replace("{c}", "entries_fts.text");
+            let head = sql.replace("{c}", "entries_fts.headword");
+            format!("({text} OR {head})")
+        }
+        None => "entries_fts MATCH ?1".into(),
+    }
+}
+
+fn bind_params<'a>(
+    compiled: &'a CompiledQuery,
+    rest: &'a [&'a dyn rusqlite::ToSql],
+) -> Vec<&'a dyn rusqlite::ToSql> {
+    let mut out = Vec::with_capacity(rest.len() + 1);
+    if compiled.substring.is_none() {
+        out.push(&compiled.fts as &dyn rusqlite::ToSql);
+    }
+    out.extend_from_slice(rest);
+    out
+}
+
+fn param_base(compiled: &CompiledQuery) -> i32 {
+    if compiled.substring.is_some() {
+        0
+    } else {
+        1
     }
 }
 
@@ -398,7 +473,10 @@ fn mode_fts(pieces: &[Piece], mode: MatchMode, word_match: WordMatch) -> Option<
             })
             .collect();
         let inner = parts.join(" ");
-        if parts.last().is_some_and(|last| word_match.prefixes(last)) {
+        if parts
+            .last()
+            .is_some_and(|last| word_match.partial() && is_prefix_token(last))
+        {
             return Some(format!("\"{inner}\"*"));
         }
         return Some(format!("\"{inner}\""));
@@ -667,7 +745,7 @@ pub fn search_verse_page(
             by_book: Vec::new(),
         });
     }
-    let by_book = verse_book_counts(conn, &compiled.fts, filter)?;
+    let by_book = verse_book_counts(conn, compiled, filter)?;
     let mut narrowed = filter;
     if let Some(book) = chip {
         narrowed.book = Some(book);
@@ -689,88 +767,110 @@ fn verse_hits(
 ) -> Result<(Vec<SearchHit>, i64), DbError> {
     let (book, chapter, book_min, book_max) = filter_params(filter);
     let (after_book, after_chapter, after_verse) = after_params(after);
-    let total: i64 = conn.query_row(
-        r#"
+    let o = param_base(compiled);
+    let pred = text_pred(compiled, "verses_fts", "text");
+    let total_sql = format!(
+        "
         SELECT count(*) FROM verses_fts
-        WHERE verses_fts MATCH ?1
-          AND book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR book = ?4)
-          AND (?5 = 0 OR chapter = ?5)
-        "#,
-        rusqlite::params![compiled.fts, book_min, book_max, book, chapter],
+        WHERE {pred}
+          AND book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{book} = 0 OR book = ?{book})
+          AND (?{chapter} = 0 OR chapter = ?{chapter})
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        book = o + 3,
+        chapter = o + 4,
+    );
+    let rest_count: [&dyn rusqlite::ToSql; 4] = [&book_min, &book_max, &book, &chapter];
+    let total: i64 = conn.query_row(
+        &total_sql,
+        params_from_iter(bind_params(compiled, &rest_count)),
         |row| row.get(0),
     )?;
     let limit = limit.max(1) as i64;
-    let mut stmt = conn.prepare(
-        r#"
+    let list_sql = format!(
+        "
         SELECT book, chapter, verse, text
         FROM verses_fts
-        WHERE verses_fts MATCH ?1
-          AND book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR book = ?4)
-          AND (?5 = 0 OR chapter = ?5)
+        WHERE {pred}
+          AND book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{book} = 0 OR book = ?{book})
+          AND (?{chapter} = 0 OR chapter = ?{chapter})
           AND (
-            ?6 = 0
-            OR book > ?6
-            OR (book = ?6 AND chapter > ?7)
-            OR (book = ?6 AND chapter = ?7 AND verse > ?8)
+            ?{after_book} = 0
+            OR book > ?{after_book}
+            OR (book = ?{after_book} AND chapter > ?{after_chapter})
+            OR (book = ?{after_book} AND chapter = ?{after_chapter} AND verse > ?{after_verse})
           )
         ORDER BY book, chapter, verse
-        LIMIT ?9
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            compiled.fts,
-            book_min,
-            book_max,
-            book,
-            chapter,
-            after_book,
-            after_chapter,
-            after_verse,
-            limit
-        ],
-        |row| {
-            let text: String = row.get(3)?;
-            Ok(SearchHit {
-                book: row.get(0)?,
-                chapter: row.get(1)?,
-                verse: row.get(2)?,
-                snippet: plain_line(&strip_trailing_notes(&text)),
-                text,
-            })
-        },
-    )?;
+        LIMIT ?{limit}
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        book = o + 3,
+        chapter = o + 4,
+        after_book = o + 5,
+        after_chapter = o + 6,
+        after_verse = o + 7,
+        limit = o + 8,
+    );
+    let mut stmt = conn.prepare(&list_sql)?;
+    let rest_list: [&dyn rusqlite::ToSql; 8] = [
+        &book_min,
+        &book_max,
+        &book,
+        &chapter,
+        &after_book,
+        &after_chapter,
+        &after_verse,
+        &limit,
+    ];
+    let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest_list)), |row| {
+        let text: String = row.get(3)?;
+        Ok(SearchHit {
+            book: row.get(0)?,
+            chapter: row.get(1)?,
+            verse: row.get(2)?,
+            snippet: plain_line(&strip_trailing_notes(&text)),
+            text,
+        })
+    })?;
     Ok((rows.collect::<Result<Vec<_>, _>>()?, total))
 }
 
 fn verse_book_counts(
     conn: &Connection,
-    fts: &str,
+    compiled: &CompiledQuery,
     filter: VerseFilter,
 ) -> Result<Vec<BookCount>, DbError> {
     let chapter = i64::from(filter.chapter.unwrap_or(0));
-    let mut stmt = conn.prepare(
-        r#"
+    let book_min = i64::from(filter.book_min);
+    let book_max = i64::from(filter.book_max);
+    let o = param_base(compiled);
+    let pred = text_pred(compiled, "verses_fts", "text");
+    let sql = format!(
+        "
         SELECT book, count(*)
         FROM verses_fts
-        WHERE verses_fts MATCH ?1
-          AND book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR chapter = ?4)
+        WHERE {pred}
+          AND book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{chapter} = 0 OR chapter = ?{chapter})
         GROUP BY book
         ORDER BY book
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![fts, filter.book_min, filter.book_max, chapter],
-        |row| {
-            Ok(BookCount {
-                book: row.get(0)?,
-                count: row.get(1)?,
-            })
-        },
-    )?;
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        chapter = o + 3,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rest: [&dyn rusqlite::ToSql; 3] = [&book_min, &book_max, &chapter];
+    let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest)), |row| {
+        Ok(BookCount {
+            book: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -845,20 +945,7 @@ pub fn window_snippet(text: &str, tokens: &[String], width: usize) -> String {
 }
 
 fn find_token(haystack: &str, needle: &str) -> Option<usize> {
-    let prefix = is_prefix_token(needle);
-    let mut from = 0;
-    while let Some(rel) = haystack[from..].find(needle) {
-        let pos = from + rel;
-        let before = haystack[..pos].chars().next_back();
-        let after = haystack[pos + needle.len()..].chars().next();
-        let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
-        let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
-        if left_ok && (prefix || right_ok) {
-            return Some(pos);
-        }
-        from = pos + needle.len();
-    }
-    None
+    haystack.find(needle)
 }
 
 fn floor_char(text: &str, byte: usize) -> usize {
@@ -952,24 +1039,34 @@ fn search_commentary_page(
     after: Option<(u8, u8, u8)>,
     limit: usize,
 ) -> Result<LibraryPage, DbError> {
-    let by_book = commentary_book_counts(conn, &compiled.fts, filter)?;
+    let by_book = commentary_book_counts(conn, compiled, filter)?;
     let mut narrowed = filter;
     if let Some(book) = chip {
         narrowed.book = Some(book);
     }
     let hits = commentary_hits(conn, compiled, narrowed, after, limit)?;
     let (book, chapter, book_min, book_max) = filter_params(narrowed);
-    let total: i64 = conn.query_row(
-        r#"
+    let o = param_base(compiled);
+    let pred = text_pred(compiled, "resources_fts", "resources_fts.text");
+    let total_sql = format!(
+        "
         SELECT count(*)
         FROM resources_fts
         JOIN modules m ON m.id = resources_fts.module
-        WHERE resources_fts MATCH ?1 AND m.kind = 'commentary'
-          AND resources_fts.book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR resources_fts.book = ?4)
-          AND (?5 = 0 OR resources_fts.chapter = ?5)
-        "#,
-        rusqlite::params![compiled.fts, book_min, book_max, book, chapter],
+        WHERE {pred} AND m.kind = 'commentary'
+          AND resources_fts.book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{book} = 0 OR resources_fts.book = ?{book})
+          AND (?{chapter} = 0 OR resources_fts.chapter = ?{chapter})
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        book = o + 3,
+        chapter = o + 4,
+    );
+    let rest: [&dyn rusqlite::ToSql; 4] = [&book_min, &book_max, &book, &chapter];
+    let total: i64 = conn.query_row(
+        &total_sql,
+        params_from_iter(bind_params(compiled, &rest)),
         |row| row.get(0),
     )?;
     Ok(LibraryPage {
@@ -989,87 +1086,113 @@ fn commentary_hits(
     let (book, chapter, book_min, book_max) = filter_params(filter);
     let (after_book, after_chapter, after_verse) = after_params(after);
     let limit = limit.max(1) as i64;
-    let mut stmt = conn.prepare(
-        r#"
+    let o = param_base(compiled);
+    let pred = text_pred(compiled, "resources_fts", "resources_fts.text");
+    let snippet_col = if compiled.substring.is_some() {
+        "resources_fts.text"
+    } else {
+        "snippet(resources_fts, 0, '', '', '…', 16)"
+    };
+    let sql = format!(
+        "
         SELECT resources_fts.module, m.title,
                resources_fts.book, resources_fts.chapter, resources_fts.verse,
                resources_fts.text,
-               snippet(resources_fts, 0, '', '', '…', 16)
+               {snippet_col}
         FROM resources_fts
         JOIN modules m ON m.id = resources_fts.module
-        WHERE resources_fts MATCH ?1 AND m.kind = 'commentary'
-          AND resources_fts.book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR resources_fts.book = ?4)
-          AND (?5 = 0 OR resources_fts.chapter = ?5)
+        WHERE {pred} AND m.kind = 'commentary'
+          AND resources_fts.book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{book} = 0 OR resources_fts.book = ?{book})
+          AND (?{chapter} = 0 OR resources_fts.chapter = ?{chapter})
           AND (
-            ?6 = 0
-            OR resources_fts.book > ?6
-            OR (resources_fts.book = ?6 AND resources_fts.chapter > ?7)
-            OR (resources_fts.book = ?6 AND resources_fts.chapter = ?7
-                AND resources_fts.verse > ?8)
+            ?{after_book} = 0
+            OR resources_fts.book > ?{after_book}
+            OR (resources_fts.book = ?{after_book} AND resources_fts.chapter > ?{after_chapter})
+            OR (resources_fts.book = ?{after_book} AND resources_fts.chapter = ?{after_chapter}
+                AND resources_fts.verse > ?{after_verse})
           )
         ORDER BY resources_fts.book, resources_fts.chapter, resources_fts.verse,
                  resources_fts.module
-        LIMIT ?9
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            compiled.fts,
-            book_min,
-            book_max,
-            book,
-            chapter,
-            after_book,
-            after_chapter,
-            after_verse,
-            limit
-        ],
-        |row| {
-            let text: String = row.get(5)?;
-            let snippet: String = row.get(6)?;
-            Ok(LibraryHit {
-                kind: LibraryKind::Commentary,
-                module: row.get(0)?,
-                title: row.get(1)?,
-                book: Some(row.get(2)?),
-                chapter: Some(row.get(3)?),
-                verse: Some(row.get(4)?),
-                headword: None,
-                snippet: coalesce_snippet(snippet, &text),
-            })
-        },
-    )?;
+        LIMIT ?{limit}
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        book = o + 3,
+        chapter = o + 4,
+        after_book = o + 5,
+        after_chapter = o + 6,
+        after_verse = o + 7,
+        limit = o + 8,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rest: [&dyn rusqlite::ToSql; 8] = [
+        &book_min,
+        &book_max,
+        &book,
+        &chapter,
+        &after_book,
+        &after_chapter,
+        &after_verse,
+        &limit,
+    ];
+    let tokens = compiled.tokens.clone();
+    let partial = compiled.substring.is_some();
+    let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest)), move |row| {
+        let text: String = row.get(5)?;
+        let snippet: String = row.get(6)?;
+        let snippet = if partial {
+            window_snippet(&text, &tokens, 80)
+        } else {
+            coalesce_snippet(snippet, &text)
+        };
+        Ok(LibraryHit {
+            kind: LibraryKind::Commentary,
+            module: row.get(0)?,
+            title: row.get(1)?,
+            book: Some(row.get(2)?),
+            chapter: Some(row.get(3)?),
+            verse: Some(row.get(4)?),
+            headword: None,
+            snippet,
+        })
+    })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn commentary_book_counts(
     conn: &Connection,
-    fts: &str,
+    compiled: &CompiledQuery,
     filter: VerseFilter,
 ) -> Result<Vec<BookCount>, DbError> {
     let chapter = i64::from(filter.chapter.unwrap_or(0));
-    let mut stmt = conn.prepare(
-        r#"
+    let book_min = i64::from(filter.book_min);
+    let book_max = i64::from(filter.book_max);
+    let o = param_base(compiled);
+    let pred = text_pred(compiled, "resources_fts", "resources_fts.text");
+    let sql = format!(
+        "
         SELECT resources_fts.book, count(*)
         FROM resources_fts
         JOIN modules m ON m.id = resources_fts.module
-        WHERE resources_fts MATCH ?1 AND m.kind = 'commentary'
-          AND resources_fts.book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR resources_fts.chapter = ?4)
+        WHERE {pred} AND m.kind = 'commentary'
+          AND resources_fts.book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{chapter} = 0 OR resources_fts.chapter = ?{chapter})
         GROUP BY resources_fts.book
         ORDER BY resources_fts.book
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![fts, filter.book_min, filter.book_max, chapter],
-        |row| {
-            Ok(BookCount {
-                book: row.get(0)?,
-                count: row.get(1)?,
-            })
-        },
-    )?;
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        chapter = o + 3,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rest: [&dyn rusqlite::ToSql; 3] = [&book_min, &book_max, &chapter];
+    let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest)), |row| {
+        Ok(BookCount {
+            book: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -1080,14 +1203,21 @@ fn search_entry_page(
     limit: usize,
 ) -> Result<LibraryPage, DbError> {
     let hits = search_entry_kind(conn, compiled, kind, limit)?;
-    let total: i64 = conn.query_row(
-        r#"
+    let o = param_base(compiled);
+    let pred = entry_pred(compiled);
+    let total_sql = format!(
+        "
         SELECT count(*)
         FROM entries_fts
         JOIN modules m ON m.id = entries_fts.module
-        WHERE entries_fts MATCH ?1 AND m.kind = ?2
-        "#,
-        rusqlite::params![compiled.fts, kind],
+        WHERE {pred} AND m.kind = ?{kind}
+        ",
+        kind = o + 1,
+    );
+    let rest: [&dyn rusqlite::ToSql; 1] = [&kind];
+    let total: i64 = conn.query_row(
+        &total_sql,
+        params_from_iter(bind_params(compiled, &rest)),
         |row| row.get(0),
     )?;
     Ok(LibraryPage {
@@ -1110,25 +1240,56 @@ fn search_entry_kind(
     };
     let limit = limit.max(1) as i64;
     let exact = compiled.tokens.first().cloned().unwrap_or_default();
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT entries_fts.module, m.title, entries_fts.headword, entries_fts.text,
-               snippet(entries_fts, 1, '', '', '…', 16)
-        FROM entries_fts
-        JOIN modules m ON m.id = entries_fts.module
-        WHERE entries_fts MATCH ?1 AND m.kind = ?2
-        ORDER BY CASE WHEN entries_fts.headword = ?4 COLLATE NOCASE THEN 0 ELSE 1 END,
+    let o = param_base(compiled);
+    let pred = entry_pred(compiled);
+    let snippet_col = if compiled.substring.is_some() {
+        "entries_fts.text"
+    } else {
+        "snippet(entries_fts, 1, '', '', '…', 16)"
+    };
+    let order = if compiled.substring.is_some() {
+        format!(
+            "CASE WHEN entries_fts.headword = ?{exact} COLLATE NOCASE THEN 0 ELSE 1 END,
+                 entries_fts.headword COLLATE NOCASE,
+                 entries_fts.i",
+            exact = o + 3,
+        )
+    } else {
+        format!(
+            "CASE WHEN entries_fts.headword = ?{exact} COLLATE NOCASE THEN 0 ELSE 1 END,
                  bm25(entries_fts, 5.0, 1.0),
                  entries_fts.headword COLLATE NOCASE,
-                 entries_fts.i
-        LIMIT ?3
-        "#,
-    )?;
-    let rows = stmt.query_map(rusqlite::params![compiled.fts, kind, limit, exact], |row| {
+                 entries_fts.i",
+            exact = o + 3,
+        )
+    };
+    let sql = format!(
+        "
+        SELECT entries_fts.module, m.title, entries_fts.headword, entries_fts.text,
+               {snippet_col}
+        FROM entries_fts
+        JOIN modules m ON m.id = entries_fts.module
+        WHERE {pred} AND m.kind = ?{kind}
+        ORDER BY {order}
+        LIMIT ?{limit}
+        ",
+        kind = o + 1,
+        limit = o + 2,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rest: [&dyn rusqlite::ToSql; 3] = [&kind, &limit, &exact];
+    let tokens = compiled.tokens.clone();
+    let partial = compiled.substring.is_some();
+    let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest)), move |row| {
         let headword: String = row.get(2)?;
         let text: String = row.get(3)?;
         let snippet: String = row.get(4)?;
-        let snippet = coalesce_snippet(snippet, if text.is_empty() { &headword } else { &text });
+        let fallback = if text.is_empty() { &headword } else { &text };
+        let snippet = if partial {
+            window_snippet(fallback, &tokens, 80)
+        } else {
+            coalesce_snippet(snippet, fallback)
+        };
         Ok(LibraryHit {
             kind: library_kind,
             module: row.get(0)?,
@@ -1283,6 +1444,10 @@ mod tests {
         assert_eq!(prefix.tokens, ["lov"]);
         let partial = compile_query("eart", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(partial.fts, "eart*");
+        assert_eq!(
+            partial.substring.as_deref(),
+            Some("{c} LIKE '%eart%' COLLATE NOCASE")
+        );
         assert_eq!(partial.tokens, ["eart"]);
         let short = compile_query("in", MatchMode::Phrase, WordMatch::Prefix).unwrap();
         assert_eq!(short.fts, "in");
@@ -1427,22 +1592,32 @@ mod tests {
     fn exact_word_skips_longer_stems() {
         let conn = open_memory().unwrap();
         seed(&conn);
-        conn.execute(
-            "INSERT INTO verses (book, chapter, verse, text, para_break) VALUES (1, 2, 2, 'So that thou incline thine ear unto wisdom', 0)",
-            [],
+        conn.execute_batch(
+            "INSERT INTO verses (book, chapter, verse, text, para_break) VALUES
+                (1, 2, 2, 'So that thou incline thine ear unto wisdom', 0),
+                (1, 3, 1, 'hear thou in heaven', 0);",
         )
         .unwrap();
         rebuild_verses_fts(&conn).unwrap();
         let exact = compile_query("ear", MatchMode::Phrase, WordMatch::Exact).unwrap();
         assert_eq!(exact.fts, "ear");
+        assert!(exact.substring.is_none());
         let hits = search_verse_page(&conn, &exact, VerseFilter::all(), None, None, 20).unwrap();
         assert_eq!(hits.total, 1, "{hits:?}");
         assert_eq!(hits.hits[0].verse, Some(2));
         let prefix = compile_query("ear", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        assert_eq!(
+            prefix.substring.as_deref(),
+            Some("{c} LIKE '%ear%' COLLATE NOCASE")
+        );
         let wider = search_verse_page(&conn, &prefix, VerseFilter::all(), None, None, 20).unwrap();
-        assert!(wider.total >= 2, "{wider:?}");
+        assert!(wider.total >= 3, "{wider:?}");
         assert!(wider.hits.iter().any(|h| h.verse == Some(1)));
         assert!(wider.hits.iter().any(|h| h.verse == Some(2)));
+        assert!(wider
+            .hits
+            .iter()
+            .any(|h| h.chapter == Some(3) && h.verse == Some(1)));
     }
 
     #[test]
