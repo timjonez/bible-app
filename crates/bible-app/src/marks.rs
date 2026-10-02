@@ -28,7 +28,8 @@ pub struct BookmarksWidgets {
     pub list: gtk::ListBox,
     pub bookmarks: Vec<Bookmark>,
     pub empty: gtk::Label,
-    pub remove: gtk::Button,
+    tab: TabId,
+    sender: relm4::Sender<super::app::Msg>,
 }
 
 pub struct NotesWidgets {
@@ -148,10 +149,6 @@ pub fn build_bookmarks(id: TabId, sender: relm4::Sender<super::app::Msg>) -> Boo
     list.connect_row_activated(move |_, row| {
         send_bm.emit(super::app::Msg::MarksBookmarkActivated(id, row.index()));
     });
-    let send_bm_sel = sender.clone();
-    list.connect_row_selected(move |_, _| {
-        send_bm_sel.emit(super::app::Msg::MarksBookmarkSelected(id));
-    });
 
     let empty = empty_label("No bookmarks. Right-click a verse in the chapter to add one.");
 
@@ -160,25 +157,17 @@ pub fn build_bookmarks(id: TabId, sender: relm4::Sender<super::app::Msg>) -> Boo
     scroll.set_vexpand(true);
     scroll.set_child(Some(&list));
 
-    let remove = gtk::Button::with_label("Remove");
-    remove.set_halign(gtk::Align::Start);
-    remove.set_sensitive(false);
-    let send_rm = sender.clone();
-    remove.connect_clicked(move |_| {
-        send_rm.emit(super::app::Msg::RemoveSelectedBookmark(id));
-    });
-
     let page = page_box();
     page.append(&empty);
     page.append(&scroll);
-    page.append(&remove);
 
     BookmarksWidgets {
         root: page.upcast(),
         list,
         bookmarks: Vec::new(),
         empty,
-        remove,
+        tab: id,
+        sender,
     }
 }
 
@@ -359,15 +348,16 @@ pub fn dialog_text(dialog: &NoteDialog) -> String {
 
 pub fn fill_bookmarks(widgets: &mut BookmarksWidgets, user: &Connection, books: &[Book]) {
     widgets.bookmarks = user_db::list_bookmarks(user).unwrap_or_default();
-    refill_rows(&widgets.list, &widgets.bookmarks, books, |bm| {
-        (bm.at(), bm.label.as_str())
-    });
+    refill_bookmarks(
+        &widgets.list,
+        &widgets.bookmarks,
+        books,
+        widgets.tab,
+        &widgets.sender,
+    );
     let has_bm = !widgets.bookmarks.is_empty();
     widgets.list.set_visible(has_bm);
     widgets.empty.set_visible(!has_bm);
-    widgets
-        .remove
-        .set_sensitive(widgets.list.selected_row().is_some());
 }
 
 pub fn fill_notes(widgets: &mut NotesWidgets, user: &Connection, books: &[Book]) {
@@ -409,11 +399,6 @@ pub fn bookmark_at(widgets: &BookmarksWidgets, idx: i32) -> Option<Ref> {
 
 pub fn note_at(widgets: &NotesWidgets, idx: i32) -> Option<Ref> {
     widgets.notes.get(usize::try_from(idx).ok()?).map(Note::at)
-}
-
-pub fn selected_bookmark(widgets: &BookmarksWidgets) -> Option<Ref> {
-    let row = widgets.list.selected_row()?;
-    bookmark_at(widgets, row.index())
 }
 
 pub fn show_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
@@ -554,18 +539,24 @@ fn refill_note_rows(
     }
 }
 
-fn refill_rows<T>(
+fn refill_bookmarks(
     list: &gtk::ListBox,
-    items: &[T],
+    bookmarks: &[Bookmark],
     books: &[Book],
-    row: impl Fn(&T) -> (Ref, &str),
+    id: TabId,
+    sender: &relm4::Sender<super::app::Msg>,
 ) {
     while let Some(child) = list.row_at_index(0) {
         list.remove(&child);
     }
-    for item in items {
-        let (at, extra) = row(item);
-        list.append(&ref_row(at, books, extra));
+    for bm in bookmarks {
+        list.append(&bookmark_row(
+            bm.at(),
+            books,
+            bm.label.as_str(),
+            id,
+            sender.clone(),
+        ));
     }
 }
 
@@ -602,6 +593,54 @@ fn note_row(
     row.set_activatable(false);
     row.set_tooltip_text(Some(&nav::format_ref(books, at)));
     attach_note_menu(&row, id, Rc::new(Cell::new(Some(at))), sender);
+    row
+}
+
+fn bookmark_row(
+    at: Ref,
+    books: &[Book],
+    extra: &str,
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::ListBoxRow {
+    let row = ref_row(at, books, extra);
+
+    let model = gio::Menu::new();
+    model.append(Some("Open in a new tab"), Some("bookmark.tab"));
+    model.append(Some("Remove"), Some("bookmark.remove"));
+    let menu = gtk::PopoverMenu::from_model(Some(&model));
+    menu.set_parent(&row);
+    menu.set_has_arrow(false);
+    menu.set_halign(gtk::Align::Start);
+
+    let group = gio::SimpleActionGroup::new();
+    let tab = gio::SimpleAction::new("tab", None);
+    let tx = sender.clone();
+    tab.connect_activate(move |_, _| {
+        tx.emit(super::app::Msg::OpenBookmarkTab(id, at));
+    });
+    let remove = gio::SimpleAction::new("remove", None);
+    remove.connect_activate(move |_, _| {
+        sender.emit(super::app::Msg::RemoveBookmark(at));
+    });
+    group.add_action(&tab);
+    group.add_action(&remove);
+    menu.insert_action_group("bookmark", Some(&group));
+
+    let right = gtk::GestureClick::new();
+    right.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let menu_click = menu.clone();
+    right.connect_pressed(move |gesture, _, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        menu_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu_click.popup();
+    });
+    row.add_controller(right);
+
+    row.connect_destroy(move |_| {
+        menu.unparent();
+    });
     row
 }
 

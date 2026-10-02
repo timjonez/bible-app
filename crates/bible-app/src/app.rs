@@ -180,7 +180,6 @@ pub enum Msg {
     OpenBookmarks,
     OpenNotes,
     MarksBookmarkActivated(TabId, i32),
-    MarksBookmarkSelected(TabId),
     MarksNoteSelected(TabId, i32),
     OpenNoteVerse(TabId, Ref),
     OpenNoteTab(TabId, Ref),
@@ -188,7 +187,8 @@ pub enum Msg {
     SaveDialogNote,
     DeleteNote(Ref),
     DeleteDialogNote,
-    RemoveSelectedBookmark(TabId),
+    OpenBookmarkTab(TabId, Ref),
+    RemoveBookmark(Ref),
     ToggleBookmark,
     SetHighlight(String),
     AddNote,
@@ -954,12 +954,7 @@ impl SimpleComponent for App {
                     .bookmarks_widgets(id)
                     .and_then(|w| marks::bookmark_at(w, idx))
                 {
-                    self.go(at, true);
-                }
-            }
-            Msg::MarksBookmarkSelected(id) => {
-                if let Some(w) = self.bookmarks_widgets(id) {
-                    w.remove.set_sensitive(w.list.selected_row().is_some());
+                    self.open_bookmark_beside(id, at);
                 }
             }
             Msg::MarksNoteSelected(id, idx) => {
@@ -1015,13 +1010,8 @@ impl SimpleComponent for App {
                 };
                 self.delete_note_at(at);
             }
-            Msg::RemoveSelectedBookmark(id) => {
-                let Some(at) = self
-                    .bookmarks_widgets(id)
-                    .and_then(marks::selected_bookmark)
-                else {
-                    return;
-                };
+            Msg::OpenBookmarkTab(id, at) => self.open_bookmark_tab(id, at),
+            Msg::RemoveBookmark(at) => {
                 if let Some(user) = &self.user {
                     let _ = user_db::delete_bookmark(user, at);
                 }
@@ -1795,6 +1785,29 @@ impl App {
     fn open_note_tab(&mut self, from: TabId, at: Ref) {
         let opened = self.workspace.open_passage_in(self.window_of(from), at);
         self.spawn_passage(opened.id, at);
+        self.select_tab(opened.id);
+        self.save_state();
+    }
+
+    fn open_bookmark_beside(&mut self, source: TabId, at: Ref) {
+        if let Some(id) = self.workspace.passage_beside(source) {
+            self.apply_passage_ref(id, at, true, true);
+            return;
+        }
+        if self.workspace.can_split(source) {
+            let opened = self.workspace.open_passage_beside(source, at);
+            self.spawn_passage(opened.id, at);
+            self.reload_passage(opened.id, true);
+            self.save_state();
+            return;
+        }
+        self.open_bookmark_tab(source, at);
+    }
+
+    fn open_bookmark_tab(&mut self, source: TabId, at: Ref) {
+        let opened = self.workspace.open_passage_in(self.window_of(source), at);
+        self.spawn_passage(opened.id, at);
+        self.reload_passage(opened.id, true);
         self.select_tab(opened.id);
         self.save_state();
     }
