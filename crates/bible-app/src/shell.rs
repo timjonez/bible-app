@@ -70,16 +70,24 @@ fn tab_strip(bar: &adw::TabBar) -> Option<gtk::ScrolledWindow> {
 
 pub struct SplitShell {
     pub host: PaneHost,
+    pub search_btn: gtk::Button,
 }
 
 impl SplitShell {
     pub fn new() -> Self {
+        let search_btn = gtk::Button::from_icon_name("system-search-symbolic");
+        search_btn.set_tooltip_text(Some("Search (Ctrl+F)"));
+        search_btn.add_css_class("flat");
+        search_btn.set_valign(gtk::Align::Center);
+        search_btn.update_property(&[gtk::accessible::Property::Label("Search")]);
         Self {
             host: PaneHost::new(),
+            search_btn,
         }
     }
 
-    /// Place the tab bar on the left of the header, with the menu after it.
+    /// Place the tab bar on the left of the header, with search and the menu
+    /// after it.
     ///
     /// The header centers its title against the trailing controls, which
     /// insets the first tab. Hiding those controls and putting the menu in
@@ -97,6 +105,7 @@ impl SplitShell {
         row.set_valign(gtk::Align::Fill);
         self.host.bar.set_hexpand(true);
         row.append(&self.host.bar);
+        row.append(&self.search_btn);
         menu.set_valign(gtk::Align::Center);
         row.append(menu);
         let controls = gtk::WindowControls::new(gtk::PackType::End);

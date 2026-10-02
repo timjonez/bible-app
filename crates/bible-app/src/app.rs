@@ -542,7 +542,7 @@ impl SimpleComponent for App {
             let shell = SplitShell::new();
             shell.attach_header(&widgets.header_bar, &widgets.menu_btn);
             let ctx = model.wire_ctx();
-            wire_host(&shell.host, WindowId::MAIN, &ctx);
+            wire_host(&shell, WindowId::MAIN, &ctx);
             workspace_host.append(&shell.host.root);
             model.shell = Some(shell);
             let id = model.workspace.focused();
@@ -2951,7 +2951,7 @@ impl App {
             .window
             .insert_action_group("win", Some(&self.actions));
         let ctx = self.wire_ctx();
-        wire_host(&chrome.shell.host, id, &ctx);
+        wire_host(&chrome.shell, id, &ctx);
         self.sides.borrow_mut().push(SideWindow { id, chrome });
         self.wire_side(id);
     }
@@ -3757,7 +3757,8 @@ struct WireCtx {
     app_menu: gio::Menu,
 }
 
-fn wire_host(host: &shell::PaneHost, window: WindowId, ctx: &WireCtx) {
+fn wire_host(shell: &shell::SplitShell, window: WindowId, ctx: &WireCtx) {
+    let host = &shell.host;
     let view = &host.view;
     view.set_menu_model(Some(&ctx.menu));
     let send = ctx.sender.clone();
@@ -3800,6 +3801,10 @@ fn wire_host(host: &shell::PaneHost, window: WindowId, ctx: &WireCtx) {
     let send = ctx.sender.clone();
     host.new_btn.connect_clicked(move |_| {
         send.emit(Msg::NewTab(window));
+    });
+    let send = ctx.sender.clone();
+    shell.search_btn.connect_clicked(move |_| {
+        send.emit(Msg::SetSearch(window, true));
     });
     let send = ctx.sender.clone();
     view.connect_indicator_activated(move |_view, page| {
@@ -3958,7 +3963,7 @@ fn open_drag_window(ctx: &WireCtx) -> adw::TabView {
     ctx.counter.set(id.raw() + 1);
     let chrome = shell::open_side_window(&ctx.app_menu);
     chrome.window.insert_action_group("win", Some(&ctx.actions));
-    wire_host(&chrome.shell.host, id, ctx);
+    wire_host(&chrome.shell, id, ctx);
     let view = chrome.shell.host.view.clone();
     ctx.sides.borrow_mut().push(SideWindow { id, chrome });
     ctx.sender.emit(Msg::WireSide(id));
