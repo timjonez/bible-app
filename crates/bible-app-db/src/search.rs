@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::DbError;
 
@@ -423,12 +423,50 @@ pub fn rebuild_verses_fts(conn: &Connection) -> Result<(), DbError> {
             verse UNINDEXED,
             tokenize = 'unicode61'
         );
-        DELETE FROM verses_fts;
-        INSERT INTO verses_fts (text, book, chapter, verse)
-        SELECT text, book, chapter, verse FROM verses;
         "#,
     )?;
-    Ok(())
+    let verses: Vec<(String, i64, i64, i64)> = {
+        let mut sel = conn.prepare("SELECT text, book, chapter, verse FROM verses")?;
+        let rows = sel.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> Result<(), DbError> {
+        conn.execute("DELETE FROM verses_fts", [])?;
+        let mut ins = conn.prepare(
+            "INSERT INTO verses_fts (text, book, chapter, verse) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (text, book, chapter, verse) in verses {
+            ins.execute(rusqlite::params![
+                strip_trailing_notes(&text),
+                book,
+                chapter,
+                verse
+            ])?;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('verses_fts_plain', '1')",
+            [],
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(err)
+        }
+    }
 }
 
 pub fn ensure_verses_fts(conn: &Connection) -> Result<(), DbError> {
@@ -445,7 +483,14 @@ pub fn ensure_verses_fts(conn: &Connection) -> Result<(), DbError> {
     )?;
     let verses: i64 = conn.query_row("SELECT COUNT(*) FROM verses", [], |r| r.get(0))?;
     let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM verses_fts", [], |r| r.get(0))?;
-    if verses != indexed {
+    let plain = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'verses_fts_plain'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if verses != indexed || plain.as_deref() != Some("1") {
         rebuild_verses_fts(conn)?;
     }
     Ok(())
@@ -1240,6 +1285,46 @@ mod tests {
         let snippet = window_snippet(&super::strip_trailing_notes(text), &["Jesus".into()], 80);
         assert!(!snippet.contains('}'));
         assert!(snippet.contains("Joshua"));
+    }
+
+    #[test]
+    fn verses_fts_ignores_translator_notes() {
+        let conn = open_memory().unwrap();
+        seed(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO verses (book, chapter, verse, text, para_break) VALUES
+                (1, 2, 15, 'And the LORD God took the man, and put him into the garden of Eden to dress it and to keep it. {the man: or, Adam}', 0),
+                (1, 2, 19, 'And out of the ground the LORD God formed every beast of the field, and brought them unto Adam.', 0);
+            "#,
+        )
+        .unwrap();
+        conn.execute_batch(
+            "DELETE FROM verses_fts;
+             INSERT INTO verses_fts (text, book, chapter, verse)
+             SELECT text, book, chapter, verse FROM verses;
+             DELETE FROM meta WHERE key = 'verses_fts_plain';",
+        )
+        .unwrap();
+        let before = search_verses(&conn, "adam", 20).unwrap();
+        assert!(
+            before
+                .iter()
+                .any(|h| h.book == 1 && h.chapter == 2 && h.verse == 15),
+            "note-indexed FTS should still match 2:15: {before:?}"
+        );
+        ensure_verses_fts(&conn).unwrap();
+        let hits = search_verses(&conn, "adam", 20).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.book == 1 && h.chapter == 2 && h.verse == 19),
+            "body match missing: {hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .all(|h| !(h.book == 1 && h.chapter == 2 && h.verse == 15)),
+            "translator note must not match: {hits:?}"
+        );
     }
 
     #[test]
