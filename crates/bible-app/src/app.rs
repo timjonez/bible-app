@@ -92,9 +92,17 @@ pub struct App {
 
 #[derive(Clone, Debug)]
 struct SearchMark {
+    /// Passage tab that shows the hits. Other Bible tabs stay unmarked.
+    tab: TabId,
     at: Ref,
     tokens: Vec<String>,
     strongs: Option<String>,
+}
+
+impl SearchMark {
+    fn applies_to(&self, tab: TabId, at: Ref) -> bool {
+        self.tab == tab && self.at.book == at.book && self.at.chapter == at.chapter
+    }
 }
 
 #[derive(Debug)]
@@ -1640,19 +1648,10 @@ impl App {
         let Some(at) = search::hit_ref(&hit) else {
             return;
         };
-        let tokens = self
-            .search(id)
-            .map(|pane| pane.tokens.clone())
-            .unwrap_or_default();
-        let strongs = self.search(id).and_then(|pane| pane.strongs.clone());
-        self.search_mark = Some(SearchMark {
-            at,
-            tokens,
-            strongs,
-        });
         let Some(passage) = self.workspace.passage_beside(id) else {
             return;
         };
+        self.bind_search_mark_from(id, passage, at);
         self.preview_passage(passage, at);
     }
 
@@ -1665,7 +1664,7 @@ impl App {
             if let Some(p) = self.passage_mut(id) {
                 p.at = at;
                 p.highlight_verse(at.verse);
-                if let Some(mark) = mark {
+                if let Some(mark) = mark.filter(|mark| mark.applies_to(id, at)) {
                     p.paint_search(mark.at.verse, &mark.tokens, mark.strongs.as_deref());
                 }
             }
@@ -1687,18 +1686,14 @@ impl App {
         };
         let window = self.window_of(id);
         let at = search::hit_ref(&hit);
-        if let Some(at) = at {
-            let tokens = self
-                .search(id)
-                .map(|pane| pane.tokens.clone())
-                .unwrap_or_default();
-            let strongs = self.search(id).and_then(|pane| pane.strongs.clone());
-            self.search_mark = Some(SearchMark {
-                at,
-                tokens,
-                strongs,
-            });
-        }
+        let bits = (dismiss && at.is_some()).then(|| {
+            (
+                self.search(id)
+                    .map(|pane| pane.tokens.clone())
+                    .unwrap_or_default(),
+                self.search(id).and_then(|pane| pane.strongs.clone()),
+            )
+        });
         if dismiss {
             if let Some(pane) = self.search_mut(id) {
                 pane.origin = None;
@@ -1711,9 +1706,15 @@ impl App {
                 if !dismiss {
                     self.open_search_verse_beside(id, at);
                 } else if beside {
-                    self.go_beside_in(window, at);
+                    let dest = self.go_beside_in(window, at);
+                    let (tokens, strongs) = bits.unwrap_or_default();
+                    self.bind_search_mark(dest, at, tokens, strongs);
+                    self.reload_passage(dest, true);
                 } else {
-                    self.go_in(window, at, true);
+                    let dest = self.go_in(window, at, true);
+                    let (tokens, strongs) = bits.unwrap_or_default();
+                    self.bind_search_mark(dest, at, tokens, strongs);
+                    self.reload_passage(dest, true);
                 }
             }
             LibraryKind::Commentary => {
@@ -1722,11 +1723,14 @@ impl App {
                     self.open_search_verse_beside(id, at);
                     return;
                 }
-                if beside {
-                    self.go_beside_in(window, at);
+                let dest = if beside {
+                    self.go_beside_in(window, at)
                 } else {
-                    self.go_in(window, at, true);
-                }
+                    self.go_in(window, at, true)
+                };
+                let (tokens, strongs) = bits.unwrap_or_default();
+                self.bind_search_mark(dest, at, tokens, strongs);
+                self.reload_passage(dest, true);
                 if hit.module == "TSK" {
                     let _ = self.ensure_tsk();
                 } else {
@@ -1751,7 +1755,7 @@ impl App {
         self.go_in(window, at, highlight);
     }
 
-    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) {
+    fn go_in(&mut self, window: WindowId, at: Ref, highlight: bool) -> TabId {
         let id = match self.workspace.focused_passage_in(window) {
             Some(id) => id,
             None => {
@@ -1761,6 +1765,7 @@ impl App {
             }
         };
         self.apply_passage_ref(id, at, highlight, true);
+        id
     }
 
     fn open_note_verse(&mut self, from: TabId, at: Ref) {
@@ -1787,11 +1792,13 @@ impl App {
 
     fn open_search_verse_beside(&mut self, source: TabId, at: Ref) {
         if let Some(id) = self.workspace.passage_beside(source) {
+            self.bind_search_mark_from(source, id, at);
             self.apply_passage_ref(id, at, true, true);
             return;
         }
         if self.workspace.can_split(source) {
             let opened = self.workspace.open_passage_beside(source, at);
+            self.bind_search_mark_from(source, opened.id, at);
             self.spawn_passage(opened.id, at);
             self.reload_passage(opened.id, true);
             self.save_state();
@@ -1801,21 +1808,32 @@ impl App {
     }
 
     fn open_search_verse_tab(&mut self, source: TabId, at: Ref) {
-        self.mark_search_verse(source, at);
         let opened = self.workspace.open_passage_in(self.window_of(source), at);
+        self.bind_search_mark_from(source, opened.id, at);
         self.spawn_passage(opened.id, at);
         self.reload_passage(opened.id, true);
         self.select_tab(opened.id);
         self.save_state();
     }
 
-    fn mark_search_verse(&mut self, id: TabId, at: Ref) {
+    fn bind_search_mark_from(&mut self, search: TabId, passage: TabId, at: Ref) {
         let tokens = self
-            .search(id)
+            .search(search)
             .map(|pane| pane.tokens.clone())
             .unwrap_or_default();
-        let strongs = self.search(id).and_then(|pane| pane.strongs.clone());
+        let strongs = self.search(search).and_then(|pane| pane.strongs.clone());
+        self.bind_search_mark(passage, at, tokens, strongs);
+    }
+
+    fn bind_search_mark(
+        &mut self,
+        passage: TabId,
+        at: Ref,
+        tokens: Vec<String>,
+        strongs: Option<String>,
+    ) {
         self.search_mark = Some(SearchMark {
+            tab: passage,
             at,
             tokens,
             strongs,
@@ -1924,7 +1942,7 @@ impl App {
         self.go_beside_in(window, at);
     }
 
-    fn go_beside_in(&mut self, window: WindowId, at: Ref) {
+    fn go_beside_in(&mut self, window: WindowId, at: Ref) -> TabId {
         let from = self
             .workspace
             .focused_passage_in(window)
@@ -1932,6 +1950,7 @@ impl App {
         let opened = self.workspace.open_passage_beside(from, at);
         self.spawn_passage(opened.id, at);
         self.save_state();
+        opened.id
     }
 
     fn apply_passage_ref(&mut self, id: TabId, at: Ref, highlight: bool, record_history: bool) {
@@ -2371,7 +2390,7 @@ impl App {
                 highlight,
             );
             if let Some(mark) = mark {
-                if p.at.book == mark.at.book && p.at.chapter == mark.at.chapter {
+                if mark.applies_to(id, p.at) {
                     p.paint_search(mark.at.verse, &mark.tokens, mark.strongs.as_deref());
                 }
             }
@@ -2695,6 +2714,9 @@ impl App {
         }
         if self.hosted.remove(&id).is_none() {
             return;
+        }
+        if self.search_mark.as_ref().is_some_and(|mark| mark.tab == id) {
+            self.search_mark = None;
         }
         let _ = self.workspace.close(id);
         if let Some(guest) = guest {
