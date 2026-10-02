@@ -462,13 +462,11 @@ pub struct Outcome {
     pub append: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn plan(
     query: &str,
     books: &[Book],
     current: Ref,
     mode: MatchMode,
-    word_match: WordMatch,
     range: SearchRange,
     chip: BookChip,
     scope: SearchScope,
@@ -479,7 +477,7 @@ pub fn plan(
     }
     let (slash_book, slash_chapter, text) = slash_target(query, books, current);
     let text = text.as_str();
-    if let Some(compiled) = bible_app_db::compile_query(text, mode, word_match) {
+    if let Some(compiled) = bible_app_db::compile_query(text, mode) {
         if compiled.strongs.is_some() {
             return Plan::Ready(Prepared {
                 compiled,
@@ -506,7 +504,7 @@ pub fn plan(
     if letters < 2 {
         return Plan::Short;
     }
-    let Some(compiled) = bible_app_db::compile_query(text, mode, word_match) else {
+    let Some(compiled) = bible_app_db::compile_query(text, mode) else {
         return Plan::Idle;
     };
     Plan::Ready(Prepared {
@@ -939,7 +937,6 @@ pub struct Pane {
     pub chips: gtk::Box,
     pub scope_dd: gtk::DropDown,
     pub mode_dd: gtk::DropDown,
-    pub words_dd: gtk::DropDown,
     pub range_dd: gtk::DropDown,
     pub status: gtk::Label,
     pub empty: gtk::Label,
@@ -963,12 +960,7 @@ pub struct Pane {
     sender: relm4::Sender<crate::app::Msg>,
 }
 
-pub fn build_pane(
-    mode: MatchMode,
-    words: WordMatch,
-    id: TabId,
-    sender: relm4::Sender<crate::app::Msg>,
-) -> Pane {
+pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::Msg>) -> Pane {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
     entry.set_tooltip_text(Some(
@@ -985,14 +977,8 @@ pub fn build_pane(
     let mode_dd = gtk::DropDown::from_strings(&MatchMode::ALL.map(MatchMode::label));
     mode_dd.set_selected(mode.index());
     mode_dd.set_enable_search(false);
-    mode_dd.set_tooltip_text(Some("Match"));
+    mode_dd.set_tooltip_text(Some("Phrase, all words, any word, or exact word"));
     mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
-
-    let words_dd = gtk::DropDown::from_strings(&WordMatch::ALL.map(WordMatch::label));
-    words_dd.set_selected(words.index());
-    words_dd.set_enable_search(false);
-    words_dd.set_tooltip_text(Some("Prefix matches any part of a word"));
-    words_dd.update_property(&[gtk::accessible::Property::Label("Word match")]);
 
     let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));
     range_dd.set_selected(SearchRange::All.index());
@@ -1005,10 +991,8 @@ pub fn build_pane(
     filters.append(&scope_dd);
     let modes = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     mode_dd.set_hexpand(true);
-    words_dd.set_hexpand(true);
     range_dd.set_hexpand(true);
     modes.append(&mode_dd);
-    modes.append(&words_dd);
     modes.append(&range_dd);
 
     let status = gtk::Label::new(Some(&status("", 0, 0, SearchScope::Kjv)));
@@ -1056,14 +1040,13 @@ pub fn build_pane(
         chips,
         scope_dd,
         mode_dd,
-        words_dd,
         range_dd,
         status,
         empty,
         query: String::new(),
         scope: SearchScope::Kjv,
         mode,
-        words,
+        words: mode.word_match(),
         range: SearchRange::All,
         chip: BookChip::Auto,
         hits: Vec::new(),
@@ -1176,7 +1159,6 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
-            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1189,7 +1171,6 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
-            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1202,7 +1183,6 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
-            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1219,7 +1199,6 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
-            WordMatch::Prefix,
             SearchRange::All,
             BookChip::Auto,
             SearchScope::Kjv,
@@ -1237,7 +1216,6 @@ mod tests {
                 &books,
                 current,
                 MatchMode::Phrase,
-                WordMatch::Prefix,
                 SearchRange::All,
                 BookChip::Auto,
                 SearchScope::Kjv,
@@ -1315,7 +1293,6 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
-            WordMatch::Prefix,
             SearchRange::ThisChapter,
             BookChip::AllBooks,
             SearchScope::Commentary,
@@ -1330,7 +1307,6 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
-            WordMatch::Prefix,
             SearchRange::ThisChapter,
             BookChip::AllBooks,
             SearchScope::Kjv,

@@ -61,7 +61,6 @@ pub struct App {
     error: Option<String>,
     /// Saved match mode, used when a search tab is opened.
     search_mode: MatchMode,
-    search_words: WordMatch,
     search_mark: Option<SearchMark>,
     search_db_path: Option<PathBuf>,
     dict_modules: Vec<DictModule>,
@@ -118,7 +117,6 @@ pub enum Msg {
     Search(TabId, String),
     SetSearchScope(TabId, SearchScope),
     SetSearchMode(TabId, MatchMode),
-    SetSearchWords(TabId, WordMatch),
     SetSearchRange(TabId, search::SearchRange),
     SelectSearchBook(TabId, Option<u8>),
     SearchReady(TabId, u64, search::Outcome),
@@ -302,44 +300,33 @@ impl SimpleComponent for App {
             );
         }
 
-        let (
-            conn,
-            search_db_path,
-            books,
-            at,
-            font_size,
-            paragraphs,
-            search_mode,
-            search_words,
-            error,
-        ) = match load_library() {
-            Ok((conn, path, books, at, font_size, paragraphs, mode, words)) => (
-                Some(conn),
-                Some(path),
-                books,
-                at,
-                font_size,
-                paragraphs,
-                mode,
-                words,
-                None,
-            ),
-            Err(e) => (
-                None,
-                None,
-                Vec::new(),
-                Ref {
-                    book: 1,
-                    chapter: 1,
-                    verse: 1,
-                },
-                layout::DEFAULT_FONT,
-                true,
-                MatchMode::Phrase,
-                WordMatch::Prefix,
-                Some(e),
-            ),
-        };
+        let (conn, search_db_path, books, at, font_size, paragraphs, search_mode, error) =
+            match load_library() {
+                Ok((conn, path, books, at, font_size, paragraphs, mode)) => (
+                    Some(conn),
+                    Some(path),
+                    books,
+                    at,
+                    font_size,
+                    paragraphs,
+                    mode,
+                    None,
+                ),
+                Err(e) => (
+                    None,
+                    None,
+                    Vec::new(),
+                    Ref {
+                        book: 1,
+                        chapter: 1,
+                        verse: 1,
+                    },
+                    layout::DEFAULT_FONT,
+                    true,
+                    MatchMode::Phrase,
+                    Some(e),
+                ),
+            };
         let goto_entry = gtk::Entry::new();
         goto_entry.set_placeholder_text(Some("John 3:16"));
         goto_entry.set_tooltip_text(Some(
@@ -510,7 +497,6 @@ impl SimpleComponent for App {
             books,
             error,
             search_mode,
-            search_words,
             search_mark: None,
             search_db_path,
             dict_modules,
@@ -709,21 +695,10 @@ impl SimpleComponent for App {
                 if changed {
                     if let Some(pane) = self.search_mut(id) {
                         pane.mode = mode;
+                        pane.words = mode.word_match();
                         pane.chip = search::BookChip::Auto;
                     }
                     self.search_mode = mode;
-                    self.save_state();
-                    self.schedule_search(id, false);
-                }
-            }
-            Msg::SetSearchWords(id, words) => {
-                let changed = self.search(id).is_some_and(|pane| pane.words != words);
-                if changed {
-                    if let Some(pane) = self.search_mut(id) {
-                        pane.words = words;
-                        pane.chip = search::BookChip::Auto;
-                    }
-                    self.search_words = words;
                     self.save_state();
                     self.schedule_search(id, false);
                 }
@@ -1270,12 +1245,7 @@ impl App {
         let was_split = self.workspace.is_window_split(window);
         let at = self.at_in(window);
         let opened = self.workspace.open_search(window);
-        let mut pane = search::build_pane(
-            self.search_mode,
-            self.search_words,
-            opened.id,
-            self.msg_tx.clone(),
-        );
+        let mut pane = search::build_pane(self.search_mode, opened.id, self.msg_tx.clone());
         pane.origin = Some(at);
         self.wire_search(opened.id, &pane);
         let root = pane.root.clone();
@@ -1367,13 +1337,6 @@ impl App {
             }
         });
         let tx = self.msg_tx.clone();
-        pane.words_dd.connect_selected_notify(move |dd| {
-            let pos = dd.selected();
-            if pos != gtk::INVALID_LIST_POSITION {
-                tx.emit(Msg::SetSearchWords(id, WordMatch::from_index(pos)));
-            }
-        });
-        let tx = self.msg_tx.clone();
         pane.range_dd.connect_selected_notify(move |dd| {
             let pos = dd.selected();
             if pos != gtk::INVALID_LIST_POSITION {
@@ -1445,7 +1408,7 @@ impl App {
 
     fn schedule_search(&mut self, id: TabId, append: bool) {
         let fallback = self.at();
-        let Some((next, query, origin, mode, words, range, chip, scope, gen_cell)) =
+        let Some((next, query, origin, mode, range, chip, scope, gen_cell)) =
             self.search_mut(id).map(|pane| {
                 let next = pane.gen.get().saturating_add(1);
                 pane.gen.set(next);
@@ -1454,7 +1417,6 @@ impl App {
                     pane.query.clone(),
                     pane.origin.unwrap_or(fallback),
                     pane.mode,
-                    pane.words,
                     pane.range,
                     pane.chip,
                     pane.scope,
@@ -1464,7 +1426,7 @@ impl App {
         else {
             return;
         };
-        let plan = search::plan(&query, &self.books, origin, mode, words, range, chip, scope);
+        let plan = search::plan(&query, &self.books, origin, mode, range, chip, scope);
         match plan {
             search::Plan::Idle => {
                 self.clear_search_results(id);
@@ -2024,7 +1986,6 @@ impl App {
     fn save_state(&self) {
         let mut state = config::State::from_ref(self.at(), self.font_size, self.paragraphs);
         state.search_mode = self.search_mode.index();
-        state.search_words = self.search_words.index();
         state.column_width = self.column_width;
         config::save_state(&state);
     }
@@ -3708,16 +3669,7 @@ fn loaded_column_width() -> i32 {
     }
 }
 
-type LoadedLibrary = (
-    Connection,
-    PathBuf,
-    Vec<Book>,
-    Ref,
-    i32,
-    bool,
-    MatchMode,
-    WordMatch,
-);
+type LoadedLibrary = (Connection, PathBuf, Vec<Book>, Ref, i32, bool, MatchMode);
 
 fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<usize> {
     defs.iter()
@@ -3739,8 +3691,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
     let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
     let paragraphs = state.paragraphs;
-    let search_mode = MatchMode::from_index(state.search_mode);
-    let search_words = WordMatch::from_index(state.search_words);
+    let search_mode = MatchMode::from_saved(state.search_mode, state.search_words);
     let mut at = Ref::from(state);
     if bible_app_db::chapter(&conn, at.book, at.chapter)
         .map(|v| v.is_empty())
@@ -3752,16 +3703,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
             verse: 1,
         };
     }
-    Ok((
-        conn,
-        path,
-        books,
-        at,
-        font_size,
-        paragraphs,
-        search_mode,
-        search_words,
-    ))
+    Ok((conn, path, books, at, font_size, paragraphs, search_mode))
 }
 
 fn build_app_menu(modules: &[DictModule]) -> gio::Menu {

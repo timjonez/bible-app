@@ -100,16 +100,32 @@ pub enum MatchMode {
     Phrase,
     AllWords,
     AnyWord,
+    ExactWord,
 }
 
 impl MatchMode {
-    pub const ALL: [MatchMode; 3] = [Self::Phrase, Self::AllWords, Self::AnyWord];
+    pub const ALL: [MatchMode; 4] = [Self::Phrase, Self::AllWords, Self::AnyWord, Self::ExactWord];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Phrase => "Phrase",
             Self::AllWords => "All words",
             Self::AnyWord => "Any word",
+            Self::ExactWord => "Exact word",
+        }
+    }
+
+    pub fn word_match(self) -> WordMatch {
+        match self {
+            Self::ExactWord => WordMatch::Exact,
+            _ => WordMatch::Prefix,
+        }
+    }
+
+    fn combine(self) -> Self {
+        match self {
+            Self::ExactWord => Self::Phrase,
+            other => other,
         }
     }
 
@@ -118,6 +134,16 @@ impl MatchMode {
             .get(index as usize)
             .copied()
             .unwrap_or(Self::Phrase)
+    }
+
+    /// Restore the match menu from state.toml. An older Exact word setting
+    /// (`search_words = 1`) becomes Exact word in this menu.
+    pub fn from_saved(mode: u32, words: u32) -> Self {
+        if words == 1 {
+            Self::ExactWord
+        } else {
+            Self::from_index(mode)
+        }
     }
 
     pub fn index(self) -> u32 {
@@ -134,26 +160,6 @@ pub enum WordMatch {
 }
 
 impl WordMatch {
-    pub const ALL: [WordMatch; 2] = [Self::Prefix, Self::Exact];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Prefix => "Prefix",
-            Self::Exact => "Exact word",
-        }
-    }
-
-    pub fn from_index(index: u32) -> Self {
-        Self::ALL
-            .get(index as usize)
-            .copied()
-            .unwrap_or(Self::Prefix)
-    }
-
-    pub fn index(self) -> u32 {
-        Self::ALL.iter().position(|&m| m == self).unwrap_or(0) as u32
-    }
-
     /// Prefix mode matches the token anywhere inside a word (`ear` finds hear).
     pub fn partial(self) -> bool {
         self == Self::Prefix
@@ -215,7 +221,7 @@ pub struct LibraryPage {
 /// Multi-word input becomes a phrase so "only begotten" matches that pair,
 /// not any verse that happens to contain both words.
 pub fn match_query(input: &str) -> Option<String> {
-    let compiled = compile_query(input, MatchMode::Phrase, WordMatch::Prefix)?;
+    let compiled = compile_query(input, MatchMode::Phrase)?;
     if compiled.strongs.is_some() {
         return None;
     }
@@ -226,10 +232,13 @@ pub fn match_query(input: &str) -> Option<String> {
 ///
 /// Uppercase `AND`, `OR`, `NOT`, and `NEAR/5` are operators. Lowercase
 /// "and" stays a word so a phrase like "bread and wine" still matches.
-/// Prefix mode matches a token anywhere in a word (`ear` finds earth and
-/// hear). Exact mode keeps whole tokens. A trailing `*` still prefixes a
-/// shorter stem in Exact mode. Apostrophes break tokens, so "God's" searches God.
-pub fn compile_query(input: &str, mode: MatchMode, word_match: WordMatch) -> Option<CompiledQuery> {
+/// Phrase, all words, and any word match a token anywhere in a word (`ear`
+/// finds earth and hear). Exact word keeps whole tokens. A trailing `*` still
+/// prefixes a shorter stem in Exact word. Apostrophes break tokens, so "God's"
+/// searches God.
+pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
+    let word_match = mode.word_match();
+    let mode = mode.combine();
     let trimmed = input.trim();
     if let Some(code) = strongs_query(trimmed) {
         return Some(CompiledQuery {
@@ -394,7 +403,7 @@ fn substring_pred(tokens: &[String], mode: MatchMode) -> Option<String> {
     }
     let like = |t: &str| format!("{{c}} LIKE '%{t}%' COLLATE NOCASE");
     Some(match mode {
-        MatchMode::Phrase => like(&tokens.join(" ")),
+        MatchMode::Phrase | MatchMode::ExactWord => like(&tokens.join(" ")),
         MatchMode::AllWords => tokens
             .iter()
             .map(|t| like(t))
@@ -483,7 +492,7 @@ fn mode_fts(pieces: &[Piece], mode: MatchMode, word_match: WordMatch) -> Option<
     }
     let joiner = match mode {
         MatchMode::AnyWord => " OR ",
-        MatchMode::Phrase | MatchMode::AllWords => " AND ",
+        MatchMode::Phrase | MatchMode::AllWords | MatchMode::ExactWord => " AND ",
     };
     Some(
         words
@@ -717,7 +726,7 @@ pub fn search_verses(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchHit>, DbError> {
-    let Some(compiled) = compile_query(query, MatchMode::Phrase, WordMatch::Prefix) else {
+    let Some(compiled) = compile_query(query, MatchMode::Phrase) else {
         return Ok(Vec::new());
     };
     if compiled.strongs.is_some() {
@@ -976,7 +985,7 @@ pub fn search_library(
     scope: SearchScope,
     limit: usize,
 ) -> Result<Vec<LibraryHit>, DbError> {
-    let Some(compiled) = compile_query(query, MatchMode::Phrase, WordMatch::Prefix) else {
+    let Some(compiled) = compile_query(query, MatchMode::Phrase) else {
         return Ok(Vec::new());
     };
     if compiled.strongs.is_some() {
@@ -1425,45 +1434,50 @@ mod tests {
 
     #[test]
     fn compile_keeps_phrase_and_lowercase_and() {
-        let phrase = compile_query("only begotten", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let phrase = compile_query("only begotten", MatchMode::Phrase).unwrap();
         assert_eq!(phrase.fts, "\"only begotten\"*");
         assert_eq!(phrase.tokens, ["only", "begotten"]);
         assert!(phrase.strongs.is_none());
-        let with_and =
-            compile_query("bread and wine", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let with_and = compile_query("bread and wine", MatchMode::Phrase).unwrap();
         assert_eq!(with_and.fts, "\"bread and wine\"*");
-        let explicit =
-            compile_query("faith AND works", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let explicit = compile_query("faith AND works", MatchMode::Phrase).unwrap();
         assert_eq!(explicit.fts, "faith* AND works*");
-        let any = compile_query("faith works", MatchMode::AnyWord, WordMatch::Prefix).unwrap();
+        let any = compile_query("faith works", MatchMode::AnyWord).unwrap();
         assert_eq!(any.fts, "faith* OR works*");
-        let all = compile_query("faith works", MatchMode::AllWords, WordMatch::Prefix).unwrap();
+        let all = compile_query("faith works", MatchMode::AllWords).unwrap();
         assert_eq!(all.fts, "faith* AND works*");
-        let prefix = compile_query("lov*", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let prefix = compile_query("lov*", MatchMode::Phrase).unwrap();
         assert_eq!(prefix.fts, "lov*");
         assert_eq!(prefix.tokens, ["lov"]);
-        let partial = compile_query("eart", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let partial = compile_query("eart", MatchMode::Phrase).unwrap();
         assert_eq!(partial.fts, "eart*");
         assert_eq!(
             partial.substring.as_deref(),
             Some("{c} LIKE '%eart%' COLLATE NOCASE")
         );
         assert_eq!(partial.tokens, ["eart"]);
-        let short = compile_query("in", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let short = compile_query("in", MatchMode::Phrase).unwrap();
         assert_eq!(short.fts, "in");
-        let exact = compile_query("eart", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        let exact = compile_query("eart", MatchMode::ExactWord).unwrap();
         assert_eq!(exact.fts, "eart");
-        let exact_phrase =
-            compile_query("only begotten", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        let exact_phrase = compile_query("only begotten", MatchMode::ExactWord).unwrap();
         assert_eq!(exact_phrase.fts, "\"only begotten\"");
-        let starred = compile_query("ear*", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        let starred = compile_query("ear*", MatchMode::ExactWord).unwrap();
         assert_eq!(starred.fts, "ear*");
-        let possessive = compile_query("God's", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let possessive = compile_query("God's", MatchMode::Phrase).unwrap();
         assert_eq!(possessive.fts, "God*");
-        let code = compile_query("h430", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let code = compile_query("h430", MatchMode::Phrase).unwrap();
         assert_eq!(code.strongs.as_deref(), Some("H430"));
-        assert!(compile_query("AND OR", MatchMode::Phrase, WordMatch::Prefix).is_none());
-        assert!(compile_query("   ", MatchMode::Phrase, WordMatch::Prefix).is_none());
+        assert!(compile_query("AND OR", MatchMode::Phrase).is_none());
+        assert!(compile_query("   ", MatchMode::Phrase).is_none());
+        assert_eq!(MatchMode::from_saved(0, 0), MatchMode::Phrase);
+        assert_eq!(MatchMode::from_saved(1, 0), MatchMode::AllWords);
+        assert_eq!(MatchMode::from_saved(0, 1), MatchMode::ExactWord);
+        assert_eq!(MatchMode::from_saved(1, 1), MatchMode::ExactWord);
+        assert_eq!(MatchMode::from_saved(3, 0), MatchMode::ExactWord);
+        assert_eq!(MatchMode::ExactWord.label(), "Exact word");
+        assert_eq!(MatchMode::Phrase.word_match(), WordMatch::Prefix);
+        assert_eq!(MatchMode::ExactWord.word_match(), WordMatch::Exact);
     }
 
     #[test]
@@ -1476,11 +1490,11 @@ mod tests {
         )
         .unwrap();
         rebuild_verses_fts(&conn).unwrap();
-        let phrase = compile_query("faith works", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let phrase = compile_query("faith works", MatchMode::Phrase).unwrap();
         let phrase_hits =
             search_verse_page(&conn, &phrase, VerseFilter::all(), None, None, 20).unwrap();
         assert!(phrase_hits.hits.is_empty(), "{phrase_hits:?}");
-        let all = compile_query("faith works", MatchMode::AllWords, WordMatch::Prefix).unwrap();
+        let all = compile_query("faith works", MatchMode::AllWords).unwrap();
         let hits = search_verse_page(&conn, &all, VerseFilter::all(), None, None, 20).unwrap();
         assert_eq!(hits.total, 1);
         assert_eq!(hits.hits[0].book, Some(43));
@@ -1599,13 +1613,13 @@ mod tests {
         )
         .unwrap();
         rebuild_verses_fts(&conn).unwrap();
-        let exact = compile_query("ear", MatchMode::Phrase, WordMatch::Exact).unwrap();
+        let exact = compile_query("ear", MatchMode::ExactWord).unwrap();
         assert_eq!(exact.fts, "ear");
         assert!(exact.substring.is_none());
         let hits = search_verse_page(&conn, &exact, VerseFilter::all(), None, None, 20).unwrap();
         assert_eq!(hits.total, 1, "{hits:?}");
         assert_eq!(hits.hits[0].verse, Some(2));
-        let prefix = compile_query("ear", MatchMode::Phrase, WordMatch::Prefix).unwrap();
+        let prefix = compile_query("ear", MatchMode::Phrase).unwrap();
         assert_eq!(
             prefix.substring.as_deref(),
             Some("{c} LIKE '%ear%' COLLATE NOCASE")

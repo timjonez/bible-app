@@ -23,6 +23,7 @@ pub struct State {
     pub paragraphs: bool,
     #[serde(default)]
     pub search_mode: u32,
+    /// Older Exact word flag. `1` loads as Exact word in the match menu.
     #[serde(default)]
     pub search_words: u32,
     /// Chapter column width in logical pixels. `0` keeps the automatic measure.
