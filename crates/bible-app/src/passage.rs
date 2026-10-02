@@ -1048,27 +1048,13 @@ fn token_spans(
             let pos = from + rel;
             let char_at = lower[..pos].chars().count();
             let char_end = char_at + needle.chars().count();
-            let mut abs = (start + char_at) as i32;
-            let mut abs_end = (start + char_end) as i32;
+            let abs = (start + char_at) as i32;
+            let abs_end = (start + char_end) as i32;
             let before = neighbor_char(&chars, abs as isize - 1, skip, false);
             let after = neighbor_char(&chars, abs_end as isize, skip, true);
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
             if partial || (left_ok && right_ok) {
-                if partial {
-                    loop {
-                        match neighbor_char(&chars, abs as isize - 1, skip, false) {
-                            Some(c) if c.is_ascii_alphanumeric() => abs -= 1,
-                            _ => break,
-                        }
-                    }
-                    loop {
-                        match neighbor_char(&chars, abs_end as isize, skip, true) {
-                            Some(c) if c.is_ascii_alphanumeric() => abs_end += 1,
-                            _ => break,
-                        }
-                    }
-                }
                 spans.push(layout::Span {
                     start: abs,
                     end: abs_end,
@@ -1127,7 +1113,7 @@ mod token_span_tests {
     }
 
     #[test]
-    fn search_prefix_covers_the_whole_word() {
+    fn search_prefix_covers_the_matched_stem() {
         let text = "the heaven and the earth";
         let spans = token_spans(
             text,
@@ -1137,7 +1123,7 @@ mod token_span_tests {
             WordMatch::Prefix,
             &[],
         );
-        assert_eq!(spans, vec![layout::Span { start: 19, end: 24 }]);
+        assert_eq!(spans, vec![layout::Span { start: 19, end: 23 }]);
         let exact = token_spans(
             text,
             0,
@@ -1148,6 +1134,6 @@ mod token_span_tests {
         );
         assert!(exact.is_empty(), "{exact:?}");
         let hear = token_spans("hear thou", 0, 9, &["ear".into()], WordMatch::Prefix, &[]);
-        assert_eq!(hear, vec![layout::Span { start: 0, end: 4 }]);
+        assert_eq!(hear, vec![layout::Span { start: 1, end: 4 }]);
     }
 }

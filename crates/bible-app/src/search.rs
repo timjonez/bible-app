@@ -201,28 +201,8 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
             if partial || (left_ok && right_ok) {
-                let mut start = pos;
-                let mut end = pos + needle.len();
-                if partial {
-                    while start > 0 {
-                        let Some(c) = lower[..start].chars().next_back() else {
-                            break;
-                        };
-                        if !c.is_ascii_alphanumeric() {
-                            break;
-                        }
-                        start -= c.len_utf8();
-                    }
-                    while end < lower.len() {
-                        let Some(c) = lower[end..].chars().next() else {
-                            break;
-                        };
-                        if !c.is_ascii_alphanumeric() {
-                            break;
-                        }
-                        end += c.len_utf8();
-                    }
-                }
+                let start = pos;
+                let end = pos + needle.len();
                 marks.push((start, end));
                 from = end.max(pos + 1);
                 continue;
@@ -1240,7 +1220,7 @@ mod tests {
                 &["eart".into()],
                 WordMatch::Prefix
             ),
-            "the heaven and the <b>earth</b>."
+            "the heaven and the <b>eart</b>h."
         );
         assert_eq!(
             emphasize(
@@ -1252,7 +1232,7 @@ mod tests {
         );
         assert_eq!(
             emphasize("hear thou in heaven", &["ear".into()], WordMatch::Prefix),
-            "<b>hear</b> thou in heaven"
+            "h<b>ear</b> thou in heaven"
         );
         assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix).contains("&lt;"));
     }
