@@ -39,11 +39,12 @@ pub struct NotesWidgets {
     pub editor: gtk::TextView,
     pub buffer: gtk::TextBuffer,
     pub editor_title: gtk::Label,
-    pub editing: Option<Ref>,
+    pub editing: Rc<Cell<Option<Ref>>>,
     pub syncing: Rc<Cell<bool>>,
-    pub delete: gtk::Button,
     pub export: gtk::Button,
-    pub open_verse: gtk::Button,
+    pub actions: gtk::MenuButton,
+    tab: TabId,
+    sender: relm4::Sender<super::app::Msg>,
 }
 
 pub struct NoteDialog {
@@ -239,30 +240,14 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
     editor_title.add_css_class("heading");
     editor_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
-    let open_verse = gtk::Button::with_label("Open verse");
-    open_verse.set_sensitive(false);
-    open_verse.set_tooltip_text(Some("Open this verse in the chapter"));
-    let send_open = sender.clone();
-    open_verse.connect_clicked(move |_| {
-        send_open.emit(super::app::Msg::OpenEditingNote(id));
-    });
-
-    let delete = gtk::Button::with_label("Delete");
-    delete.add_css_class("destructive-action");
-    delete.set_sensitive(false);
-    let send_del = sender.clone();
-    delete.connect_clicked(move |btn| {
-        confirm_delete_note(btn, {
-            let send_del = send_del.clone();
-            move || send_del.emit(super::app::Msg::DeleteEditingNote(id))
-        });
-    });
+    let editing = Rc::new(Cell::new(None));
+    let actions = note_menu_button(id, sender.clone(), editing.clone());
 
     let content_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     content_header.set_valign(gtk::Align::Center);
     content_header.append(&editor_title);
-    content_header.append(&open_verse);
-    content_header.append(&delete);
+    content_header.append(&actions);
+    attach_note_menu(&content_header, id, editing.clone(), sender.clone());
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let editor = note_editor(&buffer);
@@ -307,11 +292,12 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
         editor,
         buffer,
         editor_title,
-        editing: None,
+        editing,
         syncing,
-        delete,
         export,
-        open_verse,
+        actions,
+        tab: id,
+        sender,
     }
 }
 
@@ -391,26 +377,29 @@ pub fn fill_bookmarks(widgets: &mut BookmarksWidgets, user: &Connection, books: 
 pub fn fill_notes(widgets: &mut NotesWidgets, user: &Connection, books: &[Book]) {
     widgets.syncing.set(true);
     widgets.notes = user_db::list_notes(user).unwrap_or_default();
-    refill_note_rows(&widgets.list, &widgets.notes, books);
+    refill_note_rows(
+        &widgets.list,
+        &widgets.notes,
+        books,
+        widgets.tab,
+        &widgets.sender,
+    );
     let has_notes = !widgets.notes.is_empty();
     widgets.list.set_visible(has_notes);
     widgets.empty.set_visible(!has_notes);
     widgets.export.set_sensitive(has_notes);
 
-    if let Some(at) = widgets.editing {
+    if let Some(at) = widgets.editing.get() {
         if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
             widgets
                 .list
                 .select_row(widgets.list.row_at_index(i as i32).as_ref());
-            widgets.delete.set_sensitive(true);
-            widgets.open_verse.set_sensitive(true);
+            widgets.actions.set_sensitive(true);
         } else {
             widgets.list.unselect_all();
-            widgets.delete.set_sensitive(false);
         }
     } else {
-        widgets.delete.set_sensitive(false);
-        widgets.open_verse.set_sensitive(false);
+        widgets.actions.set_sensitive(false);
     }
     widgets.syncing.set(false);
 }
@@ -433,12 +422,11 @@ pub fn selected_bookmark(widgets: &BookmarksWidgets) -> Option<Ref> {
 
 pub fn show_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
     widgets.syncing.set(true);
-    widgets.editing = Some(at);
+    widgets.editing.set(Some(at));
     widgets.buffer.set_text(text);
     widgets.editor_title.set_label(&nav::format_ref(books, at));
     widgets.editor.set_sensitive(true);
-    widgets.delete.set_sensitive(!text.trim().is_empty());
-    widgets.open_verse.set_sensitive(true);
+    widgets.actions.set_sensitive(true);
     if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
         widgets
             .list
@@ -448,7 +436,7 @@ pub fn show_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str
 }
 
 pub fn load_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
-    if widgets.syncing.get() || widgets.editing == Some(at) {
+    if widgets.syncing.get() || widgets.editing.get() == Some(at) {
         return;
     }
     show_note(widgets, books, at, text);
@@ -456,13 +444,12 @@ pub fn load_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str
 
 pub fn clear_editor(widgets: &mut NotesWidgets) {
     widgets.syncing.set(true);
-    widgets.editing = None;
+    widgets.editing.set(None);
     widgets.buffer.set_text("");
     widgets.syncing.set(false);
     widgets.editor_title.set_label("Select a note");
     widgets.editor.set_sensitive(false);
-    widgets.delete.set_sensitive(false);
-    widgets.open_verse.set_sensitive(false);
+    widgets.actions.set_sensitive(false);
 }
 
 pub fn open_note_dialog(
@@ -556,12 +543,18 @@ fn page_box() -> gtk::Box {
     page
 }
 
-fn refill_note_rows(list: &gtk::ListBox, notes: &[Note], books: &[Book]) {
+fn refill_note_rows(
+    list: &gtk::ListBox,
+    notes: &[Note],
+    books: &[Book],
+    id: TabId,
+    sender: &relm4::Sender<super::app::Msg>,
+) {
     while let Some(child) = list.row_at_index(0) {
         list.remove(&child);
     }
     for note in notes {
-        list.append(&note_row(note.at(), books, &note.text));
+        list.append(&note_row(note.at(), books, &note.text, id, sender.clone()));
     }
 }
 
@@ -580,7 +573,13 @@ fn refill_rows<T>(
     }
 }
 
-fn note_row(at: Ref, books: &[Book], extra: &str) -> gtk::ListBoxRow {
+fn note_row(
+    at: Ref,
+    books: &[Book],
+    extra: &str,
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
     box_.set_margin_start(10);
@@ -606,7 +605,109 @@ fn note_row(at: Ref, books: &[Book], extra: &str) -> gtk::ListBoxRow {
     row.set_child(Some(&box_));
     row.set_activatable(true);
     row.set_tooltip_text(Some(&nav::format_ref(books, at)));
+    attach_note_menu(&row, id, Rc::new(Cell::new(Some(at))), sender);
     row
+}
+
+fn note_menu_model() -> gio::Menu {
+    let model = gio::Menu::new();
+    model.append(Some("Open verse"), Some("note.open"));
+    model.append(Some("Open in a new tab"), Some("note.tab"));
+    let destructive = gio::Menu::new();
+    destructive.append(Some("Delete"), Some("note.delete"));
+    model.append_section(None, &destructive);
+    model
+}
+
+fn note_actions(
+    id: TabId,
+    at: Rc<Cell<Option<Ref>>>,
+    sender: relm4::Sender<super::app::Msg>,
+    confirm_parent: gtk::Widget,
+) -> gio::SimpleActionGroup {
+    let group = gio::SimpleActionGroup::new();
+    let open = gio::SimpleAction::new("open", None);
+    let tx = sender.clone();
+    let at_open = at.clone();
+    open.connect_activate(move |_, _| {
+        if let Some(at) = at_open.get() {
+            tx.emit(super::app::Msg::OpenNoteVerse(id, at));
+        }
+    });
+    let tab = gio::SimpleAction::new("tab", None);
+    let tx = sender.clone();
+    let at_tab = at.clone();
+    tab.connect_activate(move |_, _| {
+        if let Some(at) = at_tab.get() {
+            tx.emit(super::app::Msg::OpenNoteTab(id, at));
+        }
+    });
+    let delete = gio::SimpleAction::new("delete", None);
+    delete.connect_activate(move |_, _| {
+        let Some(at) = at.get() else {
+            return;
+        };
+        confirm_delete_note(&confirm_parent, {
+            let sender = sender.clone();
+            move || sender.emit(super::app::Msg::DeleteNote(at))
+        });
+    });
+    group.add_action(&open);
+    group.add_action(&tab);
+    group.add_action(&delete);
+    group
+}
+
+fn note_menu_button(
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+    editing: Rc<Cell<Option<Ref>>>,
+) -> gtk::MenuButton {
+    let btn = gtk::MenuButton::new();
+    btn.set_icon_name("view-more-symbolic");
+    btn.set_tooltip_text(Some("Note actions"));
+    btn.add_css_class("flat");
+    btn.set_sensitive(false);
+    btn.update_property(&[gtk::accessible::Property::Label("Note actions")]);
+    btn.set_menu_model(Some(&note_menu_model()));
+    let group = note_actions(id, editing, sender, btn.clone().upcast());
+    btn.insert_action_group("note", Some(&group));
+    if let Some(popover) = btn.popover() {
+        popover.insert_action_group("note", Some(&group));
+    }
+    btn
+}
+
+fn attach_note_menu(
+    widget: &impl IsA<gtk::Widget>,
+    id: TabId,
+    at: Rc<Cell<Option<Ref>>>,
+    sender: relm4::Sender<super::app::Msg>,
+) {
+    let widget = widget.upcast_ref::<gtk::Widget>().clone();
+    let menu = gtk::PopoverMenu::from_model(Some(&note_menu_model()));
+    menu.set_parent(&widget);
+    menu.set_has_arrow(false);
+    menu.set_halign(gtk::Align::Start);
+    let group = note_actions(id, at.clone(), sender, widget.clone());
+    menu.insert_action_group("note", Some(&group));
+
+    let right = gtk::GestureClick::new();
+    right.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let menu_click = menu.clone();
+    right.connect_pressed(move |gesture, _, x, y| {
+        if at.get().is_none() {
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        menu_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu_click.popup();
+    });
+    widget.add_controller(right);
+    widget.connect_destroy(move |_| {
+        menu.unparent();
+    });
 }
 
 fn ref_row(at: Ref, books: &[Book], extra: &str) -> gtk::ListBoxRow {

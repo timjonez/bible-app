@@ -183,10 +183,11 @@ pub enum Msg {
     MarksBookmarkSelected(TabId),
     MarksNoteActivated(TabId, i32),
     MarksNoteSelected(TabId, i32),
-    OpenEditingNote(TabId),
+    OpenNoteVerse(TabId, Ref),
+    OpenNoteTab(TabId, Ref),
     SaveNote(TabId),
     SaveDialogNote,
-    DeleteEditingNote(TabId),
+    DeleteNote(Ref),
     DeleteDialogNote,
     RemoveSelectedBookmark(TabId),
     ToggleBookmark,
@@ -964,7 +965,7 @@ impl SimpleComponent for App {
             }
             Msg::MarksNoteActivated(id, idx) => {
                 if let Some(at) = self.notes_widgets(id).and_then(|w| marks::note_at(w, idx)) {
-                    self.go(at, true);
+                    self.open_note_verse(id, at);
                 }
             }
             Msg::MarksNoteSelected(id, idx) => {
@@ -984,11 +985,8 @@ impl SimpleComponent for App {
                     marks::load_note(w, &self.books, at, &text);
                 }
             }
-            Msg::OpenEditingNote(id) => {
-                if let Some(at) = self.notes_widgets(id).and_then(|w| w.editing) {
-                    self.go(at, true);
-                }
-            }
+            Msg::OpenNoteVerse(id, at) => self.open_note_verse(id, at),
+            Msg::OpenNoteTab(id, at) => self.open_note_tab(id, at),
             Msg::SaveNote(id) => {
                 let Some(TabContent::Notes(widgets)) = self.hosted.get(&id).map(|h| &h.content)
                 else {
@@ -997,12 +995,11 @@ impl SimpleComponent for App {
                 if widgets.syncing.get() {
                     return;
                 }
-                let Some(at) = widgets.editing else { return };
+                let Some(at) = widgets.editing.get() else {
+                    return;
+                };
                 let text = marks::editor_text(widgets);
                 self.save_note_text(at, &text);
-                if let Some(TabContent::Notes(w)) = self.hosted.get(&id).map(|h| &h.content) {
-                    w.delete.set_sensitive(!text.trim().is_empty());
-                }
             }
             Msg::SaveDialogNote => {
                 if self.note_dialog.syncing.get() {
@@ -1017,12 +1014,7 @@ impl SimpleComponent for App {
                     .delete
                     .set_sensitive(!text.trim().is_empty());
             }
-            Msg::DeleteEditingNote(id) => {
-                let Some(at) = self.notes_widgets(id).and_then(|w| w.editing) else {
-                    return;
-                };
-                self.delete_note_at(at);
-            }
+            Msg::DeleteNote(at) => self.delete_note_at(at),
             Msg::DeleteDialogNote => {
                 let Some(at) = self.note_dialog.editing else {
                     return;
@@ -1789,6 +1781,28 @@ impl App {
             }
         };
         self.apply_passage_ref(id, at, highlight, true);
+    }
+
+    fn open_note_verse(&mut self, from: TabId, at: Ref) {
+        let window = self.window_of(from);
+        let id = match self.workspace.focused_passage_in(window) {
+            Some(id) => id,
+            None => {
+                let opened = self.workspace.open_passage_in(window, at);
+                self.spawn_passage(opened.id, at);
+                self.select_tab(opened.id);
+                return;
+            }
+        };
+        self.apply_passage_ref(id, at, true, true);
+        self.select_tab(id);
+    }
+
+    fn open_note_tab(&mut self, from: TabId, at: Ref) {
+        let opened = self.workspace.open_passage_in(self.window_of(from), at);
+        self.spawn_passage(opened.id, at);
+        self.select_tab(opened.id);
+        self.save_state();
     }
 
     /// Open `at` beside the Treasury. Later clicks reuse that same passage.
@@ -3140,7 +3154,7 @@ impl App {
             .hosted
             .iter()
             .filter_map(|(id, h)| match &h.content {
-                TabContent::Notes(w) if w.editing == Some(at) => Some(*id),
+                TabContent::Notes(w) if w.editing.get() == Some(at) => Some(*id),
                 _ => None,
             })
             .collect();
