@@ -182,7 +182,6 @@ pub enum Msg {
     MarksNoteSelected(TabId, i32),
     SaveNote(TabId),
     DeleteEditingNote(TabId),
-    OpenBookmark(TabId, Ref),
     OpenBookmarkTab(TabId, Ref),
     RemoveBookmark(Ref),
     ToggleBookmark,
@@ -1007,7 +1006,6 @@ impl SimpleComponent for App {
                 }
                 self.reload_user_marks(true);
             }
-            Msg::OpenBookmark(id, at) => self.open_bookmark_beside(id, at),
             Msg::OpenBookmarkTab(id, at) => self.open_bookmark_tab(id, at),
             Msg::RemoveBookmark(at) => {
                 if let Some(user) = &self.user {
