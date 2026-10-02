@@ -23,6 +23,9 @@ pub struct State {
     pub paragraphs: bool,
     #[serde(default)]
     pub search_mode: u32,
+    /// Older Exact word flag. `1` loads as Exact word in the match menu.
+    #[serde(default)]
+    pub search_words: u32,
     /// Chapter column width in logical pixels. `0` keeps the automatic measure.
     #[serde(default)]
     pub column_width: i32,
@@ -46,6 +49,7 @@ impl Default for State {
             interlinear: false,
             paragraphs: true,
             search_mode: 0,
+            search_words: 0,
             column_width: 0,
         }
     }
@@ -71,6 +75,7 @@ impl State {
             interlinear: false,
             paragraphs,
             search_mode: 0,
+            search_words: 0,
             column_width: 0,
         }
     }

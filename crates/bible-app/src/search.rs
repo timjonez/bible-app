@@ -1,9 +1,11 @@
 use crate::layout;
 use crate::nav::{self, Ref};
+use crate::workspace::TabId;
 use bible_app_db::{
     Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchScope,
-    VerseFilter,
+    VerseFilter, WordMatch,
 };
+use gtk::gio;
 use gtk::prelude::*;
 use relm4::gtk;
 use rusqlite::Connection;
@@ -176,7 +178,7 @@ pub fn reference_text(hit: &LibraryHit, books: &[Book], scope: SearchScope) -> S
     }
 }
 
-pub fn emphasize(text: &str, tokens: &[String]) -> String {
+pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -190,6 +192,7 @@ pub fn emphasize(text: &str, tokens: &[String]) -> String {
         if needle.is_empty() {
             continue;
         }
+        let partial = word_match.partial();
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
@@ -197,8 +200,12 @@ pub fn emphasize(text: &str, tokens: &[String]) -> String {
             let after = lower[pos + needle.len()..].chars().next();
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
-            if left_ok && right_ok {
-                marks.push((pos, pos + needle.len()));
+            if partial || (left_ok && right_ok) {
+                let start = pos;
+                let end = pos + needle.len();
+                marks.push((start, end));
+                from = end.max(pos + 1);
+                continue;
             }
             from = pos + needle.len().max(1);
         }
@@ -238,6 +245,9 @@ pub fn row(
     books: &[Book],
     scope: SearchScope,
     tokens: &[String],
+    word_match: WordMatch,
+    id: TabId,
+    sender: relm4::Sender<crate::app::Msg>,
 ) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -256,7 +266,7 @@ pub fn row(
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let snippet = gtk::Label::new(None);
-    snippet.set_markup(&emphasize(&hit.snippet, tokens));
+    snippet.set_markup(&emphasize(&hit.snippet, tokens, word_match));
     snippet.set_xalign(0.0);
     snippet.set_yalign(0.0);
     snippet.set_hexpand(true);
@@ -270,31 +280,72 @@ pub fn row(
     row.set_child(Some(&box_));
     row.set_activatable(true);
     row.set_tooltip_text(Some(&caption(hit, books)));
+    if let Some(at) = hit_ref(hit) {
+        attach_hit_menu(&row, id, at, sender);
+    }
     row
 }
 
-pub fn refill_list(
-    list: &gtk::ListBox,
-    hits: &[LibraryHit],
-    books: &[Book],
-    scope: SearchScope,
-    tokens: &[String],
-    groups: &std::cell::RefCell<Vec<String>>,
-    append: bool,
+fn attach_hit_menu(
+    row: &gtk::ListBoxRow,
+    id: TabId,
+    at: Ref,
+    sender: relm4::Sender<crate::app::Msg>,
 ) {
+    let model = gio::Menu::new();
+    model.append(Some("Open in a new tab"), Some("search.tab"));
+    let menu = gtk::PopoverMenu::from_model(Some(&model));
+    menu.set_parent(row);
+    menu.set_has_arrow(false);
+    menu.set_halign(gtk::Align::Start);
+
+    let group = gio::SimpleActionGroup::new();
+    let tab = gio::SimpleAction::new("tab", None);
+    tab.connect_activate(move |_, _| {
+        sender.emit(crate::app::Msg::OpenHitTab(id, at));
+    });
+    group.add_action(&tab);
+    menu.insert_action_group("search", Some(&group));
+
+    let right = gtk::GestureClick::new();
+    right.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let menu_click = menu.clone();
+    right.connect_pressed(move |gesture, _, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        menu_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu_click.popup();
+    });
+    row.add_controller(right);
+    row.connect_destroy(move |_| {
+        menu.unparent();
+    });
+}
+
+pub fn refill_list(pane: &Pane, hits: &[LibraryHit], books: &[Book], append: bool) {
     if !append {
-        while let Some(child) = list.row_at_index(0) {
-            list.remove(&child);
+        while let Some(child) = pane.list.row_at_index(0) {
+            pane.list.remove(&child);
         }
-        groups.borrow_mut().clear();
+        pane.groups.borrow_mut().clear();
     }
     for hit in hits {
-        groups.borrow_mut().push(group_label(hit, books, scope));
-        list.append(&row(hit, books, scope, tokens));
+        pane.groups
+            .borrow_mut()
+            .push(group_label(hit, books, pane.scope));
+        pane.list.append(&row(
+            hit,
+            books,
+            pane.scope,
+            &pane.tokens,
+            pane.words,
+            pane.tab,
+            pane.sender.clone(),
+        ));
     }
     if !append {
-        if let Some(first) = list.row_at_index(0) {
-            list.select_row(Some(&first));
+        if let Some(first) = pane.list.row_at_index(0) {
+            pane.list.select_row(Some(&first));
         }
     }
 }
@@ -694,6 +745,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
     let Ok(page) = crate::user_db::search_notes(
         &conn,
         &prepared.compiled.fts,
+        prepared.compiled.substring.as_deref(),
         prepared.filter.book_min,
         prepared.filter.book_max,
         book,
@@ -732,6 +784,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
         crate::user_db::search_notes(
             &conn,
             &prepared.compiled.fts,
+            prepared.compiled.substring.as_deref(),
             prepared.filter.book_min,
             prepared.filter.book_max,
             Some(prepared.current_book),
@@ -767,6 +820,7 @@ fn append_notes(prepared: &Prepared, page: &mut LibraryPage) {
     let Ok(found) = crate::user_db::search_notes(
         &conn,
         &prepared.compiled.fts,
+        prepared.compiled.substring.as_deref(),
         prepared.filter.book_min,
         prepared.filter.book_max,
         prepared.filter.book,
@@ -869,6 +923,7 @@ pub struct Pane {
     pub query: String,
     pub scope: SearchScope,
     pub mode: MatchMode,
+    pub words: WordMatch,
     pub range: SearchRange,
     pub chip: BookChip,
     pub hits: Vec<LibraryHit>,
@@ -881,13 +936,15 @@ pub struct Pane {
     pub gen: Rc<Cell<u64>>,
     pub hold: Rc<Cell<bool>>,
     pub groups: Rc<RefCell<Vec<String>>>,
+    tab: TabId,
+    sender: relm4::Sender<crate::app::Msg>,
 }
 
-pub fn build_pane(mode: MatchMode) -> Pane {
+pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::Msg>) -> Pane {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
     entry.set_tooltip_text(Some(
-        "Enter stays on the verse. Esc returns. Shift+Enter opens beside.",
+        "Click a hit to open the verse beside Search. Enter stays on the verse and closes Search. Right-click opens a new tab.",
     ));
     entry.set_hexpand(true);
 
@@ -900,7 +957,7 @@ pub fn build_pane(mode: MatchMode) -> Pane {
     let mode_dd = gtk::DropDown::from_strings(&MatchMode::ALL.map(MatchMode::label));
     mode_dd.set_selected(mode.index());
     mode_dd.set_enable_search(false);
-    mode_dd.set_tooltip_text(Some("Match"));
+    mode_dd.set_tooltip_text(Some("Phrase, all words, any word, or exact word"));
     mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
 
     let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));
@@ -969,6 +1026,7 @@ pub fn build_pane(mode: MatchMode) -> Pane {
         query: String::new(),
         scope: SearchScope::Kjv,
         mode,
+        words: mode.word_match(),
         range: SearchRange::All,
         chip: BookChip::Auto,
         hits: Vec::new(),
@@ -981,6 +1039,8 @@ pub fn build_pane(mode: MatchMode) -> Pane {
         gen: Rc::new(Cell::new(0)),
         hold: Rc::new(Cell::new(false)),
         groups: Rc::new(RefCell::new(Vec::new())),
+        tab: id,
+        sender,
     }
 }
 
@@ -1108,7 +1168,7 @@ mod tests {
             SearchScope::Kjv,
         ) {
             Plan::Ready(p) => {
-                assert_eq!(p.compiled.fts, "light");
+                assert_eq!(p.compiled.fts, "light*");
                 assert_eq!(p.filter.book, Some(43));
                 assert_eq!(p.filter.chapter, None);
             }
@@ -1126,7 +1186,7 @@ mod tests {
             Plan::Ready(p) => {
                 assert_eq!(p.filter.book, Some(43));
                 assert_eq!(p.filter.chapter, Some(3));
-                assert_eq!(p.compiled.fts, "born");
+                assert_eq!(p.compiled.fts, "born*");
             }
             other => panic!("expected chapter search, got {other:?}"),
         }
@@ -1147,10 +1207,34 @@ mod tests {
     #[test]
     fn emphasize_bolds_the_match_and_escapes() {
         assert_eq!(
-            emphasize("the only begotten Son", &["begotten".into()]),
+            emphasize(
+                "the only begotten Son",
+                &["begotten".into()],
+                WordMatch::Prefix
+            ),
             "the only <b>begotten</b> Son"
         );
-        assert!(emphasize("a < b & c", &["b".into()]).contains("&lt;"));
+        assert_eq!(
+            emphasize(
+                "the heaven and the earth.",
+                &["eart".into()],
+                WordMatch::Prefix
+            ),
+            "the heaven and the <b>eart</b>h."
+        );
+        assert_eq!(
+            emphasize(
+                "the heaven and the earth.",
+                &["ear".into()],
+                WordMatch::Exact
+            ),
+            "the heaven and the earth."
+        );
+        assert_eq!(
+            emphasize("hear thou in heaven", &["ear".into()], WordMatch::Prefix),
+            "h<b>ear</b> thou in heaven"
+        );
+        assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix).contains("&lt;"));
     }
 
     #[test]

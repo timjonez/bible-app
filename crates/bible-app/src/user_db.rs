@@ -342,16 +342,18 @@ pub struct NotePage {
     pub by_book: Vec<(u8, i64)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn search_notes(
     conn: &Connection,
     fts: &str,
+    substring: Option<&str>,
     book_min: u8,
     book_max: u8,
     book: Option<u8>,
     chapter: Option<u8>,
     limit: usize,
 ) -> rusqlite::Result<NotePage> {
-    if fts.trim().is_empty() {
+    if fts.trim().is_empty() && substring.is_none() {
         return Ok(NotePage {
             hits: Vec::new(),
             total: 0,
@@ -360,23 +362,42 @@ pub fn search_notes(
     }
     let book_n = i64::from(book.unwrap_or(0));
     let chapter_n = i64::from(chapter.unwrap_or(0));
-    let mut count_stmt = conn.prepare(
-        r#"
+    let book_min_n = i64::from(book_min);
+    let book_max_n = i64::from(book_max);
+    let o = if substring.is_some() { 0 } else { 1 };
+    let pred = substring
+        .map(|s| s.replace("{c}", "text"))
+        .unwrap_or_else(|| "notes_fts MATCH ?1".into());
+    let count_sql = format!(
+        "
         SELECT book, count(*)
         FROM notes_fts
-        WHERE notes_fts MATCH ?1
-          AND book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR chapter = ?4)
+        WHERE {pred}
+          AND book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{chapter} = 0 OR chapter = ?{chapter})
         GROUP BY book
         ORDER BY book
-        "#,
-    )?;
-    let by_book = count_stmt
-        .query_map(
-            rusqlite::params![fts, book_min, book_max, chapter_n],
-            |row| Ok((row.get::<_, u8>(0)?, row.get::<_, i64>(1)?)),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        chapter = o + 3,
+    );
+    let mut count_stmt = conn.prepare(&count_sql)?;
+    let by_book = if substring.is_some() {
+        count_stmt
+            .query_map(
+                rusqlite::params![book_min_n, book_max_n, chapter_n],
+                |row| Ok((row.get::<_, u8>(0)?, row.get::<_, i64>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        count_stmt
+            .query_map(
+                rusqlite::params![fts, book_min, book_max, chapter_n],
+                |row| Ok((row.get::<_, u8>(0)?, row.get::<_, i64>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let total: i64 = if book.is_some() {
         by_book
             .iter()
@@ -387,31 +408,53 @@ pub fn search_notes(
         by_book.iter().map(|(_, n)| *n).sum()
     };
     let limit = limit.max(1) as i64;
-    let mut stmt = conn.prepare(
-        r#"
+    let list_sql = format!(
+        "
         SELECT book, chapter, verse, text
         FROM notes_fts
-        WHERE notes_fts MATCH ?1
-          AND book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR book = ?4)
-          AND (?5 = 0 OR chapter = ?5)
+        WHERE {pred}
+          AND book BETWEEN ?{bmin} AND ?{bmax}
+          AND (?{book} = 0 OR book = ?{book})
+          AND (?{chapter} = 0 OR chapter = ?{chapter})
         ORDER BY book, chapter, verse
-        LIMIT ?6
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![fts, book_min, book_max, book_n, chapter_n, limit],
-        |row| {
-            Ok(NoteHit {
-                book: row.get(0)?,
-                chapter: row.get(1)?,
-                verse: row.get(2)?,
-                text: row.get(3)?,
-            })
-        },
-    )?;
+        LIMIT ?{limit}
+        ",
+        bmin = o + 1,
+        bmax = o + 2,
+        book = o + 3,
+        chapter = o + 4,
+        limit = o + 5,
+    );
+    let mut stmt = conn.prepare(&list_sql)?;
+    let rows = if substring.is_some() {
+        stmt.query_map(
+            rusqlite::params![book_min_n, book_max_n, book_n, chapter_n, limit],
+            |row| {
+                Ok(NoteHit {
+                    book: row.get(0)?,
+                    chapter: row.get(1)?,
+                    verse: row.get(2)?,
+                    text: row.get(3)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map(
+            rusqlite::params![fts, book_min, book_max, book_n, chapter_n, limit],
+            |row| {
+                Ok(NoteHit {
+                    book: row.get(0)?,
+                    chapter: row.get(1)?,
+                    verse: row.get(2)?,
+                    text: row.get(3)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    };
     Ok(NotePage {
-        hits: rows.collect::<Result<Vec<_>, _>>()?,
+        hits: rows,
         total,
         by_book,
     })
@@ -943,7 +986,7 @@ mod tests {
         let user = open_memory().unwrap();
         upsert_note(&user, at(43, 3, 16), "a note about everlasting life").unwrap();
         upsert_note(&user, at(1, 1, 1), "creation").unwrap();
-        let page = search_notes(&user, "everlasting", 1, 66, None, None, 20).unwrap();
+        let page = search_notes(&user, "everlasting", None, 1, 66, None, None, 20).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.hits.len(), 1);
         assert_eq!(
@@ -952,7 +995,7 @@ mod tests {
         );
         assert_eq!(page.by_book, vec![(43, 1)]);
         delete_note(&user, at(43, 3, 16)).unwrap();
-        let page = search_notes(&user, "everlasting", 1, 66, None, None, 20).unwrap();
+        let page = search_notes(&user, "everlasting", None, 1, 66, None, None, 20).unwrap();
         assert_eq!(page.total, 0);
         assert!(page.hits.is_empty());
     }

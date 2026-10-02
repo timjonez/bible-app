@@ -9,7 +9,7 @@ use crate::tsk;
 use crate::user_db;
 use crate::workspace::TabId;
 use adw::prelude::*;
-use bible_app_db::Book;
+use bible_app_db::{Book, WordMatch};
 use gtk::gio;
 use gtk::glib;
 use relm4::{adw, gtk};
@@ -589,7 +589,13 @@ impl PassageView {
         });
     }
 
-    pub fn paint_search(&self, verse: u8, tokens: &[String], strongs: Option<&str>) {
+    pub fn paint_search(
+        &self,
+        verse: u8,
+        tokens: &[String],
+        strongs: Option<&str>,
+        word_match: WordMatch,
+    ) {
         let Some(tag) = self.buffer.tag_table().lookup("search-hit") else {
             return;
         };
@@ -611,7 +617,7 @@ impl PassageView {
             return;
         };
         let skip = mark_spans(&self.layout);
-        for span in token_spans(&self.layout.text, body, vend, tokens, &skip) {
+        for span in token_spans(&self.layout.text, body, vend, tokens, word_match, &skip) {
             self.apply_tag("search-hit", span);
         }
     }
@@ -1016,6 +1022,7 @@ fn token_spans(
     start: i32,
     end: i32,
     tokens: &[String],
+    word_match: WordMatch,
     skip: &[layout::Span],
 ) -> Vec<layout::Span> {
     let chars: Vec<char> = text.chars().collect();
@@ -1035,6 +1042,7 @@ fn token_spans(
         if needle.is_empty() {
             continue;
         }
+        let partial = word_match.partial();
         let mut from = 0;
         while let Some(rel) = lower[from..].find(&needle) {
             let pos = from + rel;
@@ -1044,9 +1052,9 @@ fn token_spans(
             let abs_end = (start + char_end) as i32;
             let before = neighbor_char(&chars, abs as isize - 1, skip, false);
             let after = neighbor_char(&chars, abs_end as isize, skip, true);
-            if before.is_none_or(|c| !c.is_ascii_alphanumeric())
-                && after.is_none_or(|c| !c.is_ascii_alphanumeric())
-            {
+            let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
+            let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
+            if partial || (left_ok && right_ok) {
                 spans.push(layout::Span {
                     start: abs,
                     end: abs_end,
@@ -1094,6 +1102,7 @@ mod token_span_tests {
             0,
             text.chars().count() as i32,
             &["moses".into()],
+            WordMatch::Prefix,
             &skip,
         );
         assert_eq!(
@@ -1101,5 +1110,30 @@ mod token_span_tests {
             vec![layout::Span { start: 4, end: 9 }],
             "Moses sits at 4..9, before the superscript a"
         );
+    }
+
+    #[test]
+    fn search_prefix_covers_the_matched_stem() {
+        let text = "the heaven and the earth";
+        let spans = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["eart".into()],
+            WordMatch::Prefix,
+            &[],
+        );
+        assert_eq!(spans, vec![layout::Span { start: 19, end: 23 }]);
+        let exact = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["ear".into()],
+            WordMatch::Exact,
+            &[],
+        );
+        assert!(exact.is_empty(), "{exact:?}");
+        let hear = token_spans("hear thou", 0, 9, &["ear".into()], WordMatch::Prefix, &[]);
+        assert_eq!(hear, vec![layout::Span { start: 1, end: 4 }]);
     }
 }
