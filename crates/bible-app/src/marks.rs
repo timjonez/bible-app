@@ -2,10 +2,10 @@ use crate::layout::{self, ChapterLayout};
 use crate::nav::{self, Ref};
 use crate::user_db::{self, Bookmark, Note, VerseMarks};
 use crate::workspace::TabId;
-use adw::prelude::*;
 use bible_app_db::Book;
 use gtk::gio;
-use relm4::{adw, gtk};
+use gtk::prelude::*;
+use relm4::gtk;
 use rusqlite::Connection;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -22,23 +22,26 @@ const USER_TAG_NAMES: &[&str] = &[
     "user-note",
 ];
 
-pub struct MarksWidgets {
+pub struct BookmarksWidgets {
     pub root: gtk::Widget,
-    pub stack: adw::ViewStack,
-    pub bookmark_list: gtk::ListBox,
+    pub list: gtk::ListBox,
     pub bookmarks: Vec<Bookmark>,
-    pub bookmarks_empty: gtk::Label,
-    pub note_list: gtk::ListBox,
+    pub empty: gtk::Label,
+    pub remove: gtk::Button,
+}
+
+pub struct NotesWidgets {
+    pub root: gtk::Widget,
+    pub list: gtk::ListBox,
     pub notes: Vec<Note>,
-    pub notes_empty: gtk::Label,
+    pub empty: gtk::Label,
     pub editor: gtk::TextView,
     pub buffer: gtk::TextBuffer,
     pub editor_title: gtk::Label,
     pub editing: Option<Ref>,
     pub syncing: Rc<Cell<bool>>,
-    pub remove_bookmark: gtk::Button,
-    pub delete_note: gtk::Button,
-    pub export_notes: gtk::Button,
+    pub delete: gtk::Button,
+    pub export: gtk::Button,
 }
 
 pub fn install_tags(buffer: &gtk::TextBuffer) {
@@ -127,88 +130,66 @@ pub fn verse_menu_model(bookmarked: bool, has_note: bool) -> gio::Menu {
     menu
 }
 
-pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets {
-    let stack = adw::ViewStack::new();
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
-    let switcher = adw::ViewSwitcher::new();
-    switcher.set_stack(Some(&stack));
-    switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
-    switcher.set_halign(gtk::Align::Center);
-
-    let bookmark_list = gtk::ListBox::new();
-    bookmark_list.set_selection_mode(gtk::SelectionMode::Single);
-    bookmark_list.add_css_class("boxed-list");
-    bookmark_list.set_accessible_role(gtk::AccessibleRole::List);
+pub fn build_bookmarks(id: TabId, sender: relm4::Sender<super::app::Msg>) -> BookmarksWidgets {
+    let list = list_box();
     let send_bm = sender.clone();
-    bookmark_list.connect_row_activated(move |_, row| {
+    list.connect_row_activated(move |_, row| {
         send_bm.emit(super::app::Msg::MarksBookmarkActivated(id, row.index()));
     });
     let send_bm_sel = sender.clone();
-    bookmark_list.connect_row_selected(move |_, _| {
+    list.connect_row_selected(move |_, _| {
         send_bm_sel.emit(super::app::Msg::MarksBookmarkSelected(id));
     });
 
-    let bookmarks_empty = gtk::Label::new(Some(
-        "No bookmarks. Right-click a verse in the chapter to add one.",
-    ));
-    bookmarks_empty.set_wrap(true);
-    bookmarks_empty.set_xalign(0.0);
-    bookmarks_empty.add_css_class("dim-label");
-    bookmarks_empty.set_margin_start(4);
-    bookmarks_empty.set_margin_end(4);
+    let empty = empty_label("No bookmarks. Right-click a verse in the chapter to add one.");
 
-    let bookmark_scroll = gtk::ScrolledWindow::new();
-    bookmark_scroll.set_hexpand(true);
-    bookmark_scroll.set_vexpand(true);
-    bookmark_scroll.set_child(Some(&bookmark_list));
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
 
-    let remove_bookmark = gtk::Button::with_label("Remove");
-    remove_bookmark.set_halign(gtk::Align::Start);
-    remove_bookmark.set_sensitive(false);
+    let remove = gtk::Button::with_label("Remove");
+    remove.set_halign(gtk::Align::Start);
+    remove.set_sensitive(false);
     let send_rm = sender.clone();
-    remove_bookmark.connect_clicked(move |_| {
+    remove.connect_clicked(move |_| {
         send_rm.emit(super::app::Msg::RemoveSelectedBookmark(id));
     });
 
-    let bookmarks_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    bookmarks_page.set_margin_start(12);
-    bookmarks_page.set_margin_end(12);
-    bookmarks_page.set_margin_top(8);
-    bookmarks_page.set_margin_bottom(8);
-    bookmarks_page.append(&bookmarks_empty);
-    bookmarks_page.append(&bookmark_scroll);
-    bookmarks_page.append(&remove_bookmark);
+    let page = page_box();
+    page.append(&empty);
+    page.append(&scroll);
+    page.append(&remove);
 
-    let note_list = gtk::ListBox::new();
-    note_list.set_selection_mode(gtk::SelectionMode::Single);
-    note_list.add_css_class("boxed-list");
-    note_list.set_accessible_role(gtk::AccessibleRole::List);
+    BookmarksWidgets {
+        root: page.upcast(),
+        list,
+        bookmarks: Vec::new(),
+        empty,
+        remove,
+    }
+}
+
+pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWidgets {
+    let list = list_box();
     let send_note = sender.clone();
-    note_list.connect_row_activated(move |_, row| {
+    list.connect_row_activated(move |_, row| {
         send_note.emit(super::app::Msg::MarksNoteActivated(id, row.index()));
     });
     let send_note_sel = sender.clone();
-    note_list.connect_row_selected(move |_, row| {
+    list.connect_row_selected(move |_, row| {
         if let Some(row) = row {
             send_note_sel.emit(super::app::Msg::MarksNoteSelected(id, row.index()));
         }
     });
 
-    let notes_empty = gtk::Label::new(Some(
-        "No notes yet. Right-click a verse and choose Add note.",
-    ));
-    notes_empty.set_wrap(true);
-    notes_empty.set_xalign(0.0);
-    notes_empty.add_css_class("dim-label");
-    notes_empty.set_margin_start(4);
-    notes_empty.set_margin_end(4);
+    let empty = empty_label("No notes yet. Right-click a verse and choose Add note.");
 
-    let note_scroll = gtk::ScrolledWindow::new();
-    note_scroll.set_hexpand(true);
-    note_scroll.set_min_content_height(140);
-    note_scroll.set_vexpand(true);
-    note_scroll.set_child(Some(&note_list));
+    let list_scroll = gtk::ScrolledWindow::new();
+    list_scroll.set_hexpand(true);
+    list_scroll.set_min_content_height(140);
+    list_scroll.set_vexpand(true);
+    list_scroll.set_child(Some(&list));
 
     let editor_title = gtk::Label::new(Some("Select a note to edit"));
     editor_title.set_xalign(0.0);
@@ -242,181 +223,184 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> MarksWidgets 
         send_save.emit(super::app::Msg::SaveNote(id));
     });
 
-    let delete_note = gtk::Button::with_label("Delete note");
-    delete_note.set_halign(gtk::Align::Start);
-    delete_note.set_sensitive(false);
+    let delete = gtk::Button::with_label("Delete note");
+    delete.set_halign(gtk::Align::Start);
+    delete.set_sensitive(false);
     let send_del = sender.clone();
-    delete_note.connect_clicked(move |_| {
+    delete.connect_clicked(move |_| {
         send_del.emit(super::app::Msg::DeleteEditingNote(id));
     });
 
-    let export_notes = gtk::Button::with_label("Export notes…");
-    export_notes.set_halign(gtk::Align::Start);
-    export_notes.set_visible(false);
-    export_notes.set_tooltip_text(Some("Save all notes as Markdown"));
+    let export = gtk::Button::with_label("Export notes…");
+    export.set_halign(gtk::Align::Start);
+    export.set_visible(false);
+    export.set_tooltip_text(Some("Save all notes as Markdown"));
     let send_export = sender.clone();
-    export_notes.connect_clicked(move |_| {
+    export.connect_clicked(move |_| {
         send_export.emit(super::app::Msg::ExportNotes);
     });
 
-    let notes_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    notes_page.set_margin_start(12);
-    notes_page.set_margin_end(12);
-    notes_page.set_margin_top(8);
-    notes_page.set_margin_bottom(8);
-    notes_page.append(&export_notes);
-    notes_page.append(&notes_empty);
-    notes_page.append(&note_scroll);
-    notes_page.append(&editor_title);
-    notes_page.append(&editor_scroll);
-    notes_page.append(&delete_note);
+    let page = page_box();
+    page.append(&export);
+    page.append(&empty);
+    page.append(&list_scroll);
+    page.append(&editor_title);
+    page.append(&editor_scroll);
+    page.append(&delete);
 
-    stack.add_titled(&bookmarks_page, Some("bookmarks"), "Bookmarks");
-    stack.add_titled(&notes_page, Some("notes"), "Notes");
-
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    body.set_margin_start(8);
-    body.set_margin_end(8);
-    body.set_margin_top(8);
-    body.set_margin_bottom(8);
-    body.append(&switcher);
-    body.append(&stack);
-
-    MarksWidgets {
-        root: body.upcast(),
-        stack,
-        bookmark_list,
-        bookmarks: Vec::new(),
-        bookmarks_empty,
-        note_list,
+    NotesWidgets {
+        root: page.upcast(),
+        list,
         notes: Vec::new(),
-        notes_empty,
+        empty,
         editor,
         buffer,
         editor_title,
         editing: None,
         syncing,
-        remove_bookmark,
-        delete_note,
-        export_notes,
+        delete,
+        export,
     }
 }
 
-pub fn show_page(widgets: &MarksWidgets, page: &str) {
-    widgets.stack.set_visible_child_name(page);
-}
-
-pub fn editor_text(widgets: &MarksWidgets) -> String {
+pub fn editor_text(widgets: &NotesWidgets) -> String {
     let start = widgets.buffer.start_iter();
     let end = widgets.buffer.end_iter();
     widgets.buffer.text(&start, &end, false).to_string()
 }
 
-pub fn fill(widgets: &mut MarksWidgets, user: &Connection, books: &[Book]) {
-    refresh_lists(widgets, user, books);
+pub fn fill_bookmarks(widgets: &mut BookmarksWidgets, user: &Connection, books: &[Book]) {
+    widgets.bookmarks = user_db::list_bookmarks(user).unwrap_or_default();
+    refill_rows(&widgets.list, &widgets.bookmarks, books, |bm| {
+        (bm.at(), bm.label.as_str())
+    });
+    let has_bm = !widgets.bookmarks.is_empty();
+    widgets.list.set_visible(has_bm);
+    widgets.empty.set_visible(!has_bm);
+    widgets
+        .remove
+        .set_sensitive(widgets.list.selected_row().is_some());
 }
 
-pub fn refresh_lists(widgets: &mut MarksWidgets, user: &Connection, books: &[Book]) {
+pub fn fill_notes(widgets: &mut NotesWidgets, user: &Connection, books: &[Book]) {
     widgets.syncing.set(true);
-    widgets.bookmarks = user_db::list_bookmarks(user).unwrap_or_default();
-    refill_bookmarks(&widgets.bookmark_list, &widgets.bookmarks, books);
-    let has_bm = !widgets.bookmarks.is_empty();
-    widgets.bookmark_list.set_visible(has_bm);
-    widgets.bookmarks_empty.set_visible(!has_bm);
-
     widgets.notes = user_db::list_notes(user).unwrap_or_default();
-    refill_notes(&widgets.note_list, &widgets.notes, books);
+    refill_rows(&widgets.list, &widgets.notes, books, |note| {
+        (note.at(), note.text.as_str())
+    });
     let has_notes = !widgets.notes.is_empty();
-    widgets.note_list.set_visible(has_notes);
-    widgets.notes_empty.set_visible(!has_notes);
-    widgets.export_notes.set_visible(has_notes);
+    widgets.list.set_visible(has_notes);
+    widgets.empty.set_visible(!has_notes);
+    widgets.export.set_visible(has_notes);
 
     if let Some(at) = widgets.editing {
         if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
             widgets
-                .note_list
-                .select_row(widgets.note_list.row_at_index(i as i32).as_ref());
-            widgets.delete_note.set_sensitive(true);
+                .list
+                .select_row(widgets.list.row_at_index(i as i32).as_ref());
+            widgets.delete.set_sensitive(true);
         } else {
-            widgets.note_list.unselect_all();
-            widgets.delete_note.set_sensitive(false);
+            widgets.list.unselect_all();
+            widgets.delete.set_sensitive(false);
         }
     } else {
-        widgets.delete_note.set_sensitive(false);
+        widgets.delete.set_sensitive(false);
     }
-    widgets
-        .remove_bookmark
-        .set_sensitive(widgets.bookmark_list.selected_row().is_some());
     widgets.syncing.set(false);
 }
 
-pub fn bookmark_at(widgets: &MarksWidgets, idx: i32) -> Option<Ref> {
+pub fn bookmark_at(widgets: &BookmarksWidgets, idx: i32) -> Option<Ref> {
     widgets
         .bookmarks
         .get(usize::try_from(idx).ok()?)
         .map(Bookmark::at)
 }
 
-pub fn note_at(widgets: &MarksWidgets, idx: i32) -> Option<Ref> {
+pub fn note_at(widgets: &NotesWidgets, idx: i32) -> Option<Ref> {
     widgets.notes.get(usize::try_from(idx).ok()?).map(Note::at)
 }
 
-pub fn selected_bookmark(widgets: &MarksWidgets) -> Option<Ref> {
-    let row = widgets.bookmark_list.selected_row()?;
+pub fn selected_bookmark(widgets: &BookmarksWidgets) -> Option<Ref> {
+    let row = widgets.list.selected_row()?;
     bookmark_at(widgets, row.index())
 }
 
-pub fn edit_note(widgets: &mut MarksWidgets, books: &[Book], at: Ref, text: &str) {
+pub fn edit_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
     widgets.syncing.set(true);
     widgets.editing = Some(at);
     widgets.buffer.set_text(text);
     widgets.syncing.set(false);
     widgets.editor_title.set_label(&nav::format_ref(books, at));
     widgets.editor.set_sensitive(true);
-    widgets.delete_note.set_sensitive(!text.trim().is_empty());
-    show_page(widgets, "notes");
+    widgets.delete.set_sensitive(!text.trim().is_empty());
     if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
         widgets.syncing.set(true);
         widgets
-            .note_list
-            .select_row(widgets.note_list.row_at_index(i as i32).as_ref());
+            .list
+            .select_row(widgets.list.row_at_index(i as i32).as_ref());
         widgets.syncing.set(false);
     }
     widgets.editor.grab_focus();
 }
 
-pub fn load_note(widgets: &mut MarksWidgets, books: &[Book], at: Ref, text: &str) {
+pub fn load_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
     if widgets.syncing.get() || widgets.editing == Some(at) {
         return;
     }
     edit_note(widgets, books, at, text);
 }
 
-pub fn clear_editor(widgets: &mut MarksWidgets) {
+pub fn clear_editor(widgets: &mut NotesWidgets) {
     widgets.syncing.set(true);
     widgets.editing = None;
     widgets.buffer.set_text("");
     widgets.syncing.set(false);
     widgets.editor_title.set_label("Select a note to edit");
     widgets.editor.set_sensitive(false);
-    widgets.delete_note.set_sensitive(false);
+    widgets.delete.set_sensitive(false);
 }
 
-fn refill_bookmarks(list: &gtk::ListBox, bookmarks: &[Bookmark], books: &[Book]) {
+fn list_box() -> gtk::ListBox {
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    list.add_css_class("boxed-list");
+    list.set_accessible_role(gtk::AccessibleRole::List);
+    list
+}
+
+fn empty_label(text: &str) -> gtk::Label {
+    let empty = gtk::Label::new(Some(text));
+    empty.set_wrap(true);
+    empty.set_xalign(0.0);
+    empty.add_css_class("dim-label");
+    empty.set_margin_start(4);
+    empty.set_margin_end(4);
+    empty
+}
+
+fn page_box() -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    page.set_margin_start(12);
+    page.set_margin_end(12);
+    page.set_margin_top(8);
+    page.set_margin_bottom(8);
+    page.set_hexpand(true);
+    page.set_vexpand(true);
+    page
+}
+
+fn refill_rows<T>(
+    list: &gtk::ListBox,
+    items: &[T],
+    books: &[Book],
+    row: impl Fn(&T) -> (Ref, &str),
+) {
     while let Some(child) = list.row_at_index(0) {
         list.remove(&child);
     }
-    for bm in bookmarks {
-        list.append(&ref_row(bm.at(), books, bm.label.as_str()));
-    }
-}
-
-fn refill_notes(list: &gtk::ListBox, notes: &[Note], books: &[Book]) {
-    while let Some(child) = list.row_at_index(0) {
-        list.remove(&child);
-    }
-    for note in notes {
-        list.append(&ref_row(note.at(), books, note.text.as_str()));
+    for item in items {
+        let (at, extra) = row(item);
+        list.append(&ref_row(at, books, extra));
     }
 }
 
