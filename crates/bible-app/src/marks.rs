@@ -186,10 +186,6 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
     let list = list_box();
     list.add_css_class("navigation-sidebar");
     list.remove_css_class("boxed-list");
-    let send_note = sender.clone();
-    list.connect_row_activated(move |_, row| {
-        send_note.emit(super::app::Msg::MarksNoteActivated(id, row.index()));
-    });
     let send_note_sel = sender.clone();
     list.connect_row_selected(move |_, row| {
         if let Some(row) = row {
@@ -603,7 +599,7 @@ fn note_row(
     }
 
     row.set_child(Some(&box_));
-    row.set_activatable(true);
+    row.set_activatable(false);
     row.set_tooltip_text(Some(&nav::format_ref(books, at)));
     attach_note_menu(&row, id, Rc::new(Cell::new(Some(at))), sender);
     row
@@ -612,7 +608,7 @@ fn note_row(
 fn note_menu_model() -> gio::Menu {
     let model = gio::Menu::new();
     model.append(Some("Open verse"), Some("note.open"));
-    model.append(Some("Open in a new tab"), Some("note.tab"));
+    model.append(Some("Open verse in new tab"), Some("note.tab"));
     let destructive = gio::Menu::new();
     destructive.append(Some("Delete"), Some("note.delete"));
     model.append_section(None, &destructive);

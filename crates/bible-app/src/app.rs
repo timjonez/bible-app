@@ -181,7 +181,6 @@ pub enum Msg {
     OpenNotes,
     MarksBookmarkActivated(TabId, i32),
     MarksBookmarkSelected(TabId),
-    MarksNoteActivated(TabId, i32),
     MarksNoteSelected(TabId, i32),
     OpenNoteVerse(TabId, Ref),
     OpenNoteTab(TabId, Ref),
@@ -961,11 +960,6 @@ impl SimpleComponent for App {
             Msg::MarksBookmarkSelected(id) => {
                 if let Some(w) = self.bookmarks_widgets(id) {
                     w.remove.set_sensitive(w.list.selected_row().is_some());
-                }
-            }
-            Msg::MarksNoteActivated(id, idx) => {
-                if let Some(at) = self.notes_widgets(id).and_then(|w| marks::note_at(w, idx)) {
-                    self.open_note_verse(id, at);
                 }
             }
             Msg::MarksNoteSelected(id, idx) => {
@@ -1784,18 +1778,18 @@ impl App {
     }
 
     fn open_note_verse(&mut self, from: TabId, at: Ref) {
-        let window = self.window_of(from);
-        let id = match self.workspace.focused_passage_in(window) {
-            Some(id) => id,
-            None => {
-                let opened = self.workspace.open_passage_in(window, at);
-                self.spawn_passage(opened.id, at);
-                self.select_tab(opened.id);
-                return;
-            }
-        };
-        self.apply_passage_ref(id, at, true, true);
-        self.select_tab(id);
+        if let Some(id) = self.workspace.passage_beside(from) {
+            self.apply_passage_ref(id, at, true, true);
+            return;
+        }
+        if self.workspace.can_split(from) {
+            let opened = self.workspace.open_passage_beside(from, at);
+            self.spawn_passage(opened.id, at);
+            self.reload_passage(opened.id, true);
+            self.save_state();
+            return;
+        }
+        self.open_note_tab(from, at);
     }
 
     fn open_note_tab(&mut self, from: TabId, at: Ref) {
