@@ -116,6 +116,7 @@ pub enum Msg {
     SearchActivate(TabId),
     OpenHit(TabId, i32),
     OpenHitBeside(TabId, i32),
+    OpenHitTab(TabId, Ref),
     OpenMhc,
     OpenTsk,
     OpenTskDest(Ref),
@@ -749,6 +750,7 @@ impl SimpleComponent for App {
                 };
                 self.open_hit(id, idx, true, true);
             }
+            Msg::OpenHitTab(id, at) => self.open_search_verse_tab(id, at),
             Msg::OpenMhc => {
                 self.in_current_tabs(|app| app.ensure_mhc());
             }
@@ -1233,7 +1235,7 @@ impl App {
         let was_split = self.workspace.is_window_split(window);
         let at = self.at_in(window);
         let opened = self.workspace.open_search(window);
-        let mut pane = search::build_pane(self.search_mode);
+        let mut pane = search::build_pane(self.search_mode, opened.id, self.msg_tx.clone());
         pane.origin = Some(at);
         self.wire_search(opened.id, &pane);
         let root = pane.root.clone();
@@ -1567,7 +1569,7 @@ impl App {
     }
 
     fn refill_hits(&mut self, id: TabId, append: bool) {
-        let Some(pane) = self.search_mut(id) else {
+        let Some(pane) = self.search(id) else {
             return;
         };
         let hits = if append {
@@ -1576,14 +1578,9 @@ impl App {
         } else {
             pane.hits.clone()
         };
-        let list = pane.list.clone();
-        let groups = pane.groups.clone();
-        let hold = pane.hold.clone();
-        let scope = pane.scope;
-        let tokens = pane.tokens.clone();
-        hold.set(true);
-        search::refill_list(&list, &hits, &self.books, scope, &tokens, &groups, append);
-        hold.set(false);
+        pane.hold.set(true);
+        search::refill_list(pane, &hits, &self.books, append);
+        pane.hold.set(false);
     }
 
     fn refill_chips(&self, id: TabId) {
@@ -1653,18 +1650,13 @@ impl App {
             tokens,
             strongs,
         });
-        self.preview_at_in(self.window_of(id), at);
+        let Some(passage) = self.workspace.passage_beside(id) else {
+            return;
+        };
+        self.preview_passage(passage, at);
     }
 
-    fn preview_at_in(&mut self, window: WindowId, at: Ref) {
-        let id = match self.workspace.focused_passage_in(window) {
-            Some(id) => id,
-            None => {
-                let opened = self.workspace.open_passage_in(window, at);
-                self.spawn_passage(opened.id, at);
-                opened.id
-            }
-        };
+    fn preview_passage(&mut self, id: TabId, at: Ref) {
         let same = self
             .passage(id)
             .is_some_and(|p| p.at.book == at.book && p.at.chapter == at.chapter);
@@ -1717,7 +1709,7 @@ impl App {
             LibraryKind::Verse | LibraryKind::Note => {
                 let Some(at) = at else { return };
                 if !dismiss {
-                    self.preview_at_in(window, at);
+                    self.open_search_verse_beside(id, at);
                 } else if beside {
                     self.go_beside_in(window, at);
                 } else {
@@ -1726,10 +1718,14 @@ impl App {
             }
             LibraryKind::Commentary => {
                 let Some(at) = at else { return };
-                if dismiss {
-                    self.go_in(window, at, true);
+                if !dismiss {
+                    self.open_search_verse_beside(id, at);
+                    return;
+                }
+                if beside {
+                    self.go_beside_in(window, at);
                 } else {
-                    self.preview_at_in(window, at);
+                    self.go_in(window, at, true);
                 }
                 if hit.module == "TSK" {
                     let _ = self.ensure_tsk();
@@ -1787,6 +1783,43 @@ impl App {
         self.spawn_passage(opened.id, at);
         self.select_tab(opened.id);
         self.save_state();
+    }
+
+    fn open_search_verse_beside(&mut self, source: TabId, at: Ref) {
+        if let Some(id) = self.workspace.passage_beside(source) {
+            self.apply_passage_ref(id, at, true, true);
+            return;
+        }
+        if self.workspace.can_split(source) {
+            let opened = self.workspace.open_passage_beside(source, at);
+            self.spawn_passage(opened.id, at);
+            self.reload_passage(opened.id, true);
+            self.save_state();
+            return;
+        }
+        self.open_search_verse_tab(source, at);
+    }
+
+    fn open_search_verse_tab(&mut self, source: TabId, at: Ref) {
+        self.mark_search_verse(source, at);
+        let opened = self.workspace.open_passage_in(self.window_of(source), at);
+        self.spawn_passage(opened.id, at);
+        self.reload_passage(opened.id, true);
+        self.select_tab(opened.id);
+        self.save_state();
+    }
+
+    fn mark_search_verse(&mut self, id: TabId, at: Ref) {
+        let tokens = self
+            .search(id)
+            .map(|pane| pane.tokens.clone())
+            .unwrap_or_default();
+        let strongs = self.search(id).and_then(|pane| pane.strongs.clone());
+        self.search_mark = Some(SearchMark {
+            at,
+            tokens,
+            strongs,
+        });
     }
 
     fn open_bookmark_beside(&mut self, source: TabId, at: Ref) {
