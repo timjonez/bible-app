@@ -35,7 +35,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Menu → Lexicon → Brown-Driver-Briggs or Thayer; type a Strong’s code such as `H430` or `G26`
 - Menu → Dictionary → Webster’s 1828, Easton, or another dictionary; type a headword in the search bar
 - Menu → Topics → Nave, Torrey, and the other topical works
-- Bookmarks, notes, and highlights are local, verse-anchored, and exportable as Markdown. They live in `~/.local/share/bible-app/user.sqlite`, not in the shipped library database. Select words and right-click to highlight that selection; right-click a verse to bookmark or add a note. Menu → Bookmarks and Menu → Notes each open their own tab. Export notes… is on the Notes tab.
+- Bookmarks, notes, and highlights are local, verse-anchored, and exportable as Markdown. They live in `~/.local/share/bible-app/user.sqlite`, not in the shipped library database. Select words and right-click to highlight that selection; right-click a verse to bookmark or add a note. Menu → Bookmarks and Menu → Notes each open their own tab. Click a bookmark to open that verse beside the list; right-click for a new tab or Remove. Export notes… is on the Notes tab.
 - Last position, font size, and paragraphs are stored in `~/.config/bible-app/state.toml`
 - Colors follow the desktop. On Omarchy the window and the chapter use the current theme (`~/.local/state/omarchy/current/theme/colors.toml`) and update when that theme changes. `BIBLE_APP_THEME` can point at another `colors.toml`. Elsewhere the app follows the libadwaita light/dark scheme and accent color.
 
