@@ -2,10 +2,11 @@ use crate::layout::{self, ChapterLayout};
 use crate::nav::{self, Ref};
 use crate::user_db::{self, Bookmark, Note, VerseMarks};
 use crate::workspace::TabId;
+use adw::prelude::*;
 use bible_app_db::Book;
 use gtk::gio;
-use gtk::prelude::*;
-use relm4::gtk;
+use gtk::glib::object::IsA;
+use relm4::{adw, gtk};
 use rusqlite::Connection;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -42,6 +43,16 @@ pub struct NotesWidgets {
     pub syncing: Rc<Cell<bool>>,
     pub delete: gtk::Button,
     pub export: gtk::Button,
+    pub open_verse: gtk::Button,
+}
+
+pub struct NoteDialog {
+    pub dialog: adw::Dialog,
+    pub editor: gtk::TextView,
+    pub buffer: gtk::TextBuffer,
+    pub delete: gtk::Button,
+    pub editing: Option<Ref>,
+    pub syncing: Rc<Cell<bool>>,
 }
 
 pub fn install_tags(buffer: &gtk::TextBuffer) {
@@ -172,6 +183,8 @@ pub fn build_bookmarks(id: TabId, sender: relm4::Sender<super::app::Msg>) -> Boo
 
 pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWidgets {
     let list = list_box();
+    list.add_css_class("navigation-sidebar");
+    list.remove_css_class("boxed-list");
     let send_note = sender.clone();
     list.connect_row_activated(move |_, row| {
         send_note.emit(super::app::Msg::MarksNoteActivated(id, row.index()));
@@ -187,30 +200,75 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
 
     let list_scroll = gtk::ScrolledWindow::new();
     list_scroll.set_hexpand(true);
-    list_scroll.set_min_content_height(140);
     list_scroll.set_vexpand(true);
+    list_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     list_scroll.set_child(Some(&list));
 
-    let editor_title = gtk::Label::new(Some("Select a note to edit"));
+    let export = gtk::Button::from_icon_name("document-save-as-symbolic");
+    export.set_tooltip_text(Some("Export all notes as Markdown"));
+    export.add_css_class("flat");
+    export.set_sensitive(false);
+    export.update_property(&[gtk::accessible::Property::Label("Export notes")]);
+    let send_export = sender.clone();
+    export.connect_clicked(move |_| {
+        send_export.emit(super::app::Msg::ExportNotes);
+    });
+
+    let sidebar_title = gtk::Label::new(Some("Notes"));
+    sidebar_title.set_xalign(0.0);
+    sidebar_title.set_hexpand(true);
+    sidebar_title.add_css_class("heading");
+
+    let sidebar_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    sidebar_header.append(&sidebar_title);
+    sidebar_header.append(&export);
+
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    sidebar.set_margin_start(12);
+    sidebar.set_margin_end(8);
+    sidebar.set_margin_top(8);
+    sidebar.set_margin_bottom(8);
+    sidebar.set_width_request(240);
+    sidebar.append(&sidebar_header);
+    sidebar.append(&empty);
+    sidebar.append(&list_scroll);
+
+    let editor_title = gtk::Label::new(Some("Select a note"));
     editor_title.set_xalign(0.0);
+    editor_title.set_hexpand(true);
     editor_title.add_css_class("heading");
+    editor_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    let open_verse = gtk::Button::with_label("Open verse");
+    open_verse.set_sensitive(false);
+    open_verse.set_tooltip_text(Some("Open this verse in the chapter"));
+    let send_open = sender.clone();
+    open_verse.connect_clicked(move |_| {
+        send_open.emit(super::app::Msg::OpenEditingNote(id));
+    });
+
+    let delete = gtk::Button::with_label("Delete");
+    delete.add_css_class("destructive-action");
+    delete.set_sensitive(false);
+    let send_del = sender.clone();
+    delete.connect_clicked(move |btn| {
+        confirm_delete_note(btn, {
+            let send_del = send_del.clone();
+            move || send_del.emit(super::app::Msg::DeleteEditingNote(id))
+        });
+    });
+
+    let content_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    content_header.set_valign(gtk::Align::Center);
+    content_header.append(&editor_title);
+    content_header.append(&open_verse);
+    content_header.append(&delete);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-    let editor = gtk::TextView::new();
-    editor.set_buffer(Some(&buffer));
-    editor.set_wrap_mode(gtk::WrapMode::WordChar);
-    editor.set_left_margin(12);
-    editor.set_right_margin(12);
-    editor.set_top_margin(8);
-    editor.set_bottom_margin(8);
-    editor.set_hexpand(true);
-    editor.set_vexpand(true);
-    editor.set_sensitive(false);
-    editor.set_accessible_role(gtk::AccessibleRole::TextBox);
+    let editor = note_editor(&buffer);
     let editor_scroll = gtk::ScrolledWindow::new();
     editor_scroll.set_hexpand(true);
     editor_scroll.set_vexpand(true);
-    editor_scroll.set_min_content_height(160);
     editor_scroll.set_child(Some(&editor));
 
     let syncing = Rc::new(Cell::new(false));
@@ -223,33 +281,26 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
         send_save.emit(super::app::Msg::SaveNote(id));
     });
 
-    let delete = gtk::Button::with_label("Delete note");
-    delete.set_halign(gtk::Align::Start);
-    delete.set_sensitive(false);
-    let send_del = sender.clone();
-    delete.connect_clicked(move |_| {
-        send_del.emit(super::app::Msg::DeleteEditingNote(id));
-    });
+    let editor_pane = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    editor_pane.set_margin_start(8);
+    editor_pane.set_margin_end(12);
+    editor_pane.set_margin_top(8);
+    editor_pane.set_margin_bottom(8);
+    editor_pane.set_hexpand(true);
+    editor_pane.append(&content_header);
+    editor_pane.append(&editor_scroll);
 
-    let export = gtk::Button::with_label("Export notes…");
-    export.set_halign(gtk::Align::Start);
-    export.set_visible(false);
-    export.set_tooltip_text(Some("Save all notes as Markdown"));
-    let send_export = sender.clone();
-    export.connect_clicked(move |_| {
-        send_export.emit(super::app::Msg::ExportNotes);
-    });
-
-    let page = page_box();
-    page.append(&export);
-    page.append(&empty);
-    page.append(&list_scroll);
-    page.append(&editor_title);
-    page.append(&editor_scroll);
-    page.append(&delete);
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.set_start_child(Some(&sidebar));
+    paned.set_end_child(Some(&editor_pane));
+    paned.set_resize_start_child(false);
+    paned.set_shrink_start_child(false);
+    paned.set_position(280);
+    paned.set_hexpand(true);
+    paned.set_vexpand(true);
 
     NotesWidgets {
-        root: page.upcast(),
+        root: paned.upcast(),
         list,
         notes: Vec::new(),
         empty,
@@ -260,13 +311,68 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
         syncing,
         delete,
         export,
+        open_verse,
+    }
+}
+
+pub fn build_note_dialog(sender: relm4::Sender<super::app::Msg>) -> NoteDialog {
+    let dialog = adw::Dialog::new();
+    dialog.set_content_width(520);
+    dialog.set_content_height(380);
+
+    let delete = gtk::Button::with_label("Delete");
+    delete.add_css_class("destructive-action");
+    delete.set_sensitive(false);
+    let send_del = sender.clone();
+    delete.connect_clicked(move |btn| {
+        confirm_delete_note(btn, {
+            let send_del = send_del.clone();
+            move || send_del.emit(super::app::Msg::DeleteDialogNote)
+        });
+    });
+
+    let header = adw::HeaderBar::new();
+    header.pack_start(&delete);
+
+    let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    let editor = note_editor(&buffer);
+    editor.set_sensitive(true);
+    let editor_scroll = gtk::ScrolledWindow::new();
+    editor_scroll.set_hexpand(true);
+    editor_scroll.set_vexpand(true);
+    editor_scroll.set_child(Some(&editor));
+
+    let syncing = Rc::new(Cell::new(false));
+    let send_save = sender;
+    let sync_save = syncing.clone();
+    buffer.connect_changed(move |_| {
+        if sync_save.get() {
+            return;
+        }
+        send_save.emit(super::app::Msg::SaveDialogNote);
+    });
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&editor_scroll));
+    dialog.set_child(Some(&toolbar));
+
+    NoteDialog {
+        dialog,
+        editor,
+        buffer,
+        delete,
+        editing: None,
+        syncing,
     }
 }
 
 pub fn editor_text(widgets: &NotesWidgets) -> String {
-    let start = widgets.buffer.start_iter();
-    let end = widgets.buffer.end_iter();
-    widgets.buffer.text(&start, &end, false).to_string()
+    buffer_text(&widgets.buffer)
+}
+
+pub fn dialog_text(dialog: &NoteDialog) -> String {
+    buffer_text(&dialog.buffer)
 }
 
 pub fn fill_bookmarks(widgets: &mut BookmarksWidgets, user: &Connection, books: &[Book]) {
@@ -285,13 +391,11 @@ pub fn fill_bookmarks(widgets: &mut BookmarksWidgets, user: &Connection, books: 
 pub fn fill_notes(widgets: &mut NotesWidgets, user: &Connection, books: &[Book]) {
     widgets.syncing.set(true);
     widgets.notes = user_db::list_notes(user).unwrap_or_default();
-    refill_rows(&widgets.list, &widgets.notes, books, |note| {
-        (note.at(), note.text.as_str())
-    });
+    refill_note_rows(&widgets.list, &widgets.notes, books);
     let has_notes = !widgets.notes.is_empty();
     widgets.list.set_visible(has_notes);
     widgets.empty.set_visible(!has_notes);
-    widgets.export.set_visible(has_notes);
+    widgets.export.set_sensitive(has_notes);
 
     if let Some(at) = widgets.editing {
         if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
@@ -299,12 +403,14 @@ pub fn fill_notes(widgets: &mut NotesWidgets, user: &Connection, books: &[Book])
                 .list
                 .select_row(widgets.list.row_at_index(i as i32).as_ref());
             widgets.delete.set_sensitive(true);
+            widgets.open_verse.set_sensitive(true);
         } else {
             widgets.list.unselect_all();
             widgets.delete.set_sensitive(false);
         }
     } else {
         widgets.delete.set_sensitive(false);
+        widgets.open_verse.set_sensitive(false);
     }
     widgets.syncing.set(false);
 }
@@ -325,29 +431,27 @@ pub fn selected_bookmark(widgets: &BookmarksWidgets) -> Option<Ref> {
     bookmark_at(widgets, row.index())
 }
 
-pub fn edit_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
+pub fn show_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
     widgets.syncing.set(true);
     widgets.editing = Some(at);
     widgets.buffer.set_text(text);
-    widgets.syncing.set(false);
     widgets.editor_title.set_label(&nav::format_ref(books, at));
     widgets.editor.set_sensitive(true);
     widgets.delete.set_sensitive(!text.trim().is_empty());
+    widgets.open_verse.set_sensitive(true);
     if let Some(i) = widgets.notes.iter().position(|n| n.at() == at) {
-        widgets.syncing.set(true);
         widgets
             .list
             .select_row(widgets.list.row_at_index(i as i32).as_ref());
-        widgets.syncing.set(false);
     }
-    widgets.editor.grab_focus();
+    widgets.syncing.set(false);
 }
 
 pub fn load_note(widgets: &mut NotesWidgets, books: &[Book], at: Ref, text: &str) {
     if widgets.syncing.get() || widgets.editing == Some(at) {
         return;
     }
-    edit_note(widgets, books, at, text);
+    show_note(widgets, books, at, text);
 }
 
 pub fn clear_editor(widgets: &mut NotesWidgets) {
@@ -355,9 +459,72 @@ pub fn clear_editor(widgets: &mut NotesWidgets) {
     widgets.editing = None;
     widgets.buffer.set_text("");
     widgets.syncing.set(false);
-    widgets.editor_title.set_label("Select a note to edit");
+    widgets.editor_title.set_label("Select a note");
     widgets.editor.set_sensitive(false);
     widgets.delete.set_sensitive(false);
+    widgets.open_verse.set_sensitive(false);
+}
+
+pub fn open_note_dialog(
+    dialog: &mut NoteDialog,
+    books: &[Book],
+    at: Ref,
+    text: &str,
+    parent: Option<&impl IsA<gtk::Widget>>,
+) {
+    dialog.syncing.set(true);
+    dialog.editing = Some(at);
+    dialog.buffer.set_text(text);
+    dialog.syncing.set(false);
+    dialog.dialog.set_title(&nav::format_ref(books, at));
+    dialog.delete.set_sensitive(!text.trim().is_empty());
+    dialog.dialog.set_focus(Some(&dialog.editor));
+    dialog.dialog.present(parent);
+}
+
+pub fn clear_dialog(dialog: &mut NoteDialog) {
+    dialog.syncing.set(true);
+    dialog.editing = None;
+    dialog.buffer.set_text("");
+    dialog.syncing.set(false);
+    dialog.delete.set_sensitive(false);
+}
+
+fn note_editor(buffer: &gtk::TextBuffer) -> gtk::TextView {
+    let editor = gtk::TextView::new();
+    editor.set_buffer(Some(buffer));
+    editor.set_wrap_mode(gtk::WrapMode::WordChar);
+    editor.set_left_margin(12);
+    editor.set_right_margin(12);
+    editor.set_top_margin(8);
+    editor.set_bottom_margin(8);
+    editor.set_hexpand(true);
+    editor.set_vexpand(true);
+    editor.set_sensitive(false);
+    editor.set_accessible_role(gtk::AccessibleRole::TextBox);
+    editor.update_property(&[gtk::accessible::Property::Label("Note")]);
+    editor
+}
+
+fn buffer_text(buffer: &gtk::TextBuffer) -> String {
+    let start = buffer.start_iter();
+    let end = buffer.end_iter();
+    buffer.text(&start, &end, false).to_string()
+}
+
+fn confirm_delete_note(parent: &impl IsA<gtk::Widget>, on_delete: impl Fn() + 'static) {
+    let dlg = adw::AlertDialog::new(Some("Delete this note?"), Some("This cannot be undone."));
+    dlg.add_response("cancel", "Cancel");
+    dlg.add_response("delete", "Delete");
+    dlg.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dlg.set_default_response(Some("cancel"));
+    dlg.set_close_response("cancel");
+    dlg.connect_response(None, move |_, response| {
+        if response == "delete" {
+            on_delete();
+        }
+    });
+    dlg.present(Some(parent));
 }
 
 fn list_box() -> gtk::ListBox {
@@ -389,6 +556,15 @@ fn page_box() -> gtk::Box {
     page
 }
 
+fn refill_note_rows(list: &gtk::ListBox, notes: &[Note], books: &[Book]) {
+    while let Some(child) = list.row_at_index(0) {
+        list.remove(&child);
+    }
+    for note in notes {
+        list.append(&note_row(note.at(), books, &note.text));
+    }
+}
+
 fn refill_rows<T>(
     list: &gtk::ListBox,
     items: &[T],
@@ -402,6 +578,35 @@ fn refill_rows<T>(
         let (at, extra) = row(item);
         list.append(&ref_row(at, books, extra));
     }
+}
+
+fn note_row(at: Ref, books: &[Book], extra: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    box_.set_margin_start(10);
+    box_.set_margin_end(10);
+    box_.set_margin_top(8);
+    box_.set_margin_bottom(8);
+
+    let title = gtk::Label::new(Some(&nav::format_ref(books, at)));
+    title.set_xalign(0.0);
+    title.add_css_class("heading");
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    box_.append(&title);
+
+    let snippet = snippet(extra);
+    if !snippet.is_empty() {
+        let sub = gtk::Label::new(Some(&snippet));
+        sub.set_xalign(0.0);
+        sub.add_css_class("dim-label");
+        sub.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        box_.append(&sub);
+    }
+
+    row.set_child(Some(&box_));
+    row.set_activatable(true);
+    row.set_tooltip_text(Some(&nav::format_ref(books, at)));
+    row
 }
 
 fn ref_row(at: Ref, books: &[Book], extra: &str) -> gtk::ListBoxRow {
@@ -444,5 +649,28 @@ fn snippet(text: &str) -> String {
         format!("{}…", line.chars().take(MAX).collect::<String>())
     } else {
         line.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snippet;
+
+    #[test]
+    fn snippet_keeps_a_short_first_line() {
+        assert_eq!(snippet("Lamp, not floodlight."), "Lamp, not floodlight.");
+    }
+
+    #[test]
+    fn snippet_truncates_a_long_first_line() {
+        let long = "a".repeat(90);
+        let out = snippet(&long);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 81);
+    }
+
+    #[test]
+    fn snippet_uses_only_the_first_line() {
+        assert_eq!(snippet("one\ntwo"), "one");
     }
 }

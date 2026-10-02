@@ -87,6 +87,7 @@ pub struct App {
     actions: gio::SimpleActionGroup,
     msg_tx: relm4::Sender<Msg>,
     copy_offset: Rc<Cell<i32>>,
+    note_dialog: marks::NoteDialog,
 }
 
 #[derive(Clone, Debug)]
@@ -182,8 +183,11 @@ pub enum Msg {
     MarksBookmarkSelected(TabId),
     MarksNoteActivated(TabId, i32),
     MarksNoteSelected(TabId, i32),
+    OpenEditingNote(TabId),
     SaveNote(TabId),
+    SaveDialogNote,
     DeleteEditingNote(TabId),
+    DeleteDialogNote,
     RemoveSelectedBookmark(TabId),
     ToggleBookmark,
     SetHighlight(String),
@@ -505,6 +509,7 @@ impl SimpleComponent for App {
             actions: gio::SimpleActionGroup::new(),
             msg_tx: sender.input_sender().clone(),
             copy_offset,
+            note_dialog: marks::build_note_dialog(sender.input_sender().clone()),
         };
         model.apply_font();
         picker::install_css();
@@ -979,6 +984,11 @@ impl SimpleComponent for App {
                     marks::load_note(w, &self.books, at, &text);
                 }
             }
+            Msg::OpenEditingNote(id) => {
+                if let Some(at) = self.notes_widgets(id).and_then(|w| w.editing) {
+                    self.go(at, true);
+                }
+            }
             Msg::SaveNote(id) => {
                 let Some(TabContent::Notes(widgets)) = self.hosted.get(&id).map(|h| &h.content)
                 else {
@@ -989,28 +999,35 @@ impl SimpleComponent for App {
                 }
                 let Some(at) = widgets.editing else { return };
                 let text = marks::editor_text(widgets);
-                let was_present = widgets.notes.iter().any(|n| n.at() == at);
-                let now_present = !text.trim().is_empty();
-                if let Some(user) = &self.user {
-                    let _ = user_db::upsert_note(user, at, &text);
-                }
-                self.reload_user_marks(was_present != now_present);
+                self.save_note_text(at, &text);
                 if let Some(TabContent::Notes(w)) = self.hosted.get(&id).map(|h| &h.content) {
-                    w.delete.set_sensitive(now_present);
+                    w.delete.set_sensitive(!text.trim().is_empty());
                 }
+            }
+            Msg::SaveDialogNote => {
+                if self.note_dialog.syncing.get() {
+                    return;
+                }
+                let Some(at) = self.note_dialog.editing else {
+                    return;
+                };
+                let text = marks::dialog_text(&self.note_dialog);
+                self.save_note_text(at, &text);
+                self.note_dialog
+                    .delete
+                    .set_sensitive(!text.trim().is_empty());
             }
             Msg::DeleteEditingNote(id) => {
                 let Some(at) = self.notes_widgets(id).and_then(|w| w.editing) else {
                     return;
                 };
-                if let Some(user) = &self.user {
-                    let _ = user_db::delete_note(user, at);
-                }
-                if let Some(TabContent::Notes(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
-                {
-                    marks::clear_editor(w);
-                }
-                self.reload_user_marks(true);
+                self.delete_note_at(at);
+            }
+            Msg::DeleteDialogNote => {
+                let Some(at) = self.note_dialog.editing else {
+                    return;
+                };
+                self.delete_note_at(at);
             }
             Msg::RemoveSelectedBookmark(id) => {
                 let Some(at) = self
@@ -3065,18 +3082,74 @@ impl App {
     }
 
     fn add_note(&mut self) {
-        let Some(id) = self.ensure_notes() else {
+        if self.error.is_some() || self.user.is_none() {
             return;
-        };
+        }
         let at = self.at();
         let text = self
             .user
             .as_ref()
             .and_then(|u| user_db::get_note(u, at).ok().flatten())
             .unwrap_or_default();
-        if let Some(TabContent::Notes(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
-            marks::edit_note(w, &self.books, at, &text);
+        let parent = self.note_dialog_parent();
+        marks::open_note_dialog(
+            &mut self.note_dialog,
+            &self.books,
+            at,
+            &text,
+            parent.as_ref(),
+        );
+    }
+
+    fn note_dialog_parent(&self) -> Option<gtk::Widget> {
+        self.focused_passage()
+            .and_then(|p| p.view.root())
+            .map(|root| root.upcast::<gtk::Widget>())
+            .or_else(|| {
+                self.shell
+                    .as_ref()
+                    .map(|s| s.host.view.clone().upcast::<gtk::Widget>())
+            })
+    }
+
+    fn save_note_text(&mut self, at: Ref, text: &str) {
+        let was_present = self.note_is_listed(at);
+        let now_present = !text.trim().is_empty();
+        if let Some(user) = &self.user {
+            let _ = user_db::upsert_note(user, at, text);
         }
+        self.reload_user_marks(was_present != now_present);
+    }
+
+    fn note_is_listed(&self, at: Ref) -> bool {
+        self.user
+            .as_ref()
+            .and_then(|u| user_db::get_note(u, at).ok().flatten())
+            .is_some()
+    }
+
+    fn delete_note_at(&mut self, at: Ref) {
+        if let Some(user) = &self.user {
+            let _ = user_db::delete_note(user, at);
+        }
+        if self.note_dialog.editing == Some(at) {
+            marks::clear_dialog(&mut self.note_dialog);
+            let _ = self.note_dialog.dialog.close();
+        }
+        let ids: Vec<TabId> = self
+            .hosted
+            .iter()
+            .filter_map(|(id, h)| match &h.content {
+                TabContent::Notes(w) if w.editing == Some(at) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            if let Some(TabContent::Notes(w)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
+                marks::clear_editor(w);
+            }
+        }
+        self.reload_user_marks(true);
     }
 
     fn show_verse_menu(&mut self, id: TabId, offset: i32, x: i32, y: i32) {
