@@ -2,6 +2,7 @@ use crate::cite;
 use crate::occurrences;
 use adw::prelude::*;
 use bible_app_db::{Book, ClickedDict, DictEntry, StrongDef};
+use gtk::gio;
 use gtk::glib;
 use relm4::{adw, gtk};
 
@@ -312,16 +313,7 @@ fn strongs_page(
             body.append(&label);
         }
         for see_code in see {
-            let link = gtk::Label::new(None);
-            link.set_markup(&format!("<a href=\"{see_code}\">See {see_code}</a>"));
-            link.set_xalign(0.0);
-            link.set_use_markup(true);
-            let send = sender.clone();
-            link.connect_activate_link(move |_, uri| {
-                send.emit(super::app::Msg::OpenStrongsCode(uri.to_string()));
-                glib::Propagation::Stop
-            });
-            body.append(&link);
+            body.append(&see_link(&see_code, sender.clone()));
         }
         body.append(&library_button(
             sender.clone(),
@@ -332,6 +324,56 @@ fn strongs_page(
         body.append(&occurrences_button(sender.clone(), &code, count));
     }
     body
+}
+
+fn see_link(code: &str, sender: relm4::Sender<super::app::Msg>) -> gtk::Label {
+    let link = gtk::Label::new(None);
+    link.set_markup(&format!("<a href=\"{code}\">See {code}</a>"));
+    link.set_xalign(0.0);
+    link.set_use_markup(true);
+    let send = sender.clone();
+    link.connect_activate_link(move |_, uri| {
+        send.emit(super::app::Msg::OpenStrongsCode(uri.to_string()));
+        glib::Propagation::Stop
+    });
+    attach_see_menu(&link, code, sender);
+    link
+}
+
+fn attach_see_menu(
+    widget: &impl gtk::prelude::IsA<gtk::Widget>,
+    code: &str,
+    sender: relm4::Sender<super::app::Msg>,
+) {
+    let model = gio::Menu::new();
+    model.append(Some("Open in new tab"), Some("see.tab"));
+    let menu = gtk::PopoverMenu::from_model(Some(&model));
+    menu.set_parent(widget);
+    menu.set_has_arrow(false);
+    menu.set_halign(gtk::Align::Start);
+
+    let group = gio::SimpleActionGroup::new();
+    let tab = gio::SimpleAction::new("tab", None);
+    let code = code.to_string();
+    tab.connect_activate(move |_, _| {
+        sender.emit(super::app::Msg::OpenStrongsCodeTab(code.clone()));
+    });
+    group.add_action(&tab);
+    menu.insert_action_group("see", Some(&group));
+
+    let right = gtk::GestureClick::new();
+    right.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let menu_click = menu.clone();
+    right.connect_pressed(move |gesture, _, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        menu_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu_click.popup();
+    });
+    widget.add_controller(right);
+    widget.connect_destroy(move |_| {
+        menu.unparent();
+    });
 }
 
 fn occurrences_button(
