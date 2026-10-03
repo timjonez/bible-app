@@ -1,10 +1,10 @@
+use crate::cite;
 use crate::history::History;
 use crate::layout;
 use crate::nav::{self, Ref};
 use crate::picker;
 use crate::shell;
-use crate::theme;
-use crate::tsk_parse::{self, Citation};
+use crate::tsk_parse::Citation;
 use crate::workspace::TabId;
 use adw::prelude::*;
 use bible_app_db::{Book, Resource};
@@ -54,9 +54,7 @@ pub fn build() -> TskWidgets {
     heading.set_pixels_above_lines(16);
     heading.set_pixels_below_lines(4);
     buffer.tag_table().add(&heading);
-    let cite = gtk::TextTag::new(Some("cite"));
-    buffer.tag_table().add(&cite);
-    cite.set_underline(gtk::pango::Underline::Single);
+    cite::add_tag(&buffer);
 
     let view = gtk::TextView::new();
     view.set_buffer(Some(&buffer));
@@ -71,14 +69,7 @@ pub fn build() -> TskWidgets {
     view.set_vexpand(true);
     view.set_accessible_role(gtk::AccessibleRole::Document);
 
-    let menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
-    menu.set_parent(&view);
-    menu.set_has_arrow(false);
-    menu.set_halign(gtk::Align::Start);
-    let menu_on_destroy = menu.clone();
-    view.connect_destroy(move |_| {
-        menu_on_destroy.unparent();
-    });
+    let menu = cite::menu_for(&view);
 
     let text_scroll = gtk::ScrolledWindow::new();
     text_scroll.set_hexpand(true);
@@ -147,75 +138,7 @@ pub fn wire(
         .forward
         .connect_clicked(move |_| tx.emit(super::app::Msg::StudyForward(id)));
 
-    let view = widgets.view.clone();
-    let links = widgets.links.clone();
-    let click = gtk::GestureClick::new();
-    click.set_button(1);
-    let tx = sender.clone();
-    click.connect_pressed(move |gesture, _, x, y| {
-        let Some(offset) = offset_at(&view, x, y) else {
-            return;
-        };
-        if !hit(&links, offset) {
-            return;
-        }
-        gesture.set_state(gtk::EventSequenceState::Claimed);
-        tx.emit(super::app::Msg::ClickCite { id, offset });
-    });
-    widgets.view.add_controller(click);
-
-    let view = widgets.view.clone();
-    let links = widgets.links.clone();
-    let right = gtk::GestureClick::new();
-    right.set_button(gtk::gdk::BUTTON_SECONDARY);
-    right.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let tx = sender;
-    right.connect_pressed(move |gesture, _, x, y| {
-        let Some(offset) = offset_at(&view, x, y) else {
-            return;
-        };
-        if !hit(&links, offset) {
-            return;
-        }
-        gesture.set_state(gtk::EventSequenceState::Claimed);
-        tx.emit(super::app::Msg::CiteMenu {
-            id,
-            offset,
-            x: x as i32,
-            y: y as i32,
-        });
-    });
-    widgets.view.add_controller(right);
-
-    let view = widgets.view.clone();
-    let links = widgets.links.clone();
-    let motion = gtk::EventControllerMotion::new();
-    motion.connect_motion(move |_, x, y| {
-        let over = offset_at(&view, x, y).is_some_and(|offset| hit(&links, offset));
-        let cursor = if over {
-            gtk::gdk::Cursor::from_name("pointer", None)
-        } else {
-            None
-        };
-        view.set_cursor(cursor.as_ref());
-    });
-    let view = widgets.view.clone();
-    motion.connect_leave(move |_| {
-        view.set_cursor(None);
-    });
-    widgets.view.add_controller(motion);
-}
-
-fn offset_at(view: &gtk::TextView, x: f64, y: f64) -> Option<i32> {
-    let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-    view.iter_at_location(bx, by).map(|iter| iter.offset())
-}
-
-fn hit(links: &RefCell<Vec<Citation>>, offset: i32) -> bool {
-    links
-        .borrow()
-        .iter()
-        .any(|link| offset >= link.start && offset < link.end)
+    cite::wire(&widgets.view, widgets.links.clone(), id, sender);
 }
 
 pub fn show(widgets: &TskWidgets, conn: &Connection, books: &[Book], at: Ref) {
@@ -265,29 +188,9 @@ fn paint(widgets: &TskWidgets, books: &[Book], rows: &[Resource], at: Ref) {
             widgets.buffer.apply_tag(&tag, &s, &e);
         }
     }
-    let mut links = Vec::new();
-    for ((_, body), (head_at, head_len)) in borrowed
-        .iter()
-        .zip(stacked.heading_at.iter().zip(&stacked.heading_len))
-    {
-        let body_at = head_at + head_len + 2;
-        for link in tsk_parse::citations(body.trim(), books) {
-            links.push(Citation {
-                start: body_at + link.start,
-                end: body_at + link.end,
-                at: link.at,
-            });
-        }
-    }
-    if let Some(tag) = widgets.buffer.tag_table().lookup("cite") {
-        for link in &links {
-            let s = widgets.buffer.iter_at_offset(link.start);
-            let e = widgets.buffer.iter_at_offset(link.end);
-            widgets.buffer.apply_tag(&tag, &s, &e);
-        }
-    }
-    theme::paint_buffer(&widgets.buffer);
-    widgets.links.replace(links);
+    widgets
+        .links
+        .replace(cite::relink(&widgets.buffer, &stacked.text, books));
     widgets.sections.replace(
         rows.iter()
             .map(|row| row.verse)
@@ -309,46 +212,6 @@ fn scroll_to(widgets: &TskWidgets, verse: u8) {
         let mut iter = buffer.iter_at_offset(offset);
         view.scroll_to_iter(&mut iter, 0.05, true, 0.0, 0.12);
     });
-}
-
-pub fn cite_at(widgets: &TskWidgets, offset: i32) -> Option<Ref> {
-    widgets
-        .links
-        .borrow()
-        .iter()
-        .find(|link| offset >= link.start && offset < link.end)
-        .map(|link| link.at)
-}
-
-pub fn popup_cite_menu(
-    widgets: &TskWidgets,
-    x: i32,
-    y: i32,
-    at: Ref,
-    id: TabId,
-    sender: relm4::Sender<super::app::Msg>,
-) {
-    let menu = gio::Menu::new();
-    menu.append(Some("Open in new tab"), Some("cite.tab"));
-    menu.append(Some("Open in new window"), Some("cite.window"));
-    let group = gio::SimpleActionGroup::new();
-    let tab = gio::SimpleAction::new("tab", None);
-    let tx = sender.clone();
-    tab.connect_activate(move |_, _| {
-        tx.emit(super::app::Msg::OpenCiteTab { id, at });
-    });
-    let window = gio::SimpleAction::new("window", None);
-    window.connect_activate(move |_, _| {
-        sender.emit(super::app::Msg::OpenCiteWindow { id, at });
-    });
-    group.add_action(&tab);
-    group.add_action(&window);
-    widgets.menu.insert_action_group("cite", Some(&group));
-    widgets.menu.set_menu_model(Some(&menu));
-    widgets
-        .menu
-        .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
-    widgets.menu.popup();
 }
 
 pub fn create_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {

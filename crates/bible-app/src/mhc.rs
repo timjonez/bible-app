@@ -1,7 +1,9 @@
+use crate::cite;
 use crate::history::History;
 use crate::nav::{self, Ref};
 use crate::picker;
 use crate::shell;
+use crate::tsk_parse::Citation;
 use crate::workspace::TabId;
 use adw::prelude::*;
 use bible_app_db::{Book, Resource};
@@ -21,6 +23,10 @@ pub struct MhcWidgets {
     pub forward: gtk::Button,
     pub buffer: gtk::TextBuffer,
     pub view: gtk::TextView,
+    pub menu: gtk::PopoverMenu,
+    pub links: Rc<RefCell<Vec<Citation>>>,
+    /// Passage opened from a citation when this view could not sit beside one.
+    pub companion: Cell<Option<TabId>>,
     pub syncing: Rc<Cell<bool>>,
     pub history: RefCell<History<Ref>>,
     pub placed: Cell<bool>,
@@ -46,6 +52,7 @@ pub fn build() -> MhcWidgets {
     heading.set_pixels_above_lines(16);
     heading.set_pixels_below_lines(4);
     buffer.tag_table().add(&heading);
+    cite::add_tag(&buffer);
 
     let view = gtk::TextView::new();
     view.set_buffer(Some(&buffer));
@@ -66,6 +73,8 @@ pub fn build() -> MhcWidgets {
     scroll.set_child(Some(&view));
 
     let page = shell::bar_page(&bar.row, &scroll);
+    let menu = cite::menu_for(&view);
+    let links = Rc::new(RefCell::new(Vec::new()));
     MhcWidgets {
         root: page.upcast(),
         book,
@@ -76,6 +85,9 @@ pub fn build() -> MhcWidgets {
         forward: bar.forward,
         buffer,
         view,
+        menu,
+        links,
+        companion: Cell::new(None),
         syncing: Rc::new(Cell::new(false)),
         history: RefCell::new(History::new(Ref {
             book: 1,
@@ -118,10 +130,11 @@ pub fn wire(
     widgets
         .back
         .connect_clicked(move |_| tx.emit(super::app::Msg::StudyBack(id)));
-    let tx = sender;
+    let tx = sender.clone();
     widgets
         .forward
         .connect_clicked(move |_| tx.emit(super::app::Msg::StudyForward(id)));
+    cite::wire(&widgets.view, widgets.links.clone(), id, sender);
 }
 
 pub fn show(widgets: &MhcWidgets, conn: &Connection, books: &[Book], at: Ref) {
@@ -138,6 +151,7 @@ pub fn show(widgets: &MhcWidgets, conn: &Connection, books: &[Book], at: Ref) {
 fn paint(widgets: &MhcWidgets, books: &[Book], rows: &[Resource], at: Ref) {
     if rows.is_empty() {
         widgets.sections.borrow_mut().clear();
+        widgets.links.borrow_mut().clear();
         widgets.buffer.set_text(&format!(
             "No Matthew Henry on {}.",
             nav::format_chapter(books, at.book, at.chapter)
@@ -170,6 +184,9 @@ fn paint(widgets: &MhcWidgets, books: &[Book], rows: &[Resource], at: Ref) {
             widgets.buffer.apply_tag(&tag, &s, &e);
         }
     }
+    widgets
+        .links
+        .replace(cite::relink(&widgets.buffer, &stacked.text, books));
     widgets.sections.replace(
         rows.iter()
             .map(|row| row.verse)

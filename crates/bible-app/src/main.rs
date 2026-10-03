@@ -1,4 +1,5 @@
 mod app;
+mod cite;
 mod config;
 mod dict;
 mod history;

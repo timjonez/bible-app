@@ -31,6 +31,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
 - TSK superscripts on a matched phrase open that phrase’s destinations in a popover: references on the left, the selected verse on the right. Hover previews the heading and a short dest list. Right-click a reference to Open it in the current passage or Open in new tab
 - A verse number is a link when a Matthew Henry comment starts there; click it to open a Matthew Henry tab
+- Bible references in Matthew Henry, the Treasury, and library articles are links. Click one to open that verse beside the study tab; right-click for a new tab or window. Word-click dictionary pages use the same links and jump in the current passage
 - Menu opens Matthew Henry, the Treasury of Scripture Knowledge, bookmarks, notes, or a lexicon, dictionary, or topic as a new tab in the current tab bar, even if one of that kind is already open. Verse clicks and Search still open a split when the window has none. Split stays the icon on a tab
 - Menu → Lexicon → Brown-Driver-Briggs or Thayer; type a Strong’s code such as `H430` or `G26`
 - Menu → Dictionary → Webster’s 1828, Easton, or another dictionary; type a headword in the search bar

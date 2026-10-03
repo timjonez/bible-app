@@ -1,6 +1,7 @@
+use crate::cite;
 use crate::occurrences;
 use adw::prelude::*;
-use bible_app_db::{ClickedDict, DictEntry, StrongDef};
+use bible_app_db::{Book, ClickedDict, DictEntry, StrongDef};
 use gtk::glib;
 use relm4::{adw, gtk};
 
@@ -15,6 +16,7 @@ pub fn create(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
     popover
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn present(
     popover: &gtk::Popover,
     view: &gtk::TextView,
@@ -22,6 +24,7 @@ pub fn present(
     defs: &[StrongDef],
     counts: &[usize],
     dict: &ClickedDict,
+    books: &[Book],
     sender: relm4::Sender<super::app::Msg>,
 ) {
     let tabs = source_tabs(!defs.is_empty(), dict);
@@ -33,19 +36,23 @@ pub fn present(
     stack.set_vhomogeneous(false);
     if !defs.is_empty() {
         stack.add_titled(
-            &strongs_page(defs, counts, sender.clone()),
+            &strongs_page(defs, counts, books, sender.clone()),
             Some("strongs"),
             "Strong's",
         );
     }
     for (module, entries) in group_lexicons(&dict.lexicons) {
         let name = lexicon_tab_label(module);
-        stack.add_titled(&lexicon_page(&entries, sender.clone()), Some(module), &name);
+        stack.add_titled(
+            &lexicon_page(&entries, books, sender.clone()),
+            Some(module),
+            &name,
+        );
     }
     for entry in &dict.bible {
         let name = dict_tab_label(entry);
         stack.add_titled(
-            &dict_page(entry, sender.clone()),
+            &dict_page(entry, books, sender.clone()),
             Some(&entry.module),
             &name,
         );
@@ -53,7 +60,7 @@ pub fn present(
     for entry in &dict.topics {
         let name = dict_tab_label(entry);
         stack.add_titled(
-            &dict_page(entry, sender.clone()),
+            &dict_page(entry, books, sender.clone()),
             Some(&entry.module),
             &name,
         );
@@ -61,7 +68,7 @@ pub fn present(
     if let Some(entry) = &dict.english {
         let name = dict_tab_label(entry);
         stack.add_titled(
-            &dict_page(entry, sender.clone()),
+            &dict_page(entry, books, sender.clone()),
             Some(&entry.module),
             &name,
         );
@@ -258,6 +265,7 @@ fn library_button(
 fn strongs_page(
     defs: &[StrongDef],
     counts: &[usize],
+    books: &[Book],
     sender: relm4::Sender<super::app::Msg>,
 ) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -299,11 +307,8 @@ fn strongs_page(
 
         let (text, see) = split_see_also(&def.definition, &def.lang);
         if !text.is_empty() {
-            let label = gtk::Label::new(Some(&text));
-            label.set_wrap(true);
+            let label = cite::linked_label(&text, books, sender.clone());
             label.set_max_width_chars(44);
-            label.set_xalign(0.0);
-            label.set_selectable(true);
             body.append(&label);
         }
         for see_code in see {
@@ -345,7 +350,11 @@ fn occurrences_button(
     btn
 }
 
-fn lexicon_page(entries: &[&DictEntry], sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
+fn lexicon_page(
+    entries: &[&DictEntry],
+    books: &[Book],
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_start(14);
     body.set_margin_end(14);
@@ -357,7 +366,7 @@ fn lexicon_page(entries: &[&DictEntry], sender: relm4::Sender<super::app::Msg>) 
         if i > 0 {
             body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
-        append_dict_entry(&body, entry);
+        append_dict_entry(&body, entry, books, sender.clone());
         body.append(&library_button(
             sender.clone(),
             &entry.module,
@@ -367,7 +376,11 @@ fn lexicon_page(entries: &[&DictEntry], sender: relm4::Sender<super::app::Msg>) 
     body
 }
 
-fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
+fn dict_page(
+    entry: &DictEntry,
+    books: &[Book],
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.set_margin_start(14);
     body.set_margin_end(14);
@@ -375,12 +388,17 @@ fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::
     body.set_margin_bottom(12);
     body.set_width_request(300);
 
-    append_dict_entry(&body, entry);
+    append_dict_entry(&body, entry, books, sender.clone());
     body.append(&library_button(sender, &entry.module, &entry.headword));
     body
 }
 
-fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
+fn append_dict_entry(
+    body: &gtk::Box,
+    entry: &DictEntry,
+    books: &[Book],
+    sender: relm4::Sender<super::app::Msg>,
+) {
     let source = gtk::Label::new(Some(&entry.title));
     source.add_css_class("dim-label");
     source.add_css_class("caption");
@@ -395,13 +413,9 @@ fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
     head.set_selectable(true);
     body.append(&head);
 
-    let text = gtk::Label::new(Some(&entry.text));
-    text.set_wrap(true);
-    text.set_wrap_mode(gtk::pango::WrapMode::Word);
+    let text = cite::linked_label(&entry.text, books, sender);
     text.set_width_chars(40);
     text.set_max_width_chars(44);
-    text.set_xalign(0.0);
-    text.set_selectable(true);
     body.append(&text);
 }
 
