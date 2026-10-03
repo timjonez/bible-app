@@ -924,9 +924,10 @@ impl SimpleComponent for App {
                 let Some(p) = self.focused_passage() else {
                     return;
                 };
-                let verse =
-                    layout::verse_at_offset(&p.layout.verse_start, offset).unwrap_or(p.at.verse);
-                self.copy_verse_range(p.at, verse, verse);
+                let at = p.at;
+                let (from, to) =
+                    layout::copy_verse_bounds(&p.layout.verse_start, p.menu_sel, offset, at.verse);
+                self.copy_verse_range(at, from, to);
             }
             Msg::FontSmaller => {
                 self.font_size = layout::smaller_font(self.font_size);

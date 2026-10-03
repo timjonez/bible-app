@@ -59,7 +59,7 @@ On first launch the app unpacks `data/bible-app.sqlite.gz` to `~/.local/share/bi
 | Alt+Left / Alt+Right | Previous / next chapter (or dictionary entry) |
 | Alt+Shift+Left / Alt+Shift+Right | History back / forward |
 | Ctrl+- / Ctrl++ | Smaller / larger text |
-| Ctrl+C | Copy the selected verse with citation |
+| Ctrl+C | Copy the selection, or the current verse, with citation |
 
 Mouse back/forward buttons also walk history. In Search, arrow keys preview a hit, Enter opens it and closes Search, Esc returns to the previous passage.
 

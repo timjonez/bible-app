@@ -961,6 +961,22 @@ pub fn verses_in_selection(verse_start: &[(u8, i32)], start: i32, end: i32) -> O
     Some(if v1 <= v2 { (v1, v2) } else { (v2, v1) })
 }
 
+/// Verse range to copy from a captured selection, or the verse at `offset`.
+pub fn copy_verse_bounds(
+    verse_start: &[(u8, i32)],
+    sel: Option<(i32, i32)>,
+    offset: i32,
+    fallback: u8,
+) -> (u8, u8) {
+    if let Some((start, end)) = sel {
+        if let Some(range) = verses_in_selection(verse_start, start, end) {
+            return range;
+        }
+    }
+    let verse = verse_at_offset(verse_start, offset).unwrap_or(fallback);
+    (verse, verse)
+}
+
 /// Current-verse (or range) copy with a `Book chapter:verse` citation and `KJV`.
 pub fn copy_verses(books: &[Book], verses: &[Verse]) -> String {
     if verses.is_empty() {
@@ -1873,6 +1889,29 @@ God creates heaven and earth.
             verses_in_selection(&layout.verse_start, s3, s2),
             None,
             "inverted bounds are empty"
+        );
+    }
+
+    #[test]
+    fn copy_verse_bounds_uses_selection_then_click() {
+        let verses = vec![
+            verse(1, "First verse", true),
+            verse(2, "Second verse", false),
+            verse(3, "Third verse", false),
+        ];
+        let layout = layout_chapter(&verses, &books(), &[], &[], &[], &[], verse_opts());
+        let s1 = layout.verse_start[0].1;
+        let s2 = layout.verse_start[1].1;
+        let s3 = layout.verse_start[2].1;
+        assert_eq!(
+            copy_verse_bounds(&layout.verse_start, Some((s1, s3)), s2, 2),
+            (1, 2)
+        );
+        assert_eq!(copy_verse_bounds(&layout.verse_start, None, s3, 1), (3, 3));
+        assert_eq!(
+            copy_verse_bounds(&layout.verse_start, Some((s1, s1)), s2, 1),
+            (2, 2),
+            "empty selection falls back to the click"
         );
     }
 
