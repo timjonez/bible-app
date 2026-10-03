@@ -233,6 +233,15 @@ impl Workspace {
             .map(|partner| partner.id)
     }
 
+    /// The library on the other side of `id`'s split, when that side is a library.
+    pub fn library_beside(&self, id: TabId) -> Option<TabId> {
+        let tab = self.tab(id)?;
+        let partner = tab.host.or_else(|| self.guest_of(id))?;
+        self.tab(partner)
+            .filter(|partner| matches!(partner.kind, TabKind::Library { .. }))
+            .map(|partner| partner.id)
+    }
+
     /// False once this window already has a split. The split belongs to one tab.
     pub fn can_split(&self, id: TabId) -> bool {
         let Some(tab) = self.tab(id) else {
@@ -1198,6 +1207,17 @@ mod tests {
         let guest = ws.open_passage_beside(tsk, r(19, 23, 1)).id;
         assert_eq!(ws.passage_beside(tsk), Some(guest));
         assert_eq!(ws.tab(guest).unwrap().host, Some(tsk));
+    }
+
+    #[test]
+    fn library_beside_finds_the_library_on_either_side() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let lib = ws.open_library("Strongs".into(), Some("H1".into())).id;
+        assert!(ws.move_beside(lib));
+        assert_eq!(ws.library_beside(passage), Some(lib));
+        assert_eq!(ws.library_beside(lib), None);
+        assert_eq!(ws.passage_beside(lib), Some(passage));
     }
 
     #[test]

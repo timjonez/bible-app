@@ -149,6 +149,7 @@ pub enum Msg {
         at: Ref,
     },
     OpenStrongsCode(String),
+    OpenStrongsCodeTab(String),
     ClickWord {
         id: TabId,
         offset: i32,
@@ -793,6 +794,9 @@ impl SimpleComponent for App {
             Msg::OpenCiteWindow { id, at } => self.open_cite_window(id, at),
             Msg::OpenStrongsCode(code) => {
                 self.open_strongs_code(&code);
+            }
+            Msg::OpenStrongsCodeTab(code) => {
+                self.open_strongs_code_tab(&code);
             }
             Msg::ClickWord { id, offset } => {
                 self.focus_tab(id);
@@ -2344,32 +2348,42 @@ impl App {
     }
 
     fn open_strongs_code(&mut self, code: &str) {
-        let Some(id) = self.workspace.focused_passage_id() else {
-            return;
-        };
-        let Some(conn) = &self.conn else { return };
-        let Some(def) = bible_app_db::lookup_strongs(conn, code).ok().flatten() else {
-            return;
-        };
-        let counts = strongs_counts(conn, std::slice::from_ref(&def));
-        let dict = bible_app_db::ClickedDict {
-            lexicons: bible_app_db::lookup_lexicons_for_defs(conn, std::slice::from_ref(&def))
-                .unwrap_or_default(),
-            ..Default::default()
-        };
-        if let Some(p) = self.passage(id) {
-            p.tsk_popover.popdown();
-            strongs::present(
-                &p.strongs_popover,
-                &p.view,
-                p.strongs_at,
-                &[def],
-                &counts,
-                &dict,
-                &self.books,
-                self.msg_tx.clone(),
-            );
+        self.popdown_passage_popovers();
+        if let Some(from) = self.workspace.focused_passage_id() {
+            if let Some(id) = self.strongs_library_beside(from) {
+                self.show_library_headword(id, bible_app_db::STRONGS_MODULE, code);
+                return;
+            }
         }
+        let _ = self.open_library(bible_app_db::STRONGS_MODULE, Some(code));
+    }
+
+    fn open_strongs_code_tab(&mut self, code: &str) {
+        self.popdown_passage_popovers();
+        let _ =
+            self.in_current_tabs(|app| app.open_library(bible_app_db::STRONGS_MODULE, Some(code)));
+    }
+
+    fn strongs_library_beside(&self, id: TabId) -> Option<TabId> {
+        let partner = self.workspace.library_beside(id)?;
+        match &self.workspace.tab(partner)?.kind {
+            TabKind::Library { module, .. } if module == bible_app_db::STRONGS_MODULE => {
+                Some(partner)
+            }
+            _ => None,
+        }
+    }
+
+    fn show_library_headword(&mut self, id: TabId, module: &str, headword: &str) {
+        if let Some(TabContent::Library(widgets)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
+        {
+            if let Some(conn) = self.conn.as_ref() {
+                dict::open_headword(widgets, conn, module, headword);
+            }
+        }
+        self.workspace
+            .set_library_headword(id, Some(headword.to_string()));
+        self.sync_tab_title(id);
     }
 
     fn present_study(&mut self, id: TabId, at: Ref, memory: PlaceMemory) {
