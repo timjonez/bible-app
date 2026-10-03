@@ -31,7 +31,7 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 
 **Search the library.** Phrase match is the default, so `ear` finds *ear*, *earth*, *hear*, and *heart*. The same menu offers all words, any word, and exact word. Scope covers the KJV, commentary, dictionaries, topics, notes, or the whole library. `H430` lists verses for that Strong’s number; `John 3:16` offers Go to; `John/light` limits the search to that book.
 
-**Keep local marks.** Right-click a verse to bookmark it or add a note. Select words and highlight them. Bookmarks, notes, and highlights are verse-anchored, stored separately from the library, and exportable as Markdown.
+**Keep local marks.** Right-click a verse to bookmark it or add a note. Select words and highlight them. A bookmark underlines the verse number; a note washes it. Bookmarks, notes, and highlights are verse-anchored, stored separately from the library, and exportable as Markdown.
 
 **Follow the desktop theme.** On Omarchy the window tracks the current theme. Elsewhere it follows the libadwaita light/dark scheme and accent color.
 
