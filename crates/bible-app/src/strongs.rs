@@ -342,7 +342,9 @@ fn occurrences_button(
     let btn = gtk::Button::with_label(&occurrences::see_all_label(code, count));
     btn.set_halign(gtk::Align::Start);
     btn.add_css_class("pill");
-    btn.set_tooltip_text(Some("List every KJV verse tagged with this number"));
+    btn.set_tooltip_text(Some(
+        "Open Search with every KJV verse tagged with this number",
+    ));
     let code = code.to_string();
     btn.connect_clicked(move |_| {
         sender.emit(super::app::Msg::OpenStrongsOccurrences(code.clone()));

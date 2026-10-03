@@ -117,7 +117,9 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) 
     let see_kjv = gtk::Button::with_label("See all in the KJV");
     see_kjv.set_halign(gtk::Align::Start);
     see_kjv.add_css_class("pill");
-    see_kjv.set_tooltip_text(Some("List every KJV verse tagged with this number"));
+    see_kjv.set_tooltip_text(Some(
+        "Open Search with every KJV verse tagged with this number",
+    ));
     see_kjv.set_visible(false);
     see_kjv.set_margin_start(12);
     see_kjv.set_margin_top(8);

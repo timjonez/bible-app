@@ -5,7 +5,6 @@ use crate::layout;
 use crate::marks;
 use crate::mhc;
 use crate::nav::{self, Ref};
-use crate::occurrences;
 use crate::passage::{self, PassageView};
 use crate::picker;
 use crate::search;
@@ -45,7 +44,6 @@ enum TabContent {
     Library(dict::DictWidgets),
     Bookmarks(marks::BookmarksWidgets),
     Notes(marks::NotesWidgets),
-    Occurrences(occurrences::OccWidgets),
     Search(search::Pane),
     Blank(launcher::BlankPage),
 }
@@ -161,7 +159,6 @@ pub enum Msg {
     DictSearch(TabId, String),
     DictOpen(TabId, i32),
     OpenStrongsOccurrences(String),
-    OpenOccurrenceHit(TabId, i32),
     Back(WindowId),
     Forward(WindowId),
     SelectPassageBook(TabId, u32),
@@ -671,6 +668,9 @@ impl SimpleComponent for App {
             Msg::Escape(window) => self.escape(window),
             Msg::SetSearch(window, open) => self.set_search(window, open),
             Msg::Search(id, query) => {
+                if self.search(id).is_some_and(|pane| pane.query == query) {
+                    return;
+                }
                 if let Some(pane) = self.search_mut(id) {
                     pane.query = query;
                     pane.chip = search::BookChip::Auto;
@@ -818,16 +818,7 @@ impl SimpleComponent for App {
             Msg::DictOpen(id, idx) => self.open_dict_hit(id, idx),
             Msg::OpenStrongsOccurrences(code) => {
                 self.popdown_passage_popovers();
-                let _ = self.open_occurrences(&code);
-            }
-            Msg::OpenOccurrenceHit(id, idx) => {
-                let Some(at) = self
-                    .occ_widgets(id)
-                    .and_then(|w| occurrences::hit_at(w, idx))
-                else {
-                    return;
-                };
-                self.go(at, true);
+                let _ = self.open_strongs_search(&code);
             }
             Msg::Back(window) => self.alt_step(window, AltStep::Back),
             Msg::Forward(window) => self.alt_step(window, AltStep::Forward),
@@ -1166,13 +1157,6 @@ impl App {
         }
     }
 
-    fn occ_widgets(&self, id: TabId) -> Option<&occurrences::OccWidgets> {
-        match self.hosted.get(&id).map(|h| &h.content) {
-            Some(TabContent::Occurrences(w)) => Some(w),
-            _ => None,
-        }
-    }
-
     fn search(&self, id: TabId) -> Option<&search::Pane> {
         match self.hosted.get(&id).map(|h| &h.content) {
             Some(TabContent::Search(pane)) => Some(pane),
@@ -1262,6 +1246,19 @@ impl App {
         }
         self.focus_search(opened.id);
         Some(opened.id)
+    }
+
+    fn open_strongs_search(&mut self, code: &str) -> Option<TabId> {
+        let window = self.window_of(self.workspace.focused());
+        let id = self.open_search_tab(window)?;
+        let query = code.trim();
+        if let Some(pane) = self.search_mut(id) {
+            pane.query = query.to_string();
+            pane.chip = search::BookChip::AllBooks;
+            pane.entry.set_text(query);
+        }
+        self.schedule_search(id, false);
+        Some(id)
     }
 
     fn wire_search(&self, id: TabId, pane: &search::Pane) {
@@ -2246,22 +2243,6 @@ impl App {
         Some(opened.id)
     }
 
-    fn open_occurrences(&mut self, code: &str) -> Option<TabId> {
-        if self.error.is_some() {
-            return None;
-        }
-        let opened = self.workspace.open_occurrences(code.to_string());
-        let mut widgets = occurrences::build(opened.id, self.msg_tx.clone());
-        if let Some(conn) = &self.conn {
-            occurrences::fill(&mut widgets, conn, &self.books, code);
-        }
-        let title = format!("{code} in the KJV");
-        let root = widgets.root.clone();
-        self.add_page(opened.id, &root, &title, TabContent::Occurrences(widgets));
-        self.move_tab_beside(opened.id);
-        Some(opened.id)
-    }
-
     fn ensure_bookmarks(&mut self) -> Option<TabId> {
         if self.error.is_some() || self.user.is_none() {
             return None;
@@ -2692,7 +2673,6 @@ impl App {
             },
             TabKind::Bookmarks => "Bookmarks".into(),
             TabKind::Notes => "Notes".into(),
-            TabKind::Occurrences { code } => format!("{code} in the KJV"),
             TabKind::Search => "Search".into(),
             TabKind::Blank => "New".into(),
         };
