@@ -129,7 +129,7 @@ pub enum Msg {
     OpenMhc,
     OpenTsk,
     OpenTskDest(Ref),
-    OpenTskDestBeside(Ref),
+    OpenTskDestTab(Ref),
     ClickCite {
         id: TabId,
         offset: i32,
@@ -771,9 +771,9 @@ impl SimpleComponent for App {
                 self.popdown_passage_popovers();
                 self.go(at, true);
             }
-            Msg::OpenTskDestBeside(at) => {
+            Msg::OpenTskDestTab(at) => {
                 self.popdown_passage_popovers();
-                self.go_beside(at);
+                self.open_tsk_dest_tab(at);
             }
             Msg::ClickCite { id, offset } => {
                 let Some(at) = self.cite_at(id, offset) else {
@@ -1947,13 +1947,17 @@ impl App {
             .map(|tab| tab.id)
     }
 
-    fn go_beside(&mut self, at: Ref) {
+    fn open_tsk_dest_tab(&mut self, at: Ref) {
         let window = self
             .workspace
             .focused_tab()
             .map(|tab| tab.window)
             .unwrap_or(WindowId::MAIN);
-        self.go_beside_in(window, at);
+        let opened = self.workspace.open_passage_in(window, at);
+        self.spawn_passage(opened.id, at);
+        self.reload_passage(opened.id, true);
+        self.select_tab(opened.id);
+        self.save_state();
     }
 
     fn go_beside_in(&mut self, window: WindowId, at: Ref) -> TabId {
@@ -2079,6 +2083,7 @@ impl App {
                 .map(|m| (m.span.start, m.heading.clone(), m.dests.clone()))
         });
         if let Some((start, heading, dests)) = tsk_hit {
+            let dests = tsk::phrase_dests(&dests, &self.books, self.conn.as_ref());
             if let Some(p) = self.passage(id) {
                 p.strongs_popover.popdown();
                 tsk::present_phrase(
@@ -2087,7 +2092,6 @@ impl App {
                     start,
                     &heading,
                     &dests,
-                    &self.books,
                     self.msg_tx.clone(),
                 );
             }
