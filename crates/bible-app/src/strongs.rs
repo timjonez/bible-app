@@ -81,7 +81,7 @@ const PAGE_MAX_HEIGHT: i32 = 360;
 
 fn scrolled_page(stack: gtk::Stack) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Always);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_overlay_scrolling(false);
     scroll.set_min_content_height(96);
     scroll.set_max_content_height(PAGE_MAX_HEIGHT);
