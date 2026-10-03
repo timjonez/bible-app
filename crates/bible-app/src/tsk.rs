@@ -441,8 +441,14 @@ fn dest_list(
     list.set_accessible_role(gtk::AccessibleRole::List);
     list.update_property(&[gtk::accessible::Property::Label("References")]);
 
+    let width_chars = items
+        .iter()
+        .map(|item| item.title.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(i32::MAX as usize) as i32;
     for item in items {
-        list.append(&dest_row(item, sender.clone()));
+        list.append(&dest_row(item, width_chars, sender.clone()));
     }
 
     let items = items
@@ -469,15 +475,18 @@ fn dest_list(
     list
 }
 
-fn dest_row(item: &PhraseDest, sender: relm4::Sender<super::app::Msg>) -> gtk::ListBoxRow {
+fn dest_row(
+    item: &PhraseDest,
+    width_chars: i32,
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let label = gtk::Label::new(Some(&item.title));
     label.set_xalign(0.0);
     label.set_wrap(false);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_width_chars(width_chars);
     row.set_child(Some(&label));
     row.set_activatable(false);
-    row.set_tooltip_text(Some(&item.title));
     attach_dest_menu(&row, Rc::new(Cell::new(Some(item.at))), sender);
     row
 }
@@ -532,7 +541,7 @@ fn with_ref_sidebar(list: gtk::ListBox, content: gtk::ScrolledWindow) -> gtk::Wi
     scroll.set_overlay_scrolling(false);
     scroll.set_propagate_natural_width(true);
     scroll.set_propagate_natural_height(true);
-    scroll.set_min_content_width(128);
+    scroll.set_hexpand(false);
     scroll.set_max_content_height(PAGE_MAX_HEIGHT);
     scroll.set_vexpand(true);
     scroll.set_child(Some(&list));
