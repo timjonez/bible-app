@@ -53,7 +53,7 @@ pub struct PassageView {
     right_handle: gtk::Box,
     pub chapter_marks: HashMap<u8, user_db::VerseMarks>,
     pub strongs_at: i32,
-    /// Buffer selection captured when the verse menu opens.
+    /// Buffer selection captured when the verse menu opens (copy and highlight).
     pub menu_sel: Option<(i32, i32)>,
 }
 
