@@ -317,31 +317,11 @@ fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool)
 }
 
 fn paint_text(widgets: &DictWidgets, text: &str) {
-    let text = with_ltr_base(text);
+    let text = cite::with_ltr_base(text);
     widgets.buffer.set_text(&text);
     widgets
         .links
         .replace(cite::relink(&widgets.buffer, &text, &widgets.books));
-}
-
-/// GtkTextView takes paragraph direction from the first strong character, so a
-/// BDB line that starts with Hebrew would right-align. A leading LRM (U+200E)
-/// pins each paragraph to LTR; Hebrew runs still render RTL.
-fn with_ltr_base(text: &str) -> String {
-    const LRM: char = '\u{200E}';
-    let mut out = String::with_capacity(text.len() + 8);
-    let mut at_line = true;
-    for c in text.chars() {
-        if at_line && c != '\n' {
-            out.push(LRM);
-            at_line = false;
-        }
-        out.push(c);
-        if c == '\n' {
-            at_line = true;
-        }
-    }
-    out
 }
 
 /// Show entry `i` and return the headword to store on the tab.
@@ -628,22 +608,4 @@ fn install_css() {
             );
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn with_ltr_base_prefixes_each_nonempty_line() {
-        const LRM: char = '\u{200E}';
-        let out = with_ltr_base("H3190\n\n[יָטַב] vb. be good");
-        let lines: Vec<&str> = out.split('\n').collect();
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with(LRM));
-        assert_eq!(lines[0].chars().skip(1).collect::<String>(), "H3190");
-        assert_eq!(lines[1], "");
-        assert!(lines[2].starts_with(LRM));
-        assert!(lines[2].contains("[יָטַב] vb. be good"));
-    }
 }
