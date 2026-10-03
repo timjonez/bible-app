@@ -149,11 +149,13 @@ pub fn linked_label(
     books: &[Book],
     sender: relm4::Sender<super::app::Msg>,
 ) -> gtk::Label {
+    let text = with_ltr_base(text);
     let label = gtk::Label::new(None);
-    label.set_markup(&tsk_parse::markup_with_cites(text, books));
+    label.set_markup(&tsk_parse::markup_with_cites(&text, books));
     label.set_use_markup(true);
     label.set_wrap(true);
     label.set_wrap_mode(gtk::pango::WrapMode::Word);
+    label.set_direction(gtk::TextDirection::Ltr);
     label.set_xalign(0.0);
     label.set_selectable(true);
     label.connect_activate_link(move |_, uri| {
@@ -168,4 +170,42 @@ pub fn linked_label(
 fn offset_at(view: &gtk::TextView, x: f64, y: f64) -> Option<i32> {
     let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
     view.iter_at_location(bx, by).map(|iter| iter.offset())
+}
+
+/// Pango takes paragraph direction from the first strong character, so a BDB
+/// line that starts with Hebrew would right-align in a TextView or Label. A
+/// leading LRM (U+200E) pins each paragraph to LTR; Hebrew runs still render RTL.
+pub(crate) fn with_ltr_base(text: &str) -> String {
+    const LRM: char = '\u{200E}';
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut at_line = true;
+    for c in text.chars() {
+        if at_line && c != '\n' {
+            out.push(LRM);
+            at_line = false;
+        }
+        out.push(c);
+        if c == '\n' {
+            at_line = true;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_ltr_base_prefixes_each_nonempty_line() {
+        const LRM: char = '\u{200E}';
+        let out = with_ltr_base("H3205\n\nיָלַד 497 vb. bear");
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with(LRM));
+        assert_eq!(lines[0].chars().skip(1).collect::<String>(), "H3205");
+        assert_eq!(lines[1], "");
+        assert!(lines[2].starts_with(LRM));
+        assert!(lines[2].contains("יָלַד 497 vb. bear"));
+    }
 }

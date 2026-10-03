@@ -103,6 +103,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) 
     view.set_editable(false);
     view.set_cursor_visible(false);
     view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.set_direction(gtk::TextDirection::Ltr);
     view.set_left_margin(20);
     view.set_right_margin(20);
     view.set_top_margin(16);
@@ -316,10 +317,11 @@ fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool)
 }
 
 fn paint_text(widgets: &DictWidgets, text: &str) {
-    widgets.buffer.set_text(text);
+    let text = cite::with_ltr_base(text);
+    widgets.buffer.set_text(&text);
     widgets
         .links
-        .replace(cite::relink(&widgets.buffer, text, &widgets.books));
+        .replace(cite::relink(&widgets.buffer, &text, &widgets.books));
 }
 
 /// Show entry `i` and return the headword to store on the tab.
