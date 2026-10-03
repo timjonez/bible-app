@@ -1,9 +1,11 @@
+use crate::cite;
 use crate::history::History;
 use crate::occurrences;
 use crate::shell;
+use crate::tsk_parse::Citation;
 use crate::workspace::TabId;
 use adw::prelude::*;
-use bible_app_db::{self, DictHit, DictModule};
+use bible_app_db::{self, Book, DictHit, DictModule};
 use gtk::glib;
 use relm4::{adw, gtk};
 use rusqlite::Connection;
@@ -16,6 +18,11 @@ pub struct DictWidgets {
     pub popover: gtk::Popover,
     pub list: gtk::ListBox,
     pub buffer: gtk::TextBuffer,
+    pub view: gtk::TextView,
+    pub menu: gtk::PopoverMenu,
+    pub links: Rc<RefCell<Vec<Citation>>>,
+    /// Passage opened from a citation when this view could not sit beside one.
+    pub companion: Cell<Option<TabId>>,
     pub prev: gtk::Button,
     pub next: gtk::Button,
     pub back: gtk::Button,
@@ -27,12 +34,13 @@ pub struct DictWidgets {
     /// `-1` when no entry is open.
     pub entry_i: Cell<i32>,
     pub trail: RefCell<History<i32>>,
+    books: Vec<Book>,
     see_kjv: gtk::Button,
     occ_code: Rc<RefCell<String>>,
     syncing: Rc<Cell<bool>>,
 }
 
-pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
+pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) -> DictWidgets {
     let bar = shell::location_bar(
         "Previous entry (Alt+Left)",
         "Next entry (Alt+Right)",
@@ -89,6 +97,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
     wire_suggestions(&search, &popover, &list);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    cite::add_tag(&buffer);
     let view = gtk::TextView::new();
     view.set_buffer(Some(&buffer));
     view.set_editable(false);
@@ -135,12 +144,18 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
         popover_destroy.unparent();
     });
 
+    let menu = cite::menu_for(&view);
+    let links = Rc::new(RefCell::new(Vec::new()));
     let widgets = DictWidgets {
         root: page.upcast(),
         search,
         popover,
         list,
         buffer,
+        view,
+        menu,
+        links,
+        companion: Cell::new(None),
         prev: bar.prev,
         next: bar.next,
         back: bar.back,
@@ -151,6 +166,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>) -> DictWidgets {
         query: String::new(),
         entry_i: Cell::new(-1),
         trail: RefCell::new(History::new(0)),
+        books: books.to_vec(),
         see_kjv,
         occ_code,
         syncing,
@@ -172,10 +188,11 @@ pub fn wire(widgets: &DictWidgets, id: TabId, sender: relm4::Sender<super::app::
     widgets
         .back
         .connect_clicked(move |_| tx.emit(super::app::Msg::LibraryBack(id)));
-    let tx = sender;
+    let tx = sender.clone();
     widgets
         .forward
         .connect_clicked(move |_| tx.emit(super::app::Msg::LibraryForward(id)));
+    cite::wire(&widgets.view, widgets.links.clone(), id, sender);
 }
 
 pub fn sync_history(widgets: &DictWidgets) {
@@ -218,9 +235,7 @@ pub fn select_module(widgets: &mut DictWidgets, id: &str) {
     widgets.popover.popdown();
     widgets.occ_code.borrow_mut().clear();
     widgets.see_kjv.set_visible(false);
-    widgets
-        .buffer
-        .set_text("Search a headword to open its entry.");
+    paint_text(widgets, "Search a headword to open its entry.");
     sync_history(widgets);
 }
 
@@ -263,9 +278,7 @@ fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool)
         widgets.hits.clear();
         refill_list(&widgets.list, &[]);
         widgets.popover.popdown();
-        widgets
-            .buffer
-            .set_text("No dictionaries or topics in this database.");
+        paint_text(widgets, "No dictionaries or topics in this database.");
         return;
     };
     let q = widgets.query.trim();
@@ -300,6 +313,13 @@ fn search_hits(widgets: &mut DictWidgets, conn: &Connection, show_popover: bool)
     widgets.popover.popup();
 }
 
+fn paint_text(widgets: &DictWidgets, text: &str) {
+    widgets.buffer.set_text(text);
+    widgets
+        .links
+        .replace(cite::relink(&widgets.buffer, text, &widgets.books));
+}
+
 /// Show entry `i` and return the headword to store on the tab.
 pub fn display(widgets: &DictWidgets, conn: &Connection, i: i32) -> Option<String> {
     let module = current_module(widgets)?.to_string();
@@ -313,7 +333,7 @@ pub fn display(widgets: &DictWidgets, conn: &Connection, i: i32) -> Option<Strin
             widgets.syncing.set(true);
             widgets.search.set_text(&head);
             widgets.syncing.set(false);
-            widgets.buffer.set_text(&format!("{head}\n\n{text}"));
+            paint_text(widgets, &format!("{head}\n\n{text}"));
             widgets.popover.popdown();
             widgets.entry_i.set(i);
             let key = if module == bible_app_db::STRONGS_MODULE {
@@ -346,13 +366,13 @@ pub fn display(widgets: &DictWidgets, conn: &Connection, i: i32) -> Option<Strin
         Ok(None) => {
             widgets.occ_code.borrow_mut().clear();
             widgets.see_kjv.set_visible(false);
-            widgets.buffer.set_text("Entry missing.");
+            paint_text(widgets, "Entry missing.");
             None
         }
         Err(e) => {
             widgets.occ_code.borrow_mut().clear();
             widgets.see_kjv.set_visible(false);
-            widgets.buffer.set_text(&e.to_string());
+            paint_text(widgets, &e.to_string());
             None
         }
     }

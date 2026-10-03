@@ -25,9 +25,9 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 
 **Open several passages at once.** Chapters and study views live in tabs. Split a tab to keep two views side by side. Drag a tab out, or use Open in a window, for a second reader window.
 
-**Look a word up in place.** Click a tagged KJV word for Strong’s, then BDB or Thayer when that code is in the library, plus matching dictionary and topic articles. Sources sit on the left of the popover; the open article is on the right. Strong’s can list every KJV verse for that number.
+**Look a word up in place.** Click a tagged KJV word for Strong’s, then BDB or Thayer when that code is in the library, plus matching dictionary and topic articles. Sources sit on the left of the popover; the open article is on the right. Strong’s can list every KJV verse for that number. Scripture references in those articles are links and jump in the current passage.
 
-**Follow cross-references and commentary.** A TSK superscript on a phrase opens its destinations: references on the left, the selected verse on the right. A verse number is a link when Matthew Henry starts a comment there. Translator notes appear as a dagger on the matched phrase.
+**Follow cross-references and commentary.** A TSK superscript on a phrase opens its destinations: references on the left, the selected verse on the right. A verse number is a link when Matthew Henry starts a comment there. Bible references in Matthew Henry, the Treasury, and library articles are links; click one to open that verse beside the study tab, or right-click for a new tab or window. Translator notes appear as a dagger on the matched phrase.
 
 **Search the library.** Phrase match is the default, so `ear` finds *ear*, *earth*, *hear*, and *heart*. The same menu offers all words, any word, and exact word. Scope covers the KJV, commentary, dictionaries, topics, notes, or the whole library. `H430` lists verses for that Strong’s number; `John 3:16` offers Go to; `John/light` limits the search to that book.
 

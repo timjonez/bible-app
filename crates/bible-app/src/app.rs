@@ -785,8 +785,8 @@ impl SimpleComponent for App {
                 let Some(at) = self.cite_at(id, offset) else {
                     return;
                 };
-                if let Some(widgets) = self.tsk_widgets_for(id) {
-                    tsk::popup_cite_menu(widgets, x, y, at, id, self.msg_tx.clone());
+                if let Some(menu) = self.cite_menu(id) {
+                    crate::cite::popup(menu, x, y, at, id, self.msg_tx.clone());
                 }
             }
             Msg::OpenCiteTab { id, at } => self.open_cite_tab(id, at),
@@ -1147,16 +1147,22 @@ impl App {
         }
     }
 
-    fn tsk_widgets_for(&self, id: TabId) -> Option<&tsk::TskWidgets> {
+    fn cite_at(&self, id: TabId, offset: i32) -> Option<Ref> {
         match self.hosted.get(&id).map(|h| &h.content) {
-            Some(TabContent::Tsk(w)) => Some(w),
+            Some(TabContent::Tsk(w)) => crate::cite::at(&w.links, offset),
+            Some(TabContent::Mhc(w)) => crate::cite::at(&w.links, offset),
+            Some(TabContent::Library(w)) => crate::cite::at(&w.links, offset),
             _ => None,
         }
     }
 
-    fn cite_at(&self, id: TabId, offset: i32) -> Option<Ref> {
-        self.tsk_widgets_for(id)
-            .and_then(|widgets| tsk::cite_at(widgets, offset))
+    fn cite_menu(&self, id: TabId) -> Option<&gtk::PopoverMenu> {
+        match self.hosted.get(&id).map(|h| &h.content) {
+            Some(TabContent::Tsk(w)) => Some(&w.menu),
+            Some(TabContent::Mhc(w)) => Some(&w.menu),
+            Some(TabContent::Library(w)) => Some(&w.menu),
+            _ => None,
+        }
     }
 
     fn occ_widgets(&self, id: TabId) -> Option<&occurrences::OccWidgets> {
@@ -1934,13 +1940,21 @@ impl App {
     }
 
     fn set_cite_companion(&self, source: TabId, passage: TabId) {
-        if let Some(widgets) = self.tsk_widgets_for(source) {
-            widgets.companion.set(Some(passage));
+        match self.hosted.get(&source).map(|h| &h.content) {
+            Some(TabContent::Tsk(w)) => w.companion.set(Some(passage)),
+            Some(TabContent::Mhc(w)) => w.companion.set(Some(passage)),
+            Some(TabContent::Library(w)) => w.companion.set(Some(passage)),
+            _ => {}
         }
     }
 
     fn cite_companion(&self, source: TabId) -> Option<TabId> {
-        let id = self.tsk_widgets_for(source)?.companion.get()?;
+        let id = match self.hosted.get(&source).map(|h| &h.content) {
+            Some(TabContent::Tsk(w)) => w.companion.get(),
+            Some(TabContent::Mhc(w)) => w.companion.get(),
+            Some(TabContent::Library(w)) => w.companion.get(),
+            _ => None,
+        }?;
         self.workspace
             .tab(id)
             .filter(|tab| tab.kind.is_passage())
@@ -2042,6 +2056,8 @@ impl App {
             match &hosted.content {
                 TabContent::Passage(passage) => theme::paint_buffer(&passage.buffer),
                 TabContent::Tsk(widgets) => theme::paint_buffer(&widgets.buffer),
+                TabContent::Mhc(widgets) => theme::paint_buffer(&widgets.buffer),
+                TabContent::Library(widgets) => theme::paint_buffer(&widgets.buffer),
                 _ => {}
             }
         }
@@ -2210,7 +2226,7 @@ impl App {
         let opened = self
             .workspace
             .open_library(module.to_string(), headword.map(str::to_string));
-        let mut widgets = dict::build(opened.id, self.msg_tx.clone());
+        let mut widgets = dict::build(opened.id, self.msg_tx.clone(), &self.books);
         dict::wire(&widgets, opened.id, self.msg_tx.clone());
         if let Some(conn) = &self.conn {
             dict::load_modules(&mut widgets, conn);
@@ -2309,6 +2325,7 @@ impl App {
             return;
         }
         let tx = self.msg_tx.clone();
+        let books = self.books.clone();
         if let Some(TabContent::Passage(p)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
             p.strongs_at = word.span.start;
             p.tsk_popover.popdown();
@@ -2319,6 +2336,7 @@ impl App {
                 &defs,
                 &counts,
                 &dict,
+                &books,
                 tx,
             );
         }
@@ -2347,6 +2365,7 @@ impl App {
                 &[def],
                 &counts,
                 &dict,
+                &self.books,
                 self.msg_tx.clone(),
             );
         }

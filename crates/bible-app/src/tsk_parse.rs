@@ -15,7 +15,10 @@ pub struct Citation {
     pub at: Ref,
 }
 
-/// Every `Book chapter:verse` citation in `text`, including a range as one link to its first verse.
+/// Every scripture citation in `text`, including a range as one link to its first verse.
+///
+/// Accepts a full book name or abbreviation, an optional period (`Ps. 34:1`),
+/// `chapter:verse` or `chapter:verse–verse`, and a chapter alone (`Ge 4`).
 pub fn citations(text: &str, books: &[Book]) -> Vec<Citation> {
     extract_refs(text, books)
         .into_iter()
@@ -30,6 +33,67 @@ pub fn citations(text: &str, books: &[Book]) -> Vec<Citation> {
             Some(Citation { start, end, at })
         })
         .collect()
+}
+
+/// Pango markup with each citation wrapped in `bible:book/chapter/verse` links.
+pub fn markup_with_cites(text: &str, books: &[Book]) -> String {
+    let links = citations(text, books);
+    if links.is_empty() {
+        return escape_markup(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    for link in &links {
+        let start = link.start as usize;
+        let end = link.end as usize;
+        if start > chars.len() || end > chars.len() || start >= end {
+            continue;
+        }
+        if start > i {
+            out.push_str(&escape_markup(&chars[i..start].iter().collect::<String>()));
+        }
+        let label: String = chars[start..end].iter().collect();
+        out.push_str(&format!(
+            "<a href=\"{}\">{}</a>",
+            cite_href(link.at),
+            escape_markup(&label)
+        ));
+        i = end;
+    }
+    if i < chars.len() {
+        out.push_str(&escape_markup(&chars[i..].iter().collect::<String>()));
+    }
+    out
+}
+
+pub fn cite_href(at: Ref) -> String {
+    format!("bible:{}/{}/{}", at.book, at.chapter, at.verse)
+}
+
+pub fn parse_cite_href(uri: &str) -> Option<Ref> {
+    let rest = uri.strip_prefix("bible:")?;
+    let mut parts = rest.split('/');
+    Some(Ref {
+        book: parts.next()?.parse().ok()?,
+        chapter: parts.next()?.parse().ok()?,
+        verse: parts.next()?.parse().ok()?,
+    })
+}
+
+fn escape_markup(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Parse TSK `* heading. refs` lines into phrase keys with destinations.
@@ -284,26 +348,130 @@ fn parse_dest_at(s: &str, books: &[Book], dummy: Ref) -> Option<(Vec<Ref>, usize
     Some((dests, name_len + ws + nums_len))
 }
 
+/// Extra spellings used in commentaries and dictionaries, mapped to `Book.name`.
+const BOOK_ALIASES: &[(&str, &str)] = &[
+    ("gen", "Genesis"),
+    ("gn", "Genesis"),
+    ("exo", "Exodus"),
+    ("exod", "Exodus"),
+    ("lev", "Leviticus"),
+    ("num", "Numbers"),
+    ("deut", "Deuteronomy"),
+    ("dt", "Deuteronomy"),
+    ("josh", "Joshua"),
+    ("judg", "Judges"),
+    ("jdg", "Judges"),
+    ("1 sam", "1 Samuel"),
+    ("1sam", "1 Samuel"),
+    ("2 sam", "2 Samuel"),
+    ("2sam", "2 Samuel"),
+    ("1 kgs", "1 Kings"),
+    ("1kgs", "1 Kings"),
+    ("2 kgs", "2 Kings"),
+    ("2kgs", "2 Kings"),
+    ("1 chr", "1 Chronicles"),
+    ("1chr", "1 Chronicles"),
+    ("2 chr", "2 Chronicles"),
+    ("2chr", "2 Chronicles"),
+    ("neh", "Nehemiah"),
+    ("esth", "Esther"),
+    ("est", "Esther"),
+    ("psa", "Psalms"),
+    ("psalm", "Psalms"),
+    ("prov", "Proverbs"),
+    ("ecc", "Ecclesiastes"),
+    ("eccl", "Ecclesiastes"),
+    ("cant", "Song of Solomon"),
+    ("canticles", "Song of Solomon"),
+    ("sos", "Song of Solomon"),
+    ("isa", "Isaiah"),
+    ("jer", "Jeremiah"),
+    ("lam", "Lamentations"),
+    ("eze", "Ezekiel"),
+    ("ezek", "Ezekiel"),
+    ("dan", "Daniel"),
+    ("hos", "Hosea"),
+    ("obad", "Obadiah"),
+    ("jonah", "Jonah"),
+    ("nah", "Nahum"),
+    ("zeph", "Zephaniah"),
+    ("zech", "Zechariah"),
+    ("matt", "Matthew"),
+    ("mat", "Matthew"),
+    ("mk", "Mark"),
+    ("luk", "Luke"),
+    ("lk", "Luke"),
+    ("jn", "John"),
+    ("act", "Acts"),
+    ("rom", "Romans"),
+    ("1 cor", "1 Corinthians"),
+    ("1cor", "1 Corinthians"),
+    ("2 cor", "2 Corinthians"),
+    ("2cor", "2 Corinthians"),
+    ("gal", "Galatians"),
+    ("phil", "Philippians"),
+    ("1 thess", "1 Thessalonians"),
+    ("1thess", "1 Thessalonians"),
+    ("2 thess", "2 Thessalonians"),
+    ("2thess", "2 Thessalonians"),
+    ("1 tim", "1 Timothy"),
+    ("1tim", "1 Timothy"),
+    ("2 tim", "2 Timothy"),
+    ("2tim", "2 Timothy"),
+    ("phlm", "Philemon"),
+    ("1 pet", "1 Peter"),
+    ("1pet", "1 Peter"),
+    ("2 pet", "2 Peter"),
+    ("2pet", "2 Peter"),
+    ("1 jn", "1 John"),
+    ("1jn", "1 John"),
+    ("2 jn", "2 John"),
+    ("2jn", "2 John"),
+    ("3 jn", "3 John"),
+    ("3jn", "3 John"),
+    ("rev", "Revelation"),
+];
+
 fn match_book_prefix<'a>(s: &'a str, books: &'a [Book]) -> Option<(&'a Book, usize)> {
     let mut best: Option<(&Book, usize)> = None;
     for b in books {
-        let name = b.name.as_str();
-        if name.is_empty() || s.len() < name.len() || !s.is_char_boundary(name.len()) {
+        consider_token(s, b.name.as_str(), b, &mut best);
+        consider_token(s, b.abbrev.as_str(), b, &mut best);
+    }
+    for (alias, name) in BOOK_ALIASES {
+        let Some(book) = books.iter().find(|b| b.name.eq_ignore_ascii_case(name)) else {
             continue;
-        }
-        if !s[..name.len()].eq_ignore_ascii_case(name) {
-            continue;
-        }
-        let bound_ok = s[name.len()..]
-            .chars()
-            .next()
-            .map(|c| !c.is_alphanumeric())
-            .unwrap_or(true);
-        if bound_ok && best.is_none_or(|(_, k)| name.len() > k) {
-            best = Some((b, name.len()));
-        }
+        };
+        consider_token(s, alias, book, &mut best);
     }
     best
+}
+
+fn consider_token<'a>(
+    s: &'a str,
+    token: &str,
+    book: &'a Book,
+    best: &mut Option<(&'a Book, usize)>,
+) {
+    let n = token.len();
+    if n == 0 || s.len() < n || !s.is_char_boundary(n) {
+        return;
+    }
+    if !s[..n].eq_ignore_ascii_case(token) {
+        return;
+    }
+    let mut consumed = n;
+    if s[consumed..].starts_with('.') {
+        consumed += 1;
+    }
+    let bound_ok = s[consumed..]
+        .chars()
+        .next()
+        .map(|c| !c.is_alphanumeric())
+        .unwrap_or(true);
+    if bound_ok && best.is_none_or(|(_, k)| consumed > k) {
+        *best = Some((book, consumed));
+    }
 }
 
 fn parse_chap_verse(s: &str) -> Option<(u8, u8, Option<u8>, usize)> {
@@ -316,7 +484,7 @@ fn parse_chap_verse(s: &str) -> Option<(u8, u8, Option<u8>, usize)> {
     }
     let chapter: u8 = s[..i].parse().ok()?;
     if i >= s.len() || s.as_bytes()[i] != b':' {
-        return None;
+        return Some((chapter, 1, None, i));
     }
     i += 1;
     let vstart = i;
@@ -367,11 +535,13 @@ mod tests {
             (1, "Ge", "Genesis"),
             (2, "Ex", "Exodus"),
             (5, "De", "Deuteronomy"),
+            (9, "1Sa", "1 Samuel"),
             (11, "1Ki", "1 Kings"),
             (13, "1Ch", "1 Chronicles"),
             (18, "Job", "Job"),
             (19, "Ps", "Psalms"),
             (20, "Pr", "Proverbs"),
+            (40, "Mt", "Matthew"),
             (41, "Mr", "Mark"),
             (43, "Joh", "John"),
             (58, "Heb", "Hebrews"),
@@ -603,5 +773,139 @@ God creates heaven and earth.
             }
         }
         assert_eq!(found, expect);
+    }
+
+    #[test]
+    fn mhc_prose_citations_use_full_names_and_ranges() {
+        let text = "\
+I. The birth, names, and callings, of Cain and Abel, Genesis 4:1–2.
+II. Their religion (Genesis 4:3–4) and part of, Genesis 4:5.
+as Samuel, when he said, 1 Samuel 16:6. The name, Psalms 39:5.";
+        assert_eq!(
+            cited(text),
+            vec![
+                (
+                    "Genesis 4:1–2".into(),
+                    Ref {
+                        book: 1,
+                        chapter: 4,
+                        verse: 1
+                    }
+                ),
+                (
+                    "Genesis 4:3–4".into(),
+                    Ref {
+                        book: 1,
+                        chapter: 4,
+                        verse: 3
+                    }
+                ),
+                (
+                    "Genesis 4:5".into(),
+                    Ref {
+                        book: 1,
+                        chapter: 4,
+                        verse: 5
+                    }
+                ),
+                (
+                    "1 Samuel 16:6".into(),
+                    Ref {
+                        book: 9,
+                        chapter: 16,
+                        verse: 6
+                    }
+                ),
+                (
+                    "Psalms 39:5".into(),
+                    Ref {
+                        book: 19,
+                        chapter: 39,
+                        verse: 5
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn abbreviation_and_chapter_only_citations() {
+        assert_eq!(
+            cited("Cain (Ge 4) settled in Nod."),
+            vec![(
+                "Ge 4".into(),
+                Ref {
+                    book: 1,
+                    chapter: 4,
+                    verse: 1
+                }
+            )]
+        );
+        assert_eq!(
+            cited("See Ps. 34."),
+            vec![(
+                "Ps. 34".into(),
+                Ref {
+                    book: 19,
+                    chapter: 34,
+                    verse: 1
+                }
+            )]
+        );
+        assert_eq!(
+            cited("Matt. 5:21–22"),
+            vec![(
+                "Matt. 5:21–22".into(),
+                Ref {
+                    book: 40,
+                    chapter: 5,
+                    verse: 21
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn stacked_document_links_headings_and_bodies() {
+        let first = "See Proverbs 8:22.";
+        let second = "See Exodus 20:11.";
+        let stacked = nav::stack_sections(&[("Genesis 1:1", first), ("Genesis 1:2", second)]);
+        let found: Vec<String> = citations(&stacked.text, &books())
+            .into_iter()
+            .map(|link| {
+                stacked
+                    .text
+                    .chars()
+                    .skip(link.start as usize)
+                    .take((link.end - link.start) as usize)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "Genesis 1:1",
+                "Proverbs 8:22",
+                "Genesis 1:2",
+                "Exodus 20:11"
+            ]
+        );
+    }
+
+    #[test]
+    fn markup_wraps_citations_and_escapes_the_rest() {
+        let markup = markup_with_cites("Cain <and> Ge 4 & Abel.", &books());
+        assert_eq!(
+            markup,
+            "Cain &lt;and&gt; <a href=\"bible:1/4/1\">Ge 4</a> &amp; Abel."
+        );
+        assert_eq!(
+            parse_cite_href("bible:1/4/1"),
+            Some(Ref {
+                book: 1,
+                chapter: 4,
+                verse: 1
+            })
+        );
     }
 }
