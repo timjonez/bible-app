@@ -17,8 +17,6 @@ The database includes:
 - Bible dictionaries: **Easton**, **Smith**, **Hitchcock’s Names**, **American Tract Society**
 - Topical works: **Nave**, **Torrey**, **Spurgeon**, **Daily Light**, **Josephus**, and the rest of that set
 
-Thayer is Unitarian and based on Westcott-Hort. Strong’s stays the TR/KJV gloss.
-
 Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.md`](data/README.md).
 
 ## What it can do
