@@ -1,4 +1,5 @@
 use crate::history::History;
+use crate::layout;
 use crate::nav::{self, Ref};
 use crate::picker;
 use crate::shell;
@@ -356,7 +357,32 @@ pub fn create_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popo
     popover.set_autohide(true);
     popover.set_position(gtk::PositionType::Bottom);
     popover.set_accessible_role(gtk::AccessibleRole::Dialog);
+    popover.add_css_class("tsk-popover");
+    install_css();
     popover
+}
+
+const PAGE_MAX_HEIGHT: i32 = 360;
+
+pub(crate) struct PhraseDest {
+    at: Ref,
+    title: String,
+    markup: String,
+}
+
+pub(crate) fn phrase_dests(
+    dests: &[Ref],
+    books: &[Book],
+    conn: Option<&Connection>,
+) -> Vec<PhraseDest> {
+    dests
+        .iter()
+        .map(|at| PhraseDest {
+            at: *at,
+            title: nav::format_ref(books, *at),
+            markup: dest_markup(conn, *at),
+        })
+        .collect()
 }
 
 pub fn present_phrase(
@@ -364,48 +390,34 @@ pub fn present_phrase(
     view: &gtk::TextView,
     start: i32,
     heading: &str,
-    dests: &[Ref],
-    books: &[Book],
+    dests: &[PhraseDest],
     sender: relm4::Sender<super::app::Msg>,
 ) {
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    body.set_margin_start(12);
-    body.set_margin_end(12);
-    body.set_margin_top(10);
-    body.set_margin_bottom(10);
-    body.set_width_request(280);
-
     let title = gtk::Label::new(Some(heading));
     title.add_css_class("heading");
     title.set_xalign(0.0);
     title.set_wrap(true);
-    body.append(&title);
+    title.set_margin_start(12);
+    title.set_margin_end(12);
+    title.set_margin_top(10);
+    title.set_margin_bottom(8);
 
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.add_css_class("boxed-list");
-    list.set_accessible_role(gtk::AccessibleRole::List);
-    let dests_vec = dests.to_vec();
-    let jump = sender.clone();
-    list.connect_row_activated(move |_, row| {
-        let Ok(idx) = usize::try_from(row.index()) else {
-            return;
-        };
-        if let Some(at) = dests_vec.get(idx).copied() {
-            jump.emit(super::app::Msg::OpenTskDest(at));
-        }
-    });
-    for at in dests {
-        list.append(&dest_row(*at, books, sender.clone()));
-    }
-
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_min_content_height(80);
-    scroll.set_max_content_height(280);
-    scroll.set_propagate_natural_height(true);
-    scroll.set_child(Some(&list));
-    body.append(&scroll);
-    popover.set_child(Some(&body));
+    let child: gtk::Widget = if dests.is_empty() {
+        title.upcast()
+    } else {
+        let (verse, verse_title, verse_text) = verse_page();
+        let selected = Rc::new(Cell::new(dests.first().map(|item| item.at)));
+        attach_dest_menu(&verse, selected.clone(), sender.clone());
+        let list = dest_list(dests, selected, verse_title, verse_text, sender);
+        let content = scrolled_verse(verse);
+        let pane = with_ref_sidebar(list, content);
+        let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        wrap.append(&title);
+        wrap.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        wrap.append(&pane);
+        wrap.upcast()
+    };
+    popover.set_child(Some(&child));
 
     let buffer = view.buffer();
     let iter = buffer.iter_at_offset(start);
@@ -416,28 +428,262 @@ pub fn present_phrase(
     popover.popup();
 }
 
-fn dest_row(at: Ref, books: &[Book], sender: relm4::Sender<super::app::Msg>) -> gtk::ListBoxRow {
-    let row = gtk::ListBoxRow::new();
-    let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    box_.set_margin_start(10);
-    box_.set_margin_end(6);
-    box_.set_margin_top(4);
-    box_.set_margin_bottom(4);
-    let label = gtk::Label::new(Some(&nav::format_ref(books, at)));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_wrap(true);
-    box_.append(&label);
-    let beside = gtk::Button::from_icon_name("tab-new-symbolic");
-    beside.set_tooltip_text(Some("Open beside"));
-    beside.add_css_class("flat");
-    beside.set_valign(gtk::Align::Center);
-    beside.set_has_frame(false);
-    beside.connect_clicked(move |_| {
-        sender.emit(super::app::Msg::OpenTskDestBeside(at));
+fn dest_list(
+    items: &[PhraseDest],
+    selected: Rc<Cell<Option<Ref>>>,
+    verse_title: gtk::Label,
+    verse_text: gtk::Label,
+    sender: relm4::Sender<super::app::Msg>,
+) -> gtk::ListBox {
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    list.add_css_class("navigation-sidebar");
+    list.set_accessible_role(gtk::AccessibleRole::List);
+    list.update_property(&[gtk::accessible::Property::Label("References")]);
+
+    for item in items {
+        list.append(&dest_row(item, sender.clone()));
+    }
+
+    let items = items
+        .iter()
+        .map(|item| (item.at, item.title.clone(), item.markup.clone()))
+        .collect::<Vec<_>>();
+    list.connect_row_selected(move |_, row| {
+        let Some(row) = row else {
+            return;
+        };
+        let Ok(idx) = usize::try_from(row.index()) else {
+            return;
+        };
+        let Some((at, title, markup)) = items.get(idx) else {
+            return;
+        };
+        selected.set(Some(*at));
+        verse_title.set_text(title);
+        verse_text.set_markup(markup);
     });
-    box_.append(&beside);
-    row.set_child(Some(&box_));
-    row.set_activatable(true);
+    if let Some(row) = list.row_at_index(0) {
+        list.select_row(Some(&row));
+    }
+    list
+}
+
+fn dest_row(item: &PhraseDest, sender: relm4::Sender<super::app::Msg>) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let label = gtk::Label::new(Some(&item.title));
+    label.set_xalign(0.0);
+    label.set_wrap(false);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    row.set_child(Some(&label));
+    row.set_activatable(false);
+    row.set_tooltip_text(Some(&item.title));
+    attach_dest_menu(&row, Rc::new(Cell::new(Some(item.at))), sender);
     row
+}
+
+fn verse_page() -> (gtk::Box, gtk::Label, gtk::Label) {
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    body.set_margin_start(14);
+    body.set_margin_end(14);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_width_request(300);
+
+    let title = gtk::Label::new(None);
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+    title.set_selectable(true);
+
+    let text = gtk::Label::new(None);
+    text.set_wrap(true);
+    text.set_wrap_mode(gtk::pango::WrapMode::Word);
+    text.set_max_width_chars(44);
+    text.set_xalign(0.0);
+    text.set_yalign(0.0);
+    text.set_selectable(true);
+    text.set_use_markup(true);
+
+    body.append(&title);
+    body.append(&text);
+    (body, title, text)
+}
+
+fn scrolled_verse(child: impl gtk::prelude::IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(false);
+    scroll.set_min_content_height(96);
+    scroll.set_max_content_height(PAGE_MAX_HEIGHT);
+    scroll.set_min_content_width(300);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&child));
+    scroll.add_css_class("tsk-body");
+    scroll
+}
+
+fn with_ref_sidebar(list: gtk::ListBox, content: gtk::ScrolledWindow) -> gtk::Widget {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(false);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_min_content_width(128);
+    scroll.set_max_content_height(PAGE_MAX_HEIGHT);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
+    scroll.add_css_class("tsk-sources");
+
+    let sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    let wrap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    wrap.append(&scroll);
+    wrap.append(&sep);
+    wrap.append(&content);
+    wrap.upcast()
+}
+
+fn attach_dest_menu(
+    widget: &impl gtk::prelude::IsA<gtk::Widget>,
+    at: Rc<Cell<Option<Ref>>>,
+    sender: relm4::Sender<super::app::Msg>,
+) {
+    let model = gio::Menu::new();
+    model.append(Some("Open"), Some("dest.open"));
+    model.append(Some("Open in new tab"), Some("dest.tab"));
+    let menu = gtk::PopoverMenu::from_model(Some(&model));
+    menu.set_parent(widget);
+    menu.set_has_arrow(false);
+    menu.set_halign(gtk::Align::Start);
+
+    let group = gio::SimpleActionGroup::new();
+    let open = gio::SimpleAction::new("open", None);
+    let at_open = at.clone();
+    let tx = sender.clone();
+    open.connect_activate(move |_, _| {
+        if let Some(at) = at_open.get() {
+            tx.emit(super::app::Msg::OpenTskDest(at));
+        }
+    });
+    let tab = gio::SimpleAction::new("tab", None);
+    tab.connect_activate(move |_, _| {
+        if let Some(at) = at.get() {
+            sender.emit(super::app::Msg::OpenTskDestTab(at));
+        }
+    });
+    group.add_action(&open);
+    group.add_action(&tab);
+    menu.insert_action_group("dest", Some(&group));
+
+    let right = gtk::GestureClick::new();
+    right.set_button(gtk::gdk::BUTTON_SECONDARY);
+    right.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let menu_click = menu.clone();
+    right.connect_pressed(move |gesture, _, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        menu_click.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu_click.popup();
+    });
+    widget.add_controller(right);
+    widget.connect_destroy(move |_| {
+        menu.unparent();
+    });
+}
+
+fn dest_markup(conn: Option<&Connection>, at: Ref) -> String {
+    let Some(conn) = conn else {
+        return String::new();
+    };
+    match bible_app_db::get_verse(conn, at.book, at.chapter, at.verse) {
+        Ok(v) => {
+            let (stored, _) = layout::split_notes(&v.text);
+            let (text, italics) = layout::strip_supplied(&stored);
+            markup_with_italics(&text, &italics)
+        }
+        Err(_) => glib::markup_escape_text("This verse is not in the library.").to_string(),
+    }
+}
+
+fn markup_with_italics(text: &str, italics: &[layout::Span]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len() as i32;
+    let mut out = String::new();
+    let mut at = 0i32;
+    for span in italics {
+        let start = span.start.clamp(0, len);
+        let end = span.end.clamp(start, len);
+        if start > at {
+            out.push_str(&escape_chars(&chars, at, start));
+        }
+        if end > start {
+            out.push_str("<i>");
+            out.push_str(&escape_chars(&chars, start, end));
+            out.push_str("</i>");
+        }
+        at = at.max(end);
+    }
+    if at < len {
+        out.push_str(&escape_chars(&chars, at, len));
+    }
+    out
+}
+
+fn escape_chars(chars: &[char], start: i32, end: i32) -> String {
+    let s: String = chars[start as usize..end as usize].iter().collect();
+    glib::markup_escape_text(&s).to_string()
+}
+
+fn install_css() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(
+            r#"
+            popover.tsk-popover contents {
+              padding: 0;
+            }
+            .tsk-sources {
+              padding: 4px 0;
+            }
+            .tsk-sources list {
+              background: transparent;
+            }
+            "#,
+        );
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::Span;
+
+    #[test]
+    fn italics_wrap_supplied_words() {
+        let italics = [Span { start: 4, end: 7 }];
+        assert_eq!(markup_with_italics("the man", &italics), "the <i>man</i>");
+    }
+
+    #[test]
+    fn markup_escapes_ampersand() {
+        assert_eq!(markup_with_italics("a & b", &[]), "a &amp; b");
+    }
+
+    #[test]
+    fn markup_plain_text_is_unchanged() {
+        assert_eq!(
+            markup_with_italics("And the remnant of the meat offering", &[]),
+            "And the remnant of the meat offering"
+        );
+    }
 }

@@ -29,7 +29,7 @@ Override the database path with `BIBLE_APP_DB` if you already have an unpacked c
 - Click a verse (number or body) to select it; MHC and TSK tabs follow that verse by default (toggle Follow verse on the tab menu). Library, notes, and occurrence lists stay put
 - Click a tagged KJV word for Strong’s, then BDB (Hebrew) and/or Thayer (Greek) when that code is in the library, plus each matching dictionary (Easton, Smith, Webster, …) and topic (Nave, Torrey, …) when the headword matches. Sources stack on the left of the popover; the open source is on the right. Each source can open that word in the library. Strong’s can list every KJV verse for that number. Lemmas are not inserted beside words in the chapter.
 - Translator notes appear as a dagger on the matched phrase; hover or click the mark for the note
-- TSK superscripts on a matched phrase open that phrase’s destinations; hover previews the heading and a short dest list. Destinations can jump in the current passage or Open beside
+- TSK superscripts on a matched phrase open that phrase’s destinations in a popover: references on the left, the selected verse on the right. Hover previews the heading and a short dest list. Right-click a reference to Open it in the current passage or Open in new tab
 - A verse number is a link when a Matthew Henry comment starts there; click it to open a Matthew Henry tab
 - Menu opens Matthew Henry, the Treasury of Scripture Knowledge, bookmarks, notes, or a lexicon, dictionary, or topic as a new tab in the current tab bar, even if one of that kind is already open. Verse clicks and Search still open a split when the window has none. Split stays the icon on a tab
 - Menu → Lexicon → Brown-Driver-Briggs or Thayer; type a Strong’s code such as `H430` or `G26`
