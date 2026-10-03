@@ -10,6 +10,8 @@ pub fn create(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
     popover.set_autohide(true);
     popover.set_position(gtk::PositionType::Bottom);
     popover.set_accessible_role(gtk::AccessibleRole::Dialog);
+    popover.add_css_class("word-popover");
+    install_css();
     popover
 }
 
@@ -22,22 +24,23 @@ pub fn present(
     dict: &ClickedDict,
     sender: relm4::Sender<super::app::Msg>,
 ) {
+    let tabs = source_tabs(!defs.is_empty(), dict);
+    if tabs.is_empty() {
+        return;
+    }
     let stack = gtk::Stack::new();
     stack.set_hhomogeneous(true);
     stack.set_vhomogeneous(false);
-    let mut pages = 0u32;
     if !defs.is_empty() {
         stack.add_titled(
             &strongs_page(defs, counts, sender.clone()),
             Some("strongs"),
             "Strong's",
         );
-        pages += 1;
     }
     for (module, entries) in group_lexicons(&dict.lexicons) {
         let name = lexicon_tab_label(module);
         stack.add_titled(&lexicon_page(&entries, sender.clone()), Some(module), &name);
-        pages += 1;
     }
     for entry in &dict.bible {
         let name = dict_tab_label(entry);
@@ -46,7 +49,6 @@ pub fn present(
             Some(&entry.module),
             &name,
         );
-        pages += 1;
     }
     for entry in &dict.topics {
         let name = dict_tab_label(entry);
@@ -55,7 +57,6 @@ pub fn present(
             Some(&entry.module),
             &name,
         );
-        pages += 1;
     }
     if let Some(entry) = &dict.english {
         let name = dict_tab_label(entry);
@@ -64,26 +65,131 @@ pub fn present(
             Some(&entry.module),
             &name,
         );
-        pages += 1;
     }
-    if pages == 0 {
-        return;
-    }
-    let child: gtk::Widget = if pages == 1 {
-        stack.upcast()
+    let content = scrolled_page(stack.clone());
+    let child: gtk::Widget = if tabs.len() == 1 {
+        content.upcast()
     } else {
-        let switcher = gtk::StackSwitcher::new();
-        switcher.set_stack(Some(&stack));
-        switcher.set_halign(gtk::Align::Center);
-        let wrap = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        wrap.set_margin_top(8);
-        wrap.append(&switcher);
-        wrap.append(&stack);
-        wrap.upcast()
+        with_source_sidebar(stack, content, &tabs)
     };
     popover.set_child(Some(&child));
     point_at_word(popover, view, start);
     popover.popup();
+}
+
+const PAGE_MAX_HEIGHT: i32 = 360;
+
+fn scrolled_page(stack: gtk::Stack) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(false);
+    scroll.set_min_content_height(96);
+    scroll.set_max_content_height(PAGE_MAX_HEIGHT);
+    scroll.set_min_content_width(300);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&stack));
+    scroll.add_css_class("word-body");
+    scroll
+}
+
+fn with_source_sidebar(
+    stack: gtk::Stack,
+    content: gtk::ScrolledWindow,
+    tabs: &[(String, String)],
+) -> gtk::Widget {
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    list.add_css_class("navigation-sidebar");
+    list.set_accessible_role(gtk::AccessibleRole::List);
+    list.update_property(&[gtk::accessible::Property::Label("Sources")]);
+
+    for (_, title) in tabs {
+        let label = gtk::Label::new(Some(title));
+        label.set_xalign(0.0);
+        label.set_wrap(false);
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&label));
+        list.append(&row);
+    }
+
+    let names: Vec<String> = tabs.iter().map(|(id, _)| id.clone()).collect();
+    list.connect_row_selected(move |_, row| {
+        let Some(row) = row else { return };
+        let Some(name) = names.get(row.index() as usize) else {
+            return;
+        };
+        stack.set_visible_child_name(name);
+    });
+    if let Some(row) = list.row_at_index(0) {
+        list.select_row(Some(&row));
+    }
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(false);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_min_content_width(108);
+    scroll.set_max_content_height(PAGE_MAX_HEIGHT);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
+    scroll.add_css_class("word-sources");
+
+    let sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    let wrap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    wrap.append(&scroll);
+    wrap.append(&sep);
+    wrap.append(&content);
+    wrap.upcast()
+}
+
+fn install_css() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(
+            r#"
+            popover.word-popover contents {
+              padding: 0;
+            }
+            .word-sources {
+              padding: 4px 0;
+            }
+            .word-sources list {
+              background: transparent;
+            }
+            "#,
+        );
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
+}
+
+fn source_tabs(has_strongs: bool, dict: &ClickedDict) -> Vec<(String, String)> {
+    let mut tabs = Vec::new();
+    if has_strongs {
+        tabs.push(("strongs".into(), "Strong's".into()));
+    }
+    for (module, _) in group_lexicons(&dict.lexicons) {
+        tabs.push((module.to_string(), lexicon_tab_label(module)));
+    }
+    for entry in dict
+        .bible
+        .iter()
+        .chain(dict.topics.iter())
+        .chain(dict.english.iter())
+    {
+        tabs.push((entry.module.clone(), dict_tab_label(entry)));
+    }
+    tabs
 }
 
 fn dict_tab_label(entry: &DictEntry) -> String {
@@ -258,17 +364,7 @@ fn lexicon_page(entries: &[&DictEntry], sender: relm4::Sender<super::app::Msg>) 
             &entry.headword,
         ));
     }
-
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroll.set_min_content_height(80);
-    scroll.set_max_content_height(320);
-    scroll.set_propagate_natural_height(true);
-    scroll.set_child(Some(&body));
-
-    let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    wrap.append(&scroll);
-    wrap
+    body
 }
 
 fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
@@ -281,17 +377,7 @@ fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::
 
     append_dict_entry(&body, entry);
     body.append(&library_button(sender, &entry.module, &entry.headword));
-
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroll.set_min_content_height(80);
-    scroll.set_max_content_height(320);
-    scroll.set_propagate_natural_height(true);
-    scroll.set_child(Some(&body));
-
-    let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    wrap.append(&scroll);
-    wrap
+    body
 }
 
 fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
@@ -311,6 +397,8 @@ fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
 
     let text = gtk::Label::new(Some(&entry.text));
     text.set_wrap(true);
+    text.set_wrap_mode(gtk::pango::WrapMode::Word);
+    text.set_width_chars(40);
     text.set_max_width_chars(44);
     text.set_xalign(0.0);
     text.set_selectable(true);
@@ -469,6 +557,23 @@ mod tests {
     fn several_see_lines() {
         let (_, codes) = split_see_also("See H410 \nSee H430", "H");
         assert_eq!(codes, vec!["H410".to_string(), "H430".to_string()]);
+    }
+
+    #[test]
+    fn source_tabs_put_strongs_then_lexicon_then_dicts() {
+        let dict = ClickedDict {
+            lexicons: vec![entry("BDB", "H168")],
+            bible: vec![entry("Easton", "Tabernacle"), entry("ATSD", "Tabernacle")],
+            topics: vec![entry("Nave", "Tabernacle")],
+            english: Some(entry("Webster", "tabernacle")),
+        };
+        assert_eq!(
+            source_tabs(true, &dict)
+                .iter()
+                .map(|(_, title)| title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Strong's", "BDB", "Easton's", "ATS", "Nave", "Webster's",]
+        );
     }
 
     #[test]
