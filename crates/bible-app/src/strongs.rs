@@ -140,7 +140,6 @@ fn with_source_sidebar(content: gtk::ScrolledWindow, tabs: &[(String, String)]) 
 
     let sep = gtk::Separator::new(gtk::Orientation::Vertical);
     let wrap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    wrap.add_css_class("word-popover-body");
     wrap.append(&scroll);
     wrap.append(&sep);
     wrap.append(&content);
@@ -155,10 +154,6 @@ fn install_css() {
             r#"
             popover.word-popover contents {
               padding: 0;
-            }
-            .word-popover-body,
-            .word-body {
-              max-height: 360px;
             }
             .word-sources {
               padding: 4px 0;
