@@ -66,17 +66,36 @@ pub fn present(
             &name,
         );
     }
+    let content = scrolled_page(stack);
     let child: gtk::Widget = if tabs.len() == 1 {
-        stack.upcast()
+        content.upcast()
     } else {
-        with_source_sidebar(stack, &tabs)
+        with_source_sidebar(content, &tabs)
     };
     popover.set_child(Some(&child));
     point_at_word(popover, view, start);
     popover.popup();
 }
 
-fn with_source_sidebar(stack: gtk::Stack, tabs: &[(String, String)]) -> gtk::Widget {
+const PAGE_MAX_HEIGHT: i32 = 360;
+
+fn scrolled_page(stack: gtk::Stack) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Always);
+    scroll.set_overlay_scrolling(false);
+    scroll.set_min_content_height(96);
+    scroll.set_max_content_height(PAGE_MAX_HEIGHT);
+    scroll.set_min_content_width(300);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&stack));
+    scroll.add_css_class("word-body");
+    scroll
+}
+
+fn with_source_sidebar(content: gtk::ScrolledWindow, tabs: &[(String, String)]) -> gtk::Widget {
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
     list.add_css_class("navigation-sidebar");
@@ -93,7 +112,10 @@ fn with_source_sidebar(stack: gtk::Stack, tabs: &[(String, String)]) -> gtk::Wid
     }
 
     let names: Vec<String> = tabs.iter().map(|(id, _)| id.clone()).collect();
-    let stack_for_sel = stack.clone();
+    let stack_for_sel = content
+        .child()
+        .and_downcast::<gtk::Stack>()
+        .expect("word popover stack");
     list.connect_row_selected(move |_, row| {
         let Some(row) = row else { return };
         let Some(name) = names.get(row.index() as usize) else {
@@ -107,20 +129,21 @@ fn with_source_sidebar(stack: gtk::Stack, tabs: &[(String, String)]) -> gtk::Wid
 
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(false);
     scroll.set_propagate_natural_width(true);
     scroll.set_propagate_natural_height(true);
     scroll.set_min_content_width(108);
-    scroll.set_max_content_height(360);
+    scroll.set_max_content_height(PAGE_MAX_HEIGHT);
     scroll.set_vexpand(true);
     scroll.set_child(Some(&list));
     scroll.add_css_class("word-sources");
 
-    stack.set_hexpand(true);
     let sep = gtk::Separator::new(gtk::Orientation::Vertical);
     let wrap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    wrap.add_css_class("word-popover-body");
     wrap.append(&scroll);
     wrap.append(&sep);
-    wrap.append(&stack);
+    wrap.append(&content);
     wrap.upcast()
 }
 
@@ -132,6 +155,10 @@ fn install_css() {
             r#"
             popover.word-popover contents {
               padding: 0;
+            }
+            .word-popover-body,
+            .word-body {
+              max-height: 360px;
             }
             .word-sources {
               padding: 4px 0;
@@ -342,17 +369,7 @@ fn lexicon_page(entries: &[&DictEntry], sender: relm4::Sender<super::app::Msg>) 
             &entry.headword,
         ));
     }
-
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroll.set_min_content_height(80);
-    scroll.set_max_content_height(320);
-    scroll.set_propagate_natural_height(true);
-    scroll.set_child(Some(&body));
-
-    let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    wrap.append(&scroll);
-    wrap
+    body
 }
 
 fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
@@ -365,17 +382,7 @@ fn dict_page(entry: &DictEntry, sender: relm4::Sender<super::app::Msg>) -> gtk::
 
     append_dict_entry(&body, entry);
     body.append(&library_button(sender, &entry.module, &entry.headword));
-
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroll.set_min_content_height(80);
-    scroll.set_max_content_height(320);
-    scroll.set_propagate_natural_height(true);
-    scroll.set_child(Some(&body));
-
-    let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    wrap.append(&scroll);
-    wrap
+    body
 }
 
 fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
@@ -395,6 +402,8 @@ fn append_dict_entry(body: &gtk::Box, entry: &DictEntry) {
 
     let text = gtk::Label::new(Some(&entry.text));
     text.set_wrap(true);
+    text.set_wrap_mode(gtk::pango::WrapMode::Word);
+    text.set_width_chars(40);
     text.set_max_width_chars(44);
     text.set_xalign(0.0);
     text.set_selectable(true);
