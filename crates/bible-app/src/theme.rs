@@ -150,6 +150,7 @@ pub fn paint_buffer(buffer: &gtk::TextBuffer) {
     set_bg(buffer, "hl-green", &palette.green, 0.30);
     set_bg(buffer, "hl-blue", &palette.blue, 0.30);
     set_bg(buffer, "hl-rose", &palette.red, 0.26);
+    set_bg(buffer, "user-note", &palette.magenta, 0.34);
     set_underline(buffer, "user-bookmark", &palette.orange);
 }
 

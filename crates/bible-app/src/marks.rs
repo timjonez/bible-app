@@ -69,7 +69,6 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
     bookmark.set_priority(1);
     table.add(&bookmark);
     let note = gtk::TextTag::new(Some("user-note"));
-    note.set_style(gtk::pango::Style::Italic);
     note.set_priority(1);
     table.add(&note);
 }
