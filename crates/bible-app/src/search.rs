@@ -1159,6 +1159,22 @@ mod tests {
             other => panic!("expected strongs, got {other:?}"),
         }
         match plan(
+            "H430",
+            &books,
+            current,
+            MatchMode::Phrase,
+            SearchRange::All,
+            BookChip::AllBooks,
+            SearchScope::Kjv,
+        ) {
+            Plan::Ready(p) => {
+                assert_eq!(p.compiled.strongs.as_deref(), Some("H430"));
+                assert_eq!(p.chip, BookChip::AllBooks);
+                assert_eq!(p.filter.book, None);
+            }
+            other => panic!("expected strongs, got {other:?}"),
+        }
+        match plan(
             "John/light",
             &books,
             current,

@@ -51,9 +51,6 @@ pub enum TabKind {
     },
     Bookmarks,
     Notes,
-    Occurrences {
-        code: String,
-    },
     Search,
     /// An empty tab with ways to open a passage or a study view.
     Blank,
@@ -591,12 +588,6 @@ impl Workspace {
         OpenResult { id, created: true }
     }
 
-    pub fn open_occurrences(&mut self, code: String) -> OpenResult {
-        let window = self.focused_window();
-        let id = self.add_tab(TabKind::Occurrences { code }, window);
-        OpenResult { id, created: true }
-    }
-
     pub fn open_blank(&mut self, window: WindowId) -> OpenResult {
         let id = self.add_tab(TabKind::Blank, window);
         OpenResult { id, created: true }
@@ -889,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn library_marks_and_occurrences_each_open_a_tab() {
+    fn library_and_marks_each_open_a_tab() {
         let mut ws = start();
         let lib = ws.open_library("Easton".into(), Some("God".into()));
         let lib2 = ws.open_library("Webster".into(), Some("Divide".into()));
@@ -919,17 +910,6 @@ mod tests {
             ws.tab(marks2.id).unwrap().kind,
             TabKind::Bookmarks
         ));
-        let occ = ws.open_occurrences("H430".into());
-        let occ2 = ws.open_occurrences("G26".into());
-        assert_ne!(occ.id, occ2.id);
-        match &ws.tab(occ.id).unwrap().kind {
-            TabKind::Occurrences { code } => assert_eq!(code, "H430"),
-            other => panic!("expected occurrences, got {other:?}"),
-        }
-        match &ws.tab(occ2.id).unwrap().kind {
-            TabKind::Occurrences { code } => assert_eq!(code, "G26"),
-            other => panic!("expected occurrences, got {other:?}"),
-        }
     }
 
     #[test]
@@ -971,7 +951,6 @@ mod tests {
         let tsk = ws.open_tsk(r(1, 1, 1)).id;
         let lib = ws.open_library("Easton".into(), Some("God".into())).id;
         let notes = ws.open_notes().id;
-        let occ = ws.open_occurrences("H430".into()).id;
         ws.navigate_passage(passage, r(43, 3, 16));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
         assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(43, 3, 16)));
@@ -980,10 +959,6 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(ws.tab(notes).unwrap().kind, TabKind::Notes));
-        match &ws.tab(occ).unwrap().kind {
-            TabKind::Occurrences { code } => assert_eq!(code, "H430"),
-            other => panic!("{other:?}"),
-        }
         ws.set_follow(mhc, false);
         ws.navigate_passage(passage, r(1, 2, 3));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
