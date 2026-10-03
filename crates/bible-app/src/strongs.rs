@@ -66,11 +66,11 @@ pub fn present(
             &name,
         );
     }
-    let content = scrolled_page(stack);
+    let content = scrolled_page(stack.clone());
     let child: gtk::Widget = if tabs.len() == 1 {
         content.upcast()
     } else {
-        with_source_sidebar(content, &tabs)
+        with_source_sidebar(stack, content, &tabs)
     };
     popover.set_child(Some(&child));
     point_at_word(popover, view, start);
@@ -95,7 +95,11 @@ fn scrolled_page(stack: gtk::Stack) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn with_source_sidebar(content: gtk::ScrolledWindow, tabs: &[(String, String)]) -> gtk::Widget {
+fn with_source_sidebar(
+    stack: gtk::Stack,
+    content: gtk::ScrolledWindow,
+    tabs: &[(String, String)],
+) -> gtk::Widget {
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
     list.add_css_class("navigation-sidebar");
@@ -112,16 +116,12 @@ fn with_source_sidebar(content: gtk::ScrolledWindow, tabs: &[(String, String)]) 
     }
 
     let names: Vec<String> = tabs.iter().map(|(id, _)| id.clone()).collect();
-    let stack_for_sel = content
-        .child()
-        .and_downcast::<gtk::Stack>()
-        .expect("word popover stack");
     list.connect_row_selected(move |_, row| {
         let Some(row) = row else { return };
         let Some(name) = names.get(row.index() as usize) else {
             return;
         };
-        stack_for_sel.set_visible_child_name(name);
+        stack.set_visible_child_name(name);
     });
     if let Some(row) = list.row_at_index(0) {
         list.select_row(Some(&row));
