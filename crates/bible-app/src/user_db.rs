@@ -30,6 +30,7 @@ pub struct VerseMarks {
 }
 
 impl VerseMarks {
+    #[cfg(test)]
     pub fn highlight(&self) -> Option<&str> {
         self.highlights.first().map(|h| h.color.as_str())
     }
