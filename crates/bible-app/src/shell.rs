@@ -150,6 +150,10 @@ pub struct LocationBar {
     pub back: gtk::Button,
     pub forward: gtk::Button,
     pub pickers: gtk::Box,
+    /// Always-allocated trailing slot. MHC/TSK pack the follow pin here so a
+    /// later show still gets width; a CenterBox end child that starts hidden
+    /// often stays at zero size.
+    pub end: gtk::Box,
 }
 
 pub fn location_bar(
@@ -179,6 +183,10 @@ pub fn location_bar(
     cluster.append(&pickers);
     cluster.append(&next);
 
+    let end = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    end.set_valign(gtk::Align::Center);
+    end.set_halign(gtk::Align::End);
+
     let history = history_nav();
     let row = gtk::CenterBox::new();
     row.set_orientation(gtk::Orientation::Horizontal);
@@ -189,6 +197,7 @@ pub fn location_bar(
     row.set_margin_end(12);
     row.set_start_widget(Some(&history.row));
     row.set_center_widget(Some(&cluster));
+    row.set_end_widget(Some(&end));
 
     LocationBar {
         row,
@@ -197,6 +206,7 @@ pub fn location_bar(
         back: history.back,
         forward: history.forward,
         pickers,
+        end,
     }
 }
 
@@ -293,12 +303,16 @@ pub fn tab_menu_model() -> gio::Menu {
 }
 
 /// Pin on an MHC/TSK location bar. Shown only when that view is a guest of a chapter.
+///
+/// `margin_end` clears the guest-pane close overlay (28px button + 8px inset)
+/// so the pin is not drawn under the X.
 pub fn follow_pin() -> gtk::ToggleButton {
     let btn = gtk::ToggleButton::new();
     btn.set_icon_name("view-pin-symbolic");
     btn.set_tooltip_text(Some("Follow the chapter"));
     btn.add_css_class("flat");
     btn.set_valign(gtk::Align::Center);
+    btn.set_margin_end(36);
     btn.set_visible(false);
     btn.update_property(&[gtk::accessible::Property::Label("Follow the chapter")]);
     btn

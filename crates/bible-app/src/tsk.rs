@@ -50,7 +50,7 @@ pub fn build() -> TskWidgets {
     bar.pickers.append(&book);
     bar.pickers.append(&chapter);
     let follow = shell::follow_pin();
-    bar.row.set_end_widget(Some(&follow));
+    bar.end.append(&follow);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let heading = gtk::TextTag::new(Some("section"));

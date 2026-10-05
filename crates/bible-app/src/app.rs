@@ -3270,6 +3270,7 @@ impl App {
             _ => return,
         };
         btn.set_visible(show);
+        btn.queue_resize();
         syncing.set(true);
         btn.set_active(show && on);
         syncing.set(false);
