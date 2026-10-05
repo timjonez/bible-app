@@ -944,7 +944,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
     entry.set_tooltip_text(Some(
-        "Click a hit to open the verse beside Search. Enter stays on the verse and closes Search. Right-click opens a new tab.",
+        "Click a hit, or press Enter, to open the verse beside Search. Right-click opens a new tab.",
     ));
     entry.set_hexpand(true);
 
@@ -957,7 +957,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     let mode_dd = gtk::DropDown::from_strings(&MatchMode::ALL.map(MatchMode::label));
     mode_dd.set_selected(mode.index());
     mode_dd.set_enable_search(false);
-    mode_dd.set_tooltip_text(Some("Phrase, all words, any word, or exact word"));
+    mode_dd.set_tooltip_text(Some("Contains, all words, any word, or exact word"));
     mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
 
     let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));

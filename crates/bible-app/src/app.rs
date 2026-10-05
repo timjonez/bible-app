@@ -748,7 +748,7 @@ impl SimpleComponent for App {
                     .and_then(|pane| pane.list.selected_row())
                     .map(|row| row.index())
                     .unwrap_or(0);
-                self.open_hit(id, idx, false, true);
+                self.open_hit(id, idx, false, false);
             }
             Msg::OpenHit(id, idx) => self.open_hit(id, idx, false, false),
             Msg::OpenHitBeside(id, idx) => {

@@ -108,7 +108,7 @@ impl MatchMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Phrase => "Phrase",
+            Self::Phrase => "Contains",
             Self::AllWords => "All words",
             Self::AnyWord => "Any word",
             Self::ExactWord => "Exact word",
@@ -232,7 +232,7 @@ pub fn match_query(input: &str) -> Option<String> {
 ///
 /// Uppercase `AND`, `OR`, `NOT`, and `NEAR/5` are operators. Lowercase
 /// "and" stays a word so a phrase like "bread and wine" still matches.
-/// Phrase, all words, and any word match a token anywhere in a word (`ear`
+/// Contains, all words, and any word match a token anywhere in a word (`ear`
 /// finds earth and hear). Exact word keeps whole tokens. A trailing `*` still
 /// prefixes a shorter stem in Exact word. Apostrophes break tokens, so "God's"
 /// searches God.
@@ -1475,6 +1475,7 @@ mod tests {
         assert_eq!(MatchMode::from_saved(0, 1), MatchMode::ExactWord);
         assert_eq!(MatchMode::from_saved(1, 1), MatchMode::ExactWord);
         assert_eq!(MatchMode::from_saved(3, 0), MatchMode::ExactWord);
+        assert_eq!(MatchMode::Phrase.label(), "Contains");
         assert_eq!(MatchMode::ExactWord.label(), "Exact word");
         assert_eq!(MatchMode::Phrase.word_match(), WordMatch::Prefix);
         assert_eq!(MatchMode::ExactWord.word_match(), WordMatch::Exact);
