@@ -68,6 +68,7 @@ pub struct App {
     paragraphs: bool,
     font_provider: gtk::CssProvider,
     _theme_watch: theme::Watch,
+    bookmark_action: gio::SimpleAction,
     user: Option<Connection>,
     workspace: Workspace,
     hosted: HashMap<TabId, HostedTab>,
@@ -124,6 +125,7 @@ pub enum Msg {
     OpenHitBeside(TabId, i32),
     OpenHitTab(TabId, Ref),
     OpenMhc,
+    OpenMhcHere,
     OpenTsk,
     OpenTskDest(Ref),
     OpenTskDestTab(Ref),
@@ -426,17 +428,28 @@ impl SimpleComponent for App {
         };
         let toggle_bookmark_action: RelmAction<ToggleBookmarkAction> = {
             let sender = sender.clone();
-            RelmAction::new_stateless(move |_| sender.input(Msg::ToggleBookmark))
+            RelmAction::new_stateful(&false, move |_, state: &mut bool| {
+                *state = !*state;
+                sender.input(Msg::ToggleBookmark);
+            })
         };
         let add_note_action: RelmAction<AddNoteAction> = {
             let sender = sender.clone();
             RelmAction::new_stateless(move |_| sender.input(Msg::AddNote))
+        };
+        let open_mhc_here: RelmAction<OpenMhcHereAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::OpenMhcHere))
         };
         bookmarks_action.gio_action().set_enabled(marks_on);
         notes_action.gio_action().set_enabled(marks_on);
         export_notes_action.gio_action().set_enabled(marks_on);
         toggle_bookmark_action.gio_action().set_enabled(marks_on);
         add_note_action.gio_action().set_enabled(marks_on);
+        if error.is_some() {
+            open_mhc_here.gio_action().set_enabled(false);
+        }
+        let bookmark_gio = toggle_bookmark_action.gio_action().clone();
 
         let highlight_action = gio::SimpleAction::new("highlight", Some(glib::VariantTy::STRING));
         highlight_action.set_enabled(marks_on);
@@ -476,6 +489,7 @@ impl SimpleComponent for App {
         group.add_action(export_notes_action);
         group.add_action(toggle_bookmark_action);
         group.add_action(add_note_action);
+        group.add_action(open_mhc_here);
         group.add_action(detach_tab);
         group.add_action(beside_tab);
 
@@ -495,6 +509,7 @@ impl SimpleComponent for App {
             paragraphs,
             font_provider,
             _theme_watch,
+            bookmark_action: bookmark_gio,
             user,
             workspace: Workspace::new(at),
             hosted: HashMap::new(),
@@ -537,6 +552,7 @@ impl SimpleComponent for App {
             let id = model.workspace.focused();
             model.spawn_passage(id, at);
             model.sync_pickers();
+            model.sync_window_title(WindowId::MAIN);
         }
 
         let key = gtk::EventControllerKey::new();
@@ -605,7 +621,11 @@ impl SimpleComponent for App {
                 sender_keys.input(Msg::FontSmaller);
                 return glib::Propagation::Stop;
             }
-            if ctrl && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
+            if ctrl && shift && (keyval == gtk::gdk::Key::n || keyval == gtk::gdk::Key::N) {
+                sender_keys.input(Msg::AddNote);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && !shift && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
                 sender_keys.input(Msg::ToggleBookmark);
                 return glib::Propagation::Stop;
             }
@@ -738,7 +758,7 @@ impl SimpleComponent for App {
                     .and_then(|pane| pane.list.selected_row())
                     .map(|row| row.index())
                     .unwrap_or(0);
-                self.open_hit(id, idx, false, true);
+                self.open_hit(id, idx, false, false);
             }
             Msg::OpenHit(id, idx) => self.open_hit(id, idx, false, false),
             Msg::OpenHitBeside(id, idx) => {
@@ -755,6 +775,9 @@ impl SimpleComponent for App {
             Msg::OpenHitTab(id, at) => self.open_search_verse_tab(id, at),
             Msg::OpenMhc => {
                 self.in_current_tabs(|app| app.ensure_mhc());
+            }
+            Msg::OpenMhcHere => {
+                let _ = self.ensure_mhc();
             }
             Msg::OpenTsk => {
                 self.in_current_tabs(|app| app.ensure_tsk());
@@ -1031,6 +1054,7 @@ impl SimpleComponent for App {
                 if self.workspace.tab(id).is_some_and(|t| t.kind.is_blank()) {
                     self.focus_blank_entry(id);
                 }
+                self.sync_window_title(self.window_of(id));
             }
             Msg::TabClosed(id) => {
                 if !self.embedding.remove(&id) {
@@ -1065,6 +1089,7 @@ impl SimpleComponent for App {
         self.apply_column_mode();
         self.sync_shells();
         self.sync_follow_pins();
+        self.sync_window_titles();
         let _ = sender;
     }
 }
@@ -2097,16 +2122,11 @@ impl App {
             self.apply_passage_ref(id, at, true, true);
             return;
         }
-        if let Some(verse) = self.passage(id).and_then(|p| p.mhc_at(offset)) {
-            let at = Ref {
-                verse,
-                ..self.passage(id).map(|p| p.at).unwrap_or_else(|| self.at())
-            };
-            self.apply_passage_ref(id, at, false, false);
-            if let Some(p) = self.passage_mut(id) {
-                p.select_verse(verse);
+        if let Some(verse) = self.passage(id).and_then(|p| p.verse_num_at(offset)) {
+            if let Some(p) = self.passage(id) {
+                p.strongs_popover.popdown();
             }
-            let _ = self.ensure_mhc();
+            self.select_verse(id, verse);
             return;
         }
         let note = self
@@ -2396,6 +2416,7 @@ impl App {
             page.set_tooltip(&nav::format_ref(&self.books, at));
         }
         self.sync_study_bar(id);
+        self.sync_window_title(self.window_of(id));
     }
 
     fn refresh_followers(&mut self) {
@@ -2687,55 +2708,94 @@ impl App {
         }
     }
 
-    fn sync_tab_title(&self, id: TabId) {
-        let Some(tab) = self.workspace.tab(id) else {
-            return;
-        };
-        let Some(hosted) = self.hosted.get(&id) else {
-            return;
-        };
-        let title = match &tab.kind {
+    fn tab_title(&self, id: TabId) -> Option<String> {
+        let tab = self.workspace.tab(id)?;
+        Some(match &tab.kind {
             TabKind::Passage { at } => nav::format_chapter(&self.books, at.book, at.chapter),
             TabKind::Mhc { .. } => "Matthew Henry".into(),
             TabKind::Tsk { .. } => "TSK".into(),
-            TabKind::Library { .. } => match &hosted.content {
-                TabContent::Library(w) => dict::tab_title(w),
+            TabKind::Library { .. } => match self.hosted.get(&id).map(|h| &h.content) {
+                Some(TabContent::Library(w)) => dict::tab_title(w),
                 _ => "Library".into(),
             },
             TabKind::Bookmarks => "Bookmarks".into(),
             TabKind::Notes => "Notes".into(),
             TabKind::Search => "Search".into(),
             TabKind::Blank => "New".into(),
-        };
-        let Some(page) = hosted.page.clone() else {
-            self.sync_stack_title(id, &title);
+        })
+    }
+
+    fn sync_tab_title(&self, id: TabId) {
+        let Some(title) = self.tab_title(id) else {
             return;
         };
-        page.set_title(&title);
-        if let Some(at) = tab.kind.at() {
-            if !tab.kind.is_passage() {
-                page.set_tooltip(&nav::format_ref(&self.books, at));
+        if let Some(page) = self.page_of(id) {
+            page.set_title(&title);
+            if let Some(tab) = self.workspace.tab(id) {
+                if let Some(at) = tab.kind.at() {
+                    if !tab.kind.is_passage() {
+                        page.set_tooltip(&nav::format_ref(&self.books, at));
+                    }
+                }
             }
+        } else {
+            self.sync_stack_title(id, &title);
+        }
+        self.sync_window_title(self.window_of(id));
+    }
+
+    fn gtk_window(&self, window: WindowId) -> Option<gtk::Window> {
+        if let Some(win) = self
+            .view_of(window)
+            .and_then(|view| view.root())
+            .and_downcast::<gtk::Window>()
+        {
+            return Some(win);
+        }
+        self.sides
+            .borrow()
+            .iter()
+            .find(|side| side.id == window)
+            .map(|side| side.chrome.window.clone().upcast())
+    }
+
+    fn sync_window_title(&self, window: WindowId) {
+        let Some(win) = self.gtk_window(window) else {
+            return;
+        };
+        if self.error.is_some() {
+            win.set_title(Some(APP_TITLE));
+            return;
+        }
+        let tab = self
+            .workspace
+            .focused_in(window)
+            .and_then(|id| self.tab_title(id));
+        win.set_title(Some(&window_title_from_tab(tab.as_deref())));
+    }
+
+    fn sync_window_titles(&self) {
+        self.sync_window_title(WindowId::MAIN);
+        let side_ids: Vec<WindowId> = self.sides.borrow().iter().map(|side| side.id).collect();
+        for id in side_ids {
+            self.sync_window_title(id);
         }
     }
 
     fn select_tab(&self, id: TabId) {
+        let window = self.window_of(id);
         let shown = self
             .workspace
             .tab(id)
             .and_then(|tab| tab.host)
             .unwrap_or(id);
-        let Some(page) = self.page_of(shown) else {
-            return;
-        };
-        let window = self.window_of(shown);
-        let Some(view) = self.view_of(window) else {
-            return;
-        };
-        view.set_selected_page(&page);
-        if let Some(win) = view.root().and_downcast::<gtk::Window>() {
-            win.present();
+        if let (Some(page), Some(view)) = (self.page_of(shown), self.view_of(window)) {
+            view.set_selected_page(&page);
+            if let Some(win) = view.root().and_downcast::<gtk::Window>() {
+                win.present();
+            }
         }
+        self.sync_window_title(window);
     }
 
     fn focus_tab(&mut self, id: TabId) {
@@ -2788,6 +2848,7 @@ impl App {
         }
         self.sync_shells();
         self.sync_pickers();
+        self.sync_window_title(window);
     }
 
     fn view_of(&self, window: WindowId) -> Option<adw::TabView> {
@@ -2993,6 +3054,7 @@ impl App {
             self.select_tab(id);
         }
         self.sync_shells();
+        self.sync_window_title(window);
     }
 
     fn ensure_side(&mut self, id: WindowId) {
@@ -3107,6 +3169,14 @@ impl App {
                 tx.emit(Msg::FontSmaller);
                 return glib::Propagation::Stop;
             }
+            if ctrl && shift && (keyval == gtk::gdk::Key::n || keyval == gtk::gdk::Key::N) {
+                tx.emit(Msg::AddNote);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && !shift && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
+                tx.emit(Msg::ToggleBookmark);
+                return glib::Propagation::Stop;
+            }
             glib::Propagation::Proceed
         });
         window.add_controller(keys);
@@ -3115,6 +3185,7 @@ impl App {
             pop.unparent();
         });
         self.sync_pickers();
+        self.sync_window_title(id);
     }
 
     fn detach_tab(&mut self, id: TabId) {
@@ -3134,6 +3205,8 @@ impl App {
         from.transfer_page(&page, &dest, 0);
         self.sync_shells();
         self.select_tab(id);
+        self.sync_window_title(outcome.source);
+        self.sync_window_title(outcome.window);
     }
 
     fn join_study_stack(&mut self, id: TabId) {
@@ -3285,6 +3358,7 @@ impl App {
             SplitOutcome::AlreadyBeside => {}
         }
         self.sync_shells();
+        self.sync_window_title(self.window_of(id));
     }
 
     fn popdown_passage_popovers(&self) {
@@ -3448,14 +3522,17 @@ impl App {
         {
             self.select_verse(id, verse);
         }
+        let bookmark_action = self.bookmark_action.clone();
         let Some(p) = self.passage_mut(id) else {
             return;
         };
         let mark = p.chapter_marks.get(&p.at.verse);
         let bookmarked = mark.is_some_and(|m| m.bookmark);
         let has_note = mark.is_some_and(|m| m.note);
+        let has_mhc = p.layout.mhc.iter().any(|m| m.verse == p.at.verse);
         p.verse_menu
-            .set_menu_model(Some(&marks::verse_menu_model(bookmarked, has_note)));
+            .set_menu_model(Some(&marks::verse_menu_model(has_note, has_mhc)));
+        bookmark_action.set_state(&bookmarked.to_variant());
         p.verse_menu
             .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
         p.verse_menu.popup();
@@ -4001,6 +4078,15 @@ fn wire_host(shell: &shell::SplitShell, window: WindowId, ctx: &WireCtx) {
     view.connect_create_window(move |_| Some(open_drag_window(&ctx)));
 }
 
+const APP_TITLE: &str = "bible-app";
+
+fn window_title_from_tab(tab: Option<&str>) -> String {
+    match tab {
+        Some(title) if !title.is_empty() => format!("{title} — {APP_TITLE}"),
+        _ => APP_TITLE.to_string(),
+    }
+}
+
 fn unparent(widget: &gtk::Widget) {
     let Some(parent) = widget.parent() else {
         return;
@@ -4292,7 +4378,41 @@ relm4::new_stateless_action!(TskAction, WindowActionGroup, "tsk");
 relm4::new_stateless_action!(BookmarksAction, WindowActionGroup, "bookmarks");
 relm4::new_stateless_action!(NotesAction, WindowActionGroup, "notes");
 relm4::new_stateless_action!(ExportNotesAction, WindowActionGroup, "export-notes");
-relm4::new_stateless_action!(ToggleBookmarkAction, WindowActionGroup, "toggle-bookmark");
+relm4::new_stateful_action!(
+    ToggleBookmarkAction,
+    WindowActionGroup,
+    "toggle-bookmark",
+    (),
+    bool
+);
 relm4::new_stateless_action!(AddNoteAction, WindowActionGroup, "add-note");
+relm4::new_stateless_action!(OpenMhcHereAction, WindowActionGroup, "open-mhc-here");
 relm4::new_stateless_action!(DetachTabAction, WindowActionGroup, "tab-detach");
 relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-beside");
+
+#[cfg(test)]
+mod tests {
+    use super::window_title_from_tab;
+
+    #[test]
+    fn window_title_uses_tab_and_app_name() {
+        assert_eq!(
+            window_title_from_tab(Some("Genesis 1")),
+            "Genesis 1 — bible-app"
+        );
+        assert_eq!(window_title_from_tab(Some("Search")), "Search — bible-app");
+        assert_eq!(window_title_from_tab(Some("Notes")), "Notes — bible-app");
+        assert_eq!(
+            window_title_from_tab(Some("Bookmarks")),
+            "Bookmarks — bible-app"
+        );
+        assert_eq!(
+            window_title_from_tab(Some("Matthew Henry")),
+            "Matthew Henry — bible-app"
+        );
+        assert_eq!(window_title_from_tab(Some("TSK")), "TSK — bible-app");
+        assert_eq!(window_title_from_tab(Some("New")), "New — bible-app");
+        assert_eq!(window_title_from_tab(None), "bible-app");
+        assert_eq!(window_title_from_tab(Some("")), "bible-app");
+    }
+}

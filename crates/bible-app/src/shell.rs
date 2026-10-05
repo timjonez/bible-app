@@ -123,12 +123,12 @@ pub struct HistoryNav {
 }
 
 pub fn history_nav() -> HistoryNav {
-    let back = gtk::Button::from_icon_name("edit-undo-symbolic");
+    let back = gtk::Button::from_icon_name("go-previous-symbolic");
     back.set_tooltip_text(Some("Back in history (Alt+Shift+Left)"));
     back.add_css_class("flat");
     back.set_sensitive(false);
     back.update_property(&[gtk::accessible::Property::Label("Back")]);
-    let forward = gtk::Button::from_icon_name("edit-redo-symbolic");
+    let forward = gtk::Button::from_icon_name("go-next-symbolic");
     forward.set_tooltip_text(Some("Forward in history (Alt+Shift+Right)"));
     forward.add_css_class("flat");
     forward.set_sensitive(false);

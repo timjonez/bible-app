@@ -504,40 +504,8 @@ impl PassageView {
                 };
             tips.push((link.span.start, link.span.end, preview));
         }
-        for (span, (verse, _)) in self
-            .layout
-            .verse_nums
-            .iter()
-            .zip(self.layout.verse_start.iter())
-        {
-            let mut parts = Vec::new();
-            if self.layout.mhc.iter().any(|m| m.verse == *verse) {
-                parts.push("Open Matthew Henry".to_string());
-            }
-            if let Some(m) = self.chapter_marks.get(verse) {
-                if m.bookmark {
-                    parts.push("Bookmarked".into());
-                }
-                if m.highlight().is_some() {
-                    parts.push("Highlighted".into());
-                }
-                if m.note {
-                    parts.push("Has a note".into());
-                }
-            }
-            if !parts.is_empty() {
-                tips.push((span.start, span.end, parts.join(" · ")));
-            }
-        }
         for mark in &self.layout.notes {
             tips.push((mark.span.start, mark.span.end, mark.text.clone()));
-        }
-        for word in &self.layout.words {
-            tips.push((
-                word.span.start,
-                word.span.end,
-                "Click for Strong's, lexicons, dictionaries, and topics".into(),
-            ));
         }
         *self.xref_tips.borrow_mut() = tips;
     }
@@ -550,12 +518,13 @@ impl PassageView {
             .map(|l| l.at)
     }
 
-    pub fn mhc_at(&self, offset: i32) -> Option<u8> {
+    pub fn verse_num_at(&self, offset: i32) -> Option<u8> {
         self.layout
-            .mhc
+            .verse_nums
             .iter()
-            .find(|m| m.span.contains(offset))
-            .map(|m| m.verse)
+            .zip(self.layout.verse_start.iter())
+            .find(|(span, _)| span.contains(offset))
+            .map(|(_, (verse, _))| *verse)
     }
 
     pub fn tsk_at(&self, offset: i32) -> Option<&layout::TskMark> {
