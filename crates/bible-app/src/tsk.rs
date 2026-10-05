@@ -23,6 +23,8 @@ pub struct TskWidgets {
     pub next: gtk::Button,
     pub back: gtk::Button,
     pub forward: gtk::Button,
+    pub follow: gtk::ToggleButton,
+    pub follow_syncing: Rc<Cell<bool>>,
     pub buffer: gtk::TextBuffer,
     pub view: gtk::TextView,
     pub menu: gtk::PopoverMenu,
@@ -47,6 +49,8 @@ pub fn build() -> TskWidgets {
     let chapter = picker::chapter_dropdown();
     bar.pickers.append(&book);
     bar.pickers.append(&chapter);
+    let follow = shell::follow_pin();
+    bar.row.set_end_widget(Some(&follow));
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let heading = gtk::TextTag::new(Some("section"));
@@ -86,6 +90,8 @@ pub fn build() -> TskWidgets {
         next: bar.next,
         back: bar.back,
         forward: bar.forward,
+        follow,
+        follow_syncing: Rc::new(Cell::new(false)),
         buffer,
         view,
         menu,
@@ -137,6 +143,14 @@ pub fn wire(
     widgets
         .forward
         .connect_clicked(move |_| tx.emit(super::app::Msg::StudyForward(id)));
+    let tx = sender.clone();
+    let syncing = widgets.follow_syncing.clone();
+    widgets.follow.connect_toggled(move |btn| {
+        if syncing.get() {
+            return;
+        }
+        tx.emit(super::app::Msg::SetFollow(id, btn.is_active()));
+    });
 
     cite::wire(&widgets.view, widgets.links.clone(), id, sender);
 }

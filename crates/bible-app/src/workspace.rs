@@ -61,12 +61,10 @@ impl TabKind {
         matches!(self, Self::Passage { .. })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_mhc(&self) -> bool {
         matches!(self, Self::Mhc { .. })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_tsk(&self) -> bool {
         matches!(self, Self::Tsk { .. })
     }
@@ -77,6 +75,14 @@ impl TabKind {
 
     pub fn is_blank(&self) -> bool {
         matches!(self, Self::Blank)
+    }
+
+    /// Search, Henry, Treasury, or library — views that share a split's right pane.
+    pub fn is_study_view(&self) -> bool {
+        matches!(
+            self,
+            Self::Mhc { .. } | Self::Tsk { .. } | Self::Library { .. } | Self::Search
+        )
     }
 
     pub fn follows_verse(&self) -> bool {
@@ -101,6 +107,8 @@ pub struct Tab {
     pub window: WindowId,
     /// When set, this view is the right-hand side of that tab and has no tab of its own.
     pub host: Option<TabId>,
+    /// Guest currently shown on the right of this tab.
+    pub visible_guest: Option<TabId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +168,7 @@ impl Workspace {
                 kind: TabKind::Passage { at: start },
                 window: WindowId::MAIN,
                 host: None,
+                visible_guest: None,
             }],
             windows: vec![WindowRec {
                 id: WindowId::MAIN,
@@ -213,30 +222,118 @@ impl Workspace {
             .any(|t| t.window == window && t.host.is_some())
     }
 
-    /// The view drawn inside `host`, when that tab is split.
-    pub fn guest_of(&self, host: TabId) -> Option<TabId> {
+    /// Guests drawn in `host`'s right-hand stack, in open order.
+    pub fn guests_of(&self, host: TabId) -> Vec<TabId> {
         self.tabs
             .iter()
-            .find(|t| t.host == Some(host))
+            .filter(|t| t.host == Some(host))
             .map(|t| t.id)
+            .collect()
+    }
+
+    /// The view shown inside `host`, when that tab is split.
+    pub fn guest_of(&self, host: TabId) -> Option<TabId> {
+        let visible = self.tab(host).and_then(|t| t.visible_guest);
+        if visible.is_some_and(|id| self.tab(id).is_some_and(|t| t.host == Some(host))) {
+            return visible;
+        }
+        self.guests_of(host).first().copied()
+    }
+
+    /// Show `guest` in `host`'s right-hand stack.
+    pub fn show_guest(&mut self, host: TabId, guest: TabId) -> bool {
+        if !self.tab(guest).is_some_and(|t| t.host == Some(host)) {
+            return false;
+        }
+        self.focus(guest);
+        true
+    }
+
+    /// Passage host whose right-hand guests are study views, when this window is split that way.
+    pub fn study_stack_host(&self, window: WindowId) -> Option<TabId> {
+        let host = self.tabs.iter().find(|t| {
+            t.window == window && t.host.is_none() && self.tabs.iter().any(|g| g.host == Some(t.id))
+        })?;
+        if !host.kind.is_passage() {
+            return None;
+        }
+        let guests = self.guests_of(host.id);
+        if guests.is_empty() {
+            return None;
+        }
+        guests
+            .iter()
+            .all(|&id| self.tab(id).is_some_and(|t| t.kind.is_study_view()))
+            .then_some(host.id)
+    }
+
+    pub fn stack_guest_kind(&self, host: TabId, pred: impl Fn(&TabKind) -> bool) -> Option<TabId> {
+        self.guests_of(host)
+            .into_iter()
+            .find(|&id| self.tab(id).is_some_and(|t| pred(&t.kind)))
+    }
+
+    /// Put `id` in this window's study stack, or start a split with a passage.
+    /// False when the window's split is a Bible|Bible (or other non-study) pair.
+    pub fn place_in_study_stack(&mut self, id: TabId) -> bool {
+        let Some(tab) = self.tab(id).cloned() else {
+            return false;
+        };
+        if let Some(host) = tab.host {
+            return self.show_guest(host, id);
+        }
+        if tab.kind.is_study_view() {
+            if let Some(host) = self.study_stack_host(tab.window) {
+                if host == id {
+                    return false;
+                }
+                self.embed(id, host);
+                return true;
+            }
+        }
+        self.move_beside(id)
     }
 
     /// The passage on the other side of `id`'s split, when that side is a passage.
     pub fn passage_beside(&self, id: TabId) -> Option<TabId> {
         let tab = self.tab(id)?;
-        let partner = tab.host.or_else(|| self.guest_of(id))?;
-        self.tab(partner)
-            .filter(|partner| partner.kind.is_passage())
-            .map(|partner| partner.id)
+        if let Some(host) = tab.host {
+            return self
+                .tab(host)
+                .filter(|partner| partner.kind.is_passage())
+                .map(|partner| partner.id);
+        }
+        self.guests_of(id).into_iter().find(|&partner| {
+            self.tab(partner)
+                .is_some_and(|partner| partner.kind.is_passage())
+        })
     }
 
     /// The library on the other side of `id`'s split, when that side is a library.
     pub fn library_beside(&self, id: TabId) -> Option<TabId> {
         let tab = self.tab(id)?;
-        let partner = tab.host.or_else(|| self.guest_of(id))?;
-        self.tab(partner)
-            .filter(|partner| matches!(partner.kind, TabKind::Library { .. }))
-            .map(|partner| partner.id)
+        if let Some(host) = tab.host {
+            return self
+                .tab(host)
+                .filter(|partner| matches!(partner.kind, TabKind::Library { .. }))
+                .map(|partner| partner.id);
+        }
+        self.guests_of(id).into_iter().find(|&partner| {
+            self.tab(partner)
+                .is_some_and(|partner| matches!(partner.kind, TabKind::Library { .. }))
+        })
+    }
+
+    fn paired_with_passage(&self, id: TabId) -> bool {
+        let Some(host) = self.tab(id).and_then(|t| t.host) else {
+            return false;
+        };
+        self.tab(host).is_some_and(|t| t.kind.is_passage())
+    }
+
+    fn follows_in_split(&self, id: TabId) -> bool {
+        self.tab(id)
+            .is_some_and(|t| t.kind.follows_verse() && self.paired_with_passage(id))
     }
 
     /// False once this window already has a split. The split belongs to one tab.
@@ -354,7 +451,8 @@ impl Workspace {
             return;
         };
         let window = tab.window;
-        let selected = tab.host.unwrap_or(id);
+        let host = tab.host;
+        let selected = host.unwrap_or(id);
         let is_passage = tab.kind.is_passage();
         let at = tab.kind.at();
         self.focused = id;
@@ -362,6 +460,11 @@ impl Workspace {
             self.last_passage = id;
             if let Some(at) = at {
                 self.last_at = at;
+            }
+        }
+        if let Some(host) = host {
+            if let Some(tab) = self.tab_mut(host) {
+                tab.visible_guest = Some(id);
             }
         }
         if let Some(rec) = self.window_mut(window) {
@@ -377,10 +480,12 @@ impl Workspace {
             return;
         };
         let source = tab.window;
-        let guest = self.guest_of(id);
+        let guests = self.guests_of(id);
         if source == window
             && tab.host.is_none()
-            && guest.is_none_or(|g| self.tab(g).is_some_and(|t| t.window == window))
+            && guests
+                .iter()
+                .all(|&g| self.tab(g).is_some_and(|t| t.window == window))
         {
             self.focus(id);
             return;
@@ -394,13 +499,16 @@ impl Workspace {
         if let Some(tab) = self.tab_mut(id) {
             tab.window = window;
             tab.host = None;
+            if dest_taken {
+                tab.visible_guest = None;
+            }
         }
-        if let Some(guest) = guest {
+        for guest in guests {
+            if dest_taken {
+                self.release_guest(guest);
+            }
             if let Some(tab) = self.tab_mut(guest) {
                 tab.window = window;
-                if dest_taken {
-                    tab.host = None;
-                }
             }
         }
         self.repair(source);
@@ -419,19 +527,14 @@ impl Workspace {
         if !self.set_passage_at(id, at) {
             return;
         }
-        for tab in &mut self.tabs {
-            if tab.id == keep {
-                continue;
-            }
-            match &mut tab.kind {
-                TabKind::Mhc {
-                    at: slot, follow, ..
-                }
-                | TabKind::Tsk {
-                    at: slot, follow, ..
-                } if *follow => *slot = at,
-                _ => {}
-            }
+        let following: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.id != keep && self.follows_in_split(tab.id))
+            .map(|tab| tab.id)
+            .collect();
+        for id in following {
+            self.set_study_at(id, at);
         }
     }
 
@@ -461,18 +564,16 @@ impl Workspace {
         self.follow_verse(at);
     }
 
-    /// Update MHC/TSK tabs that have follow-verse on.
+    /// Update MHC/TSK guests that follow a paired chapter.
     pub fn follow_verse(&mut self, at: Ref) {
-        for tab in &mut self.tabs {
-            match &mut tab.kind {
-                TabKind::Mhc {
-                    at: slot, follow, ..
-                }
-                | TabKind::Tsk {
-                    at: slot, follow, ..
-                } if *follow => *slot = at,
-                _ => {}
-            }
+        let following: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|tab| self.follows_in_split(tab.id))
+            .map(|tab| tab.id)
+            .collect();
+        for id in following {
+            self.set_study_at(id, at);
         }
     }
 
@@ -503,6 +604,7 @@ impl Workspace {
 
     pub fn set_follow(&mut self, id: TabId, follow: bool) {
         let last_at = self.last_at;
+        let follow = follow && self.paired_with_passage(id);
         if let Some(tab) = self.tab_mut(id) {
             match &mut tab.kind {
                 TabKind::Mhc {
@@ -560,13 +662,13 @@ impl Workspace {
 
     pub fn open_mhc(&mut self, at: Ref) -> OpenResult {
         let window = self.focused_window();
-        let id = self.add_tab(TabKind::Mhc { at, follow: true }, window);
+        let id = self.add_tab(TabKind::Mhc { at, follow: false }, window);
         OpenResult { id, created: true }
     }
 
     pub fn open_tsk(&mut self, at: Ref) -> OpenResult {
         let window = self.focused_window();
-        let id = self.add_tab(TabKind::Tsk { at, follow: true }, window);
+        let id = self.add_tab(TabKind::Tsk { at, follow: false }, window);
         OpenResult { id, created: true }
     }
 
@@ -647,16 +749,19 @@ impl Workspace {
         let source = tab.window;
         let window = self.alloc_window();
         self.ensure_window(window);
-        let guest = if tab.host.is_none() {
-            self.guest_of(id)
+        let guests = if tab.host.is_none() {
+            self.guests_of(id)
         } else {
-            None
+            Vec::new()
         };
+        if tab.host.is_some() {
+            self.release_guest(id);
+        }
         if let Some(tab) = self.tab_mut(id) {
             tab.window = window;
             tab.host = None;
         }
-        if let Some(guest) = guest {
+        for guest in guests {
             if let Some(tab) = self.tab_mut(guest) {
                 tab.window = window;
             }
@@ -673,8 +778,22 @@ impl Workspace {
         };
         let tab = self.tabs.remove(idx);
         let window = tab.window;
-        if let Some(guest) = self.tabs.iter_mut().find(|t| t.host == Some(tab.id)) {
-            guest.host = None;
+        let guests: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| t.host == Some(tab.id))
+            .map(|t| t.id)
+            .collect();
+        for guest in guests {
+            self.release_guest(guest);
+        }
+        if let Some(host) = tab.host {
+            let next = self.guests_of(host).first().copied();
+            if let Some(tab) = self.tab_mut(host) {
+                if tab.visible_guest == Some(id) {
+                    tab.visible_guest = next;
+                }
+            }
         }
         self.repair(window);
 
@@ -702,17 +821,45 @@ impl Workspace {
             kind,
             window,
             host: None,
+            visible_guest: None,
         });
         self.focus(id);
         id
     }
 
-    /// `id` becomes the right-hand view of `host` and drops out of the tab bar.
+    /// `id` becomes a right-hand view of `host` and drops out of the tab bar.
     fn embed(&mut self, id: TabId, host: TabId) {
         if let Some(tab) = self.tab_mut(id) {
             tab.host = Some(host);
         }
+        if let Some(tab) = self.tab_mut(host) {
+            tab.visible_guest = Some(id);
+        }
+        if self.paired_with_passage(id)
+            && self
+                .tab(id)
+                .is_some_and(|t| matches!(t.kind, TabKind::Mhc { .. } | TabKind::Tsk { .. }))
+        {
+            self.set_follow(id, true);
+        }
         self.focus(id);
+    }
+
+    /// Drop `id` out of a split. Follow turns off; the view becomes a real tab.
+    fn release_guest(&mut self, id: TabId) {
+        let host = self.tab(id).and_then(|t| t.host);
+        self.set_follow(id, false);
+        if let Some(tab) = self.tab_mut(id) {
+            tab.host = None;
+        }
+        if let Some(host) = host {
+            let next = self.guests_of(host).first().copied();
+            if let Some(tab) = self.tab_mut(host) {
+                if tab.visible_guest == Some(id) {
+                    tab.visible_guest = next;
+                }
+            }
+        }
     }
 
     /// A passage tab when this window has one, otherwise any other real tab.
@@ -948,8 +1095,11 @@ mod tests {
         let mut ws = start();
         let passage = ws.focused();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
         let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(tsk));
         let lib = ws.open_library("Easton".into(), Some("God".into())).id;
+        assert!(ws.place_in_study_stack(lib));
         let notes = ws.open_notes().id;
         ws.navigate_passage(passage, r(43, 3, 16));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
@@ -959,6 +1109,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(ws.tab(notes).unwrap().kind, TabKind::Notes));
+        assert!(ws.tab(notes).unwrap().host.is_none());
         ws.set_follow(mhc, false);
         ws.navigate_passage(passage, r(1, 2, 3));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
@@ -971,7 +1122,9 @@ mod tests {
     fn set_study_at_keeps_follow() {
         let mut ws = start();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
         let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(tsk));
         ws.set_follow(mhc, false);
         ws.set_study_at(mhc, r(19, 23, 1));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(19, 23, 1)));
@@ -984,13 +1137,14 @@ mod tests {
     fn opening_mhc_again_leaves_the_first_tab() {
         let mut ws = start();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
-        ws.set_follow(mhc, false);
         let second = ws.open_mhc(r(19, 23, 1)).id;
         assert_ne!(mhc, second);
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(1, 1, 1)));
         assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
         assert_eq!(ws.tab(second).unwrap().kind.at(), Some(r(19, 23, 1)));
-        assert!(ws.tab(second).unwrap().kind.follows_verse());
+        assert!(!ws.tab(second).unwrap().kind.follows_verse());
+        assert!(ws.tab(mhc).unwrap().host.is_none());
+        assert!(ws.tab(second).unwrap().host.is_none());
     }
 
     #[test]
@@ -1207,5 +1361,110 @@ mod tests {
         assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 1, 1)));
         ws.navigate_passage(passage, r(19, 23, 1));
         assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(19, 23, 1)));
+    }
+
+    #[test]
+    fn standalone_mhc_does_not_follow() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert!(!ws.tab(tsk).unwrap().kind.follows_verse());
+        ws.navigate_passage(passage, r(43, 3, 16));
+        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(1, 1, 1)));
+        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 1, 1)));
+        ws.set_follow(mhc, true);
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        ws.navigate_passage(passage, r(19, 23, 1));
+        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(1, 1, 1)));
+    }
+
+    #[test]
+    fn follow_on_when_embedded_beside_a_passage() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert!(ws.place_in_study_stack(mhc));
+        assert_eq!(ws.tab(mhc).unwrap().host, Some(passage));
+        assert!(ws.tab(mhc).unwrap().kind.follows_verse());
+        ws.navigate_passage(passage, r(43, 3, 16));
+        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
+    }
+
+    #[test]
+    fn closing_split_clears_follow() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
+        assert!(ws.tab(mhc).unwrap().kind.follows_verse());
+        assert_eq!(ws.close(passage), CloseOutcome::Closed);
+        assert!(ws.tab(mhc).unwrap().host.is_none());
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert!(!ws.is_split());
+    }
+
+    #[test]
+    fn multiple_study_guests_on_one_host() {
+        let mut ws = start();
+        let left = ws.focused();
+        let search = ws.open_search(WindowId::MAIN).id;
+        assert!(ws.place_in_study_stack(search));
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(tsk));
+        assert_eq!(ws.tab(search).unwrap().host, Some(left));
+        assert_eq!(ws.tab(mhc).unwrap().host, Some(left));
+        assert_eq!(ws.tab(tsk).unwrap().host, Some(left));
+        assert_eq!(ws.guests_of(left), vec![search, mhc, tsk]);
+        assert_eq!(ws.guest_of(left), Some(tsk));
+        assert_eq!(ws.tabs().iter().filter(|t| t.host.is_none()).count(), 1);
+        assert!(ws.is_split());
+        assert!(!ws.can_split(left));
+        assert!(ws.tab(mhc).unwrap().kind.follows_verse());
+        assert!(ws.tab(tsk).unwrap().kind.follows_verse());
+        ws.show_guest(left, search);
+        assert_eq!(ws.guest_of(left), Some(search));
+        ws.show_guest(left, mhc);
+        assert_eq!(ws.guest_of(left), Some(mhc));
+    }
+
+    #[test]
+    fn search_then_mhc_reuse_the_right_side() {
+        let mut ws = start();
+        let left = ws.focused();
+        let search = ws.open_search(WindowId::MAIN).id;
+        assert!(ws.place_in_study_stack(search));
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
+        assert_eq!(ws.study_stack_host(WindowId::MAIN), Some(left));
+        assert_eq!(ws.stack_guest_kind(left, TabKind::is_search), Some(search));
+        assert_eq!(ws.stack_guest_kind(left, TabKind::is_mhc), Some(mhc));
+        assert_eq!(ws.guest_of(left), Some(mhc));
+        assert_eq!(ws.visible(), vec![left, mhc]);
+        ws.show_guest(left, search);
+        assert_eq!(ws.visible(), vec![left, search]);
+        assert_eq!(ws.tabs().iter().filter(|t| t.host.is_none()).count(), 1);
+        ws.close(mhc);
+        assert_eq!(ws.tab(search).unwrap().host, Some(left));
+        assert!(ws.is_split());
+        assert_eq!(ws.guest_of(left), Some(search));
+    }
+
+    #[test]
+    fn bible_bible_split_does_not_take_mhc() {
+        let mut ws = start();
+        let left = ws.focused();
+        let right = ws.open_passage_beside(left, r(43, 3, 16)).id;
+        assert!(ws.tab(right).unwrap().kind.is_passage());
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.study_stack_host(WindowId::MAIN).is_none());
+        assert!(!ws.place_in_study_stack(mhc));
+        assert!(ws.tab(mhc).unwrap().host.is_none());
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        assert_eq!(ws.tabs().iter().filter(|t| t.host.is_none()).count(), 2);
     }
 }

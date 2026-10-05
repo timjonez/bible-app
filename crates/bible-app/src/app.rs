@@ -68,7 +68,6 @@ pub struct App {
     paragraphs: bool,
     font_provider: gtk::CssProvider,
     _theme_watch: theme::Watch,
-    follow_action: gio::SimpleAction,
     user: Option<Connection>,
     workspace: Workspace,
     hosted: HashMap<TabId, HostedTab>,
@@ -212,6 +211,8 @@ pub enum Msg {
     TabClosed(TabId),
     /// Dismiss the view drawn inside a split tab.
     CloseGuest(TabId),
+    /// Show this guest in its host's study stack.
+    ShowGuest(TabId),
     TabAttached {
         id: TabId,
         window: WindowId,
@@ -221,7 +222,7 @@ pub enum Msg {
     SetupTabMenu(Option<TabId>),
     DetachMenuTab,
     BesideMenuTab,
-    SetTabFollow(bool),
+    SetFollow(TabId, bool),
     ThemeChanged,
     NewTab(WindowId),
     BlankSelectBook(TabId, u32),
@@ -462,14 +463,6 @@ impl SimpleComponent for App {
             let sender = sender.clone();
             RelmAction::new_stateless(move |_| sender.input(Msg::BesideMenuTab))
         };
-        let follow_tab: RelmAction<FollowTabAction> = {
-            let sender = sender.clone();
-            RelmAction::new_stateful(&true, move |_, state: &mut bool| {
-                *state = !*state;
-                sender.input(Msg::SetTabFollow(*state));
-            })
-        };
-        let follow_gio = follow_tab.gio_action().clone();
 
         let mut group = RelmActionGroup::<WindowActionGroup>::new();
         group.add_action(paragraphs_action);
@@ -485,7 +478,6 @@ impl SimpleComponent for App {
         group.add_action(add_note_action);
         group.add_action(detach_tab);
         group.add_action(beside_tab);
-        group.add_action(follow_tab);
 
         let theme_tx = sender.input_sender().clone();
         let _theme_watch = theme::install(move || theme_tx.emit(Msg::ThemeChanged));
@@ -503,7 +495,6 @@ impl SimpleComponent for App {
             paragraphs,
             font_provider,
             _theme_watch,
-            follow_action: follow_gio,
             user,
             workspace: Workspace::new(at),
             hosted: HashMap::new(),
@@ -1047,17 +1038,12 @@ impl SimpleComponent for App {
                 }
             }
             Msg::CloseGuest(id) => self.forget_tab(id),
+            Msg::ShowGuest(id) => self.show_stack_guest(id),
             Msg::TabAttached { id, window } => self.tab_attached(id, window),
             Msg::SplitTab(id) => self.split_tab(id),
             Msg::WireSide(id) => self.wire_side(id),
             Msg::SetupTabMenu(id) => {
                 self.menu_tab.set(id);
-                let tab = id.and_then(|id| self.workspace.tab(id));
-                let followable = tab
-                    .is_some_and(|t| matches!(t.kind, TabKind::Mhc { .. } | TabKind::Tsk { .. }));
-                self.follow_action.set_enabled(followable);
-                self.follow_action
-                    .set_state(&tab.is_some_and(|t| t.kind.follows_verse()).to_variant());
             }
             Msg::DetachMenuTab => {
                 if let Some(id) = self.menu_tab.get() {
@@ -1066,24 +1052,10 @@ impl SimpleComponent for App {
             }
             Msg::BesideMenuTab => {
                 if let Some(id) = self.menu_tab.get() {
-                    self.move_tab_beside(id);
+                    self.join_study_stack(id);
                 }
             }
-            Msg::SetTabFollow(on) => {
-                if let Some(id) = self.menu_tab.get() {
-                    self.workspace.set_follow(id, on);
-                    if on {
-                        let at = self
-                            .workspace
-                            .tab(id)
-                            .and_then(|tab| tab.kind.at())
-                            .unwrap_or_else(|| self.at());
-                        self.present_study(id, at, PlaceMemory::Navigate);
-                    } else {
-                        self.sync_study_bar(id);
-                    }
-                }
-            }
+            Msg::SetFollow(id, on) => self.set_follow(id, on),
             Msg::ThemeChanged => self.recolor_passages(),
             Msg::NewTab(window) => self.new_tab(window),
             Msg::BlankSelectBook(id, idx) => self.blank_select_book(id, idx),
@@ -1092,6 +1064,7 @@ impl SimpleComponent for App {
         }
         self.apply_column_mode();
         self.sync_shells();
+        self.sync_follow_pins();
         let _ = sender;
     }
 }
@@ -1237,17 +1210,22 @@ impl App {
         if self.error.is_some() {
             return None;
         }
-        let was_split = self.workspace.is_window_split(window);
+        if self.open_beside {
+            if let Some(id) = self.reuse_stack_guest(window, TabKind::is_search) {
+                self.focus_search(id);
+                return Some(id);
+            }
+        }
         let at = self.at_in(window);
         let opened = self.workspace.open_search(window);
+        if self.open_beside {
+            let _ = self.workspace.place_in_study_stack(opened.id);
+        }
         let mut pane = search::build_pane(self.search_mode, opened.id, self.msg_tx.clone());
         pane.origin = Some(at);
         self.wire_search(opened.id, &pane);
         let root = pane.root.clone();
         self.add_page(opened.id, &root, "Search", TabContent::Search(pane));
-        if self.open_beside && !was_split {
-            self.move_tab_beside(opened.id);
-        }
         self.focus_search(opened.id);
         Some(opened.id)
     }
@@ -2040,7 +2018,7 @@ impl App {
         let Some(tab) = self.workspace.tab(id) else {
             return true;
         };
-        tab.kind.is_passage() && tab.host.is_none() && self.workspace.guest_of(id).is_none()
+        tab.kind.is_passage() && tab.host.is_none() && self.workspace.guests_of(id).is_empty()
     }
 
     fn apply_column_mode(&self) {
@@ -2189,15 +2167,22 @@ impl App {
         if self.error.is_some() {
             return None;
         }
+        let window = self.window_of(self.workspace.focused());
         let at = self.at();
+        if self.open_beside {
+            if let Some(id) = self.reuse_stack_guest(window, TabKind::is_mhc) {
+                self.present_study(id, at, PlaceMemory::Navigate);
+                return Some(id);
+            }
+        }
         let opened = self.workspace.open_mhc(at);
+        if self.open_beside {
+            let _ = self.workspace.place_in_study_stack(opened.id);
+        }
         let widgets = mhc::build();
         mhc::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
         let root = widgets.root.clone();
         self.add_page(opened.id, &root, "Matthew Henry", TabContent::Mhc(widgets));
-        if self.open_beside {
-            self.move_tab_beside(opened.id);
-        }
         self.present_study(opened.id, at, PlaceMemory::Restart);
         self.sync_tab_title(opened.id);
         Some(opened.id)
@@ -2207,15 +2192,22 @@ impl App {
         if self.error.is_some() {
             return None;
         }
+        let window = self.window_of(self.workspace.focused());
         let at = self.at();
+        if self.open_beside {
+            if let Some(id) = self.reuse_stack_guest(window, TabKind::is_tsk) {
+                self.present_study(id, at, PlaceMemory::Navigate);
+                return Some(id);
+            }
+        }
         let opened = self.workspace.open_tsk(at);
+        if self.open_beside {
+            let _ = self.workspace.place_in_study_stack(opened.id);
+        }
         let widgets = tsk::build();
         tsk::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
         let root = widgets.root.clone();
         self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
-        if self.open_beside {
-            self.move_tab_beside(opened.id);
-        }
         self.present_study(opened.id, at, PlaceMemory::Restart);
         self.sync_tab_title(opened.id);
         Some(opened.id)
@@ -2225,9 +2217,28 @@ impl App {
         if self.error.is_some() {
             return None;
         }
+        let window = self.window_of(self.workspace.focused());
+        if self.open_beside {
+            if let Some(id) =
+                self.reuse_stack_guest(window, |k| matches!(k, TabKind::Library { .. }))
+            {
+                if let Some(head) = headword {
+                    self.show_library_headword(id, module, head);
+                } else if let Some(TabContent::Library(widgets)) =
+                    self.hosted.get_mut(&id).map(|h| &mut h.content)
+                {
+                    dict::select_module(widgets, module);
+                    self.sync_tab_title(id);
+                }
+                return Some(id);
+            }
+        }
         let opened = self
             .workspace
             .open_library(module.to_string(), headword.map(str::to_string));
+        if self.open_beside {
+            let _ = self.workspace.place_in_study_stack(opened.id);
+        }
         let mut widgets = dict::build(opened.id, self.msg_tx.clone(), &self.books);
         dict::wire(&widgets, opened.id, self.msg_tx.clone());
         if let Some(conn) = &self.conn {
@@ -2241,9 +2252,6 @@ impl App {
         let title = dict::tab_title(&widgets);
         let root = widgets.root.clone();
         self.add_page(opened.id, &root, &title, TabContent::Library(widgets));
-        if self.open_beside {
-            self.move_tab_beside(opened.id);
-        }
         Some(opened.id)
     }
 
@@ -2264,7 +2272,7 @@ impl App {
             TabContent::Bookmarks(widgets),
         );
         if self.open_beside {
-            self.move_tab_beside(opened.id);
+            self.join_study_stack(opened.id);
         }
         Some(opened.id)
     }
@@ -2281,7 +2289,7 @@ impl App {
         let root = widgets.root.clone();
         self.add_page(opened.id, &root, "Notes", TabContent::Notes(widgets));
         if self.open_beside {
-            self.move_tab_beside(opened.id);
+            self.join_study_stack(opened.id);
         }
         Some(opened.id)
     }
@@ -2333,6 +2341,7 @@ impl App {
         if let Some(from) = self.workspace.focused_passage_id() {
             if let Some(id) = self.strongs_library_beside(from) {
                 self.show_library_headword(id, bible_app_db::STRONGS_MODULE, code);
+                self.reveal_tab(id);
                 return;
             }
         }
@@ -2398,7 +2407,15 @@ impl App {
             .workspace
             .tabs()
             .iter()
-            .filter(|tab| Some(tab.id) != except && tab.kind.follows_verse())
+            .filter(|tab| {
+                Some(tab.id) != except
+                    && tab.kind.follows_verse()
+                    && tab.host.is_some_and(|host| {
+                        self.workspace
+                            .tab(host)
+                            .is_some_and(|t| t.kind.is_passage())
+                    })
+            })
             .filter_map(|tab| tab.kind.at().map(|at| (tab.id, at)))
             .collect();
         for (id, at) in following {
@@ -2691,6 +2708,7 @@ impl App {
             TabKind::Blank => "New".into(),
         };
         let Some(page) = hosted.page.clone() else {
+            self.sync_stack_title(id, &title);
             return;
         };
         page.set_title(&title);
@@ -2739,13 +2757,13 @@ impl App {
     fn forget_tab(&mut self, id: TabId) {
         let restore = self.search(id).and_then(|pane| pane.origin);
         let window = self.window_of(id);
-        let guest = self.workspace.guest_of(id);
+        let guests = self.workspace.guests_of(id);
         let host = self.workspace.tab(id).and_then(|tab| tab.host);
         if let Some(body) = self.hosted.get(&id).map(|hosted| hosted.body.clone()) {
             unparent(&body);
         }
-        if let Some(guest) = guest {
-            if let Some(body) = self.hosted.get(&guest).map(|hosted| hosted.body.clone()) {
+        for guest in &guests {
+            if let Some(body) = self.hosted.get(guest).map(|hosted| hosted.body.clone()) {
                 unparent(&body);
             }
         }
@@ -2756,7 +2774,7 @@ impl App {
             self.search_mark = None;
         }
         let _ = self.workspace.close(id);
-        if let Some(guest) = guest {
+        for guest in guests {
             self.mount_real_tab(guest);
         }
         if let Some(host) = host {
@@ -2826,7 +2844,7 @@ impl App {
         }
     }
 
-    /// Rebuild one tab's page: the view alone, or that view beside its guest.
+    /// Rebuild one tab's page: the view alone, or that view beside its guests.
     fn layout_tab(&mut self, id: TabId) {
         // Collapse column insets before the paned measures the chapter.
         self.apply_column_mode();
@@ -2834,23 +2852,28 @@ impl App {
             return;
         };
         let host_body = self.hosted.get(&id).map(|hosted| hosted.body.clone());
-        let guest = self.workspace.guest_of(id);
-        let guest_body = guest.and_then(|guest| self.hosted.get(&guest).map(|h| h.body.clone()));
+        let guests = self.workspace.guests_of(id);
+        let visible = self.workspace.guest_of(id);
+        let guest_panes: Vec<(TabId, gtk::Widget, String)> = guests
+            .iter()
+            .filter_map(|&guest| {
+                let body = self.hosted.get(&guest).map(|h| h.body.clone())?;
+                Some((guest, body, self.tab_label(guest)))
+            })
+            .collect();
         if let Some(body) = &host_body {
             unparent(body);
         }
-        if let Some(body) = &guest_body {
+        for (_, body, _) in &guest_panes {
             unparent(body);
         }
         while let Some(child) = slot.first_child() {
             child.unparent();
         }
-        match (host_body, guest, guest_body) {
-            (Some(host_body), Some(guest_id), Some(guest_body)) => {
+        match (host_body, guest_panes.is_empty()) {
+            (Some(host_body), false) => {
                 host_body.set_hexpand(true);
                 host_body.set_vexpand(true);
-                guest_body.set_hexpand(true);
-                guest_body.set_vexpand(true);
                 let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
                 paned.add_css_class("pane-split");
                 paned.set_hexpand(true);
@@ -2863,7 +2886,11 @@ impl App {
                 paned.set_shrink_start_child(true);
                 paned.set_shrink_end_child(true);
                 paned.set_start_child(Some(&host_body));
-                paned.set_end_child(Some(&guest_frame(guest_id, &guest_body, &self.msg_tx)));
+                paned.set_end_child(Some(&study_pane(
+                    visible.or_else(|| guests.first().copied()),
+                    &guest_panes,
+                    &self.msg_tx,
+                )));
                 shell::mark_split_handle(&paned);
                 center_split(&paned);
                 slot.append(&paned);
@@ -2872,7 +2899,7 @@ impl App {
                 // 0×0 and the old chapter allocation would keep painting.
                 allocate_to_parent(&paned);
             }
-            (Some(host_body), _, _) => {
+            (Some(host_body), true) => {
                 slot.append(&host_body);
                 allocate_to_parent(&host_body);
                 // The chapter was measured at the split width. Fit the column
@@ -2946,14 +2973,22 @@ impl App {
     }
 
     fn tab_attached(&mut self, id: TabId, window: WindowId) {
-        let carried = self.workspace.guest_of(id);
+        let carried = self.workspace.guests_of(id);
         self.workspace.place(id, window);
-        if let Some(guest) = carried.filter(|_| self.workspace.guest_of(id).is_none()) {
-            if let Some(body) = self.hosted.get(&guest).map(|hosted| hosted.body.clone()) {
-                unparent(&body);
+        let dropped: Vec<TabId> = carried
+            .into_iter()
+            .filter(|&guest| self.workspace.tab(guest).is_some_and(|t| t.host.is_none()))
+            .collect();
+        if !dropped.is_empty() {
+            for guest in &dropped {
+                if let Some(body) = self.hosted.get(guest).map(|hosted| hosted.body.clone()) {
+                    unparent(&body);
+                }
             }
             self.layout_tab(id);
-            self.mount_real_tab(guest);
+            for guest in dropped {
+                self.mount_real_tab(guest);
+            }
             self.workspace.focus(id);
             self.select_tab(id);
         }
@@ -3101,12 +3136,143 @@ impl App {
         self.select_tab(id);
     }
 
-    fn move_tab_beside(&mut self, id: TabId) {
-        if !self.workspace.move_beside(id) {
+    fn join_study_stack(&mut self, id: TabId) {
+        if !self.workspace.place_in_study_stack(id) {
             return;
         }
         self.embed_in_host(id);
         self.sync_shells();
+    }
+
+    fn reuse_stack_guest(
+        &mut self,
+        window: WindowId,
+        pred: impl Fn(&TabKind) -> bool,
+    ) -> Option<TabId> {
+        let host = self.workspace.study_stack_host(window)?;
+        let id = self.workspace.stack_guest_kind(host, pred)?;
+        self.workspace.show_guest(host, id);
+        self.reveal_tab(id);
+        self.select_tab(id);
+        Some(id)
+    }
+
+    fn reveal_tab(&self, id: TabId) {
+        let Some(host) = self.workspace.tab(id).and_then(|tab| tab.host) else {
+            return;
+        };
+        let Some(slot) = self
+            .hosted
+            .get(&host)
+            .and_then(|hosted| hosted.slot.clone())
+        else {
+            return;
+        };
+        if let Some(stack) = find_study_stack(&slot) {
+            let name = id.keyword();
+            if stack.visible_child_name().as_deref() != Some(name.as_str()) {
+                stack.set_visible_child_name(&name);
+            }
+        }
+    }
+
+    fn show_stack_guest(&mut self, id: TabId) {
+        let Some(host) = self.workspace.tab(id).and_then(|tab| tab.host) else {
+            return;
+        };
+        if self.workspace.show_guest(host, id) {
+            self.reveal_tab(id);
+        }
+    }
+
+    fn set_follow(&mut self, id: TabId, on: bool) {
+        self.workspace.set_follow(id, on);
+        if on {
+            let at = self
+                .workspace
+                .tab(id)
+                .and_then(|tab| tab.kind.at())
+                .unwrap_or_else(|| self.at());
+            self.present_study(id, at, PlaceMemory::Navigate);
+        } else {
+            self.sync_study_bar(id);
+        }
+    }
+
+    fn sync_stack_title(&self, id: TabId, title: &str) {
+        let Some(host) = self.workspace.tab(id).and_then(|tab| tab.host) else {
+            return;
+        };
+        let Some(slot) = self
+            .hosted
+            .get(&host)
+            .and_then(|hosted| hosted.slot.clone())
+        else {
+            return;
+        };
+        let Some(stack) = find_study_stack(&slot) else {
+            return;
+        };
+        let Some(child) = stack.child_by_name(&id.keyword()) else {
+            return;
+        };
+        stack.page(&child).set_title(Some(title));
+    }
+
+    fn tab_label(&self, id: TabId) -> String {
+        match self.workspace.tab(id).map(|tab| &tab.kind) {
+            Some(TabKind::Passage { at }) => nav::format_chapter(&self.books, at.book, at.chapter),
+            Some(TabKind::Mhc { .. }) => "Henry".into(),
+            Some(TabKind::Tsk { .. }) => "Treasury".into(),
+            Some(TabKind::Library { .. }) => match self.hosted.get(&id).map(|h| &h.content) {
+                Some(TabContent::Library(w)) => dict::tab_title(w),
+                _ => "Library".into(),
+            },
+            Some(TabKind::Bookmarks) => "Bookmarks".into(),
+            Some(TabKind::Notes) => "Notes".into(),
+            Some(TabKind::Search) => "Search".into(),
+            Some(TabKind::Blank) => "New".into(),
+            None => String::new(),
+        }
+    }
+
+    fn sync_follow_pins(&self) {
+        let ids: Vec<TabId> = self.hosted.keys().copied().collect();
+        for id in ids {
+            self.sync_follow_pin(id);
+        }
+    }
+
+    fn sync_follow_pin(&self, id: TabId) {
+        let show = self
+            .workspace
+            .tab(id)
+            .is_some_and(|t| matches!(t.kind, TabKind::Mhc { .. } | TabKind::Tsk { .. }))
+            && self
+                .workspace
+                .tab(id)
+                .and_then(|t| t.host)
+                .is_some_and(|host| {
+                    self.workspace
+                        .tab(host)
+                        .is_some_and(|t| t.kind.is_passage())
+                });
+        let on = self
+            .workspace
+            .tab(id)
+            .is_some_and(|t| t.kind.follows_verse());
+        let Some(hosted) = self.hosted.get(&id) else {
+            return;
+        };
+        let (btn, syncing) = match &hosted.content {
+            TabContent::Mhc(w) => (&w.follow, &w.follow_syncing),
+            TabContent::Tsk(w) => (&w.follow, &w.follow_syncing),
+            _ => return,
+        };
+        btn.set_visible(show);
+        syncing.set(true);
+        btn.set_active(show && on);
+        syncing.set(false);
     }
 
     fn split_tab(&mut self, id: TabId) {
@@ -3857,7 +4023,24 @@ fn unparent(widget: &gtk::Widget) {
             return;
         }
     }
+    if let Some(stack) = parent.downcast_ref::<adw::ViewStack>() {
+        stack.remove(widget);
+        return;
+    }
     widget.unparent();
+}
+
+fn split_close_button() -> gtk::Button {
+    let close = gtk::Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("flat");
+    close.add_css_class("split-close");
+    close.set_tooltip_text(Some("Close"));
+    close.set_halign(gtk::Align::End);
+    close.set_valign(gtk::Align::Center);
+    close.set_margin_top(4);
+    close.set_margin_end(4);
+    close.update_property(&[gtk::accessible::Property::Label("Close")]);
+    close
 }
 
 fn guest_frame(id: TabId, body: &gtk::Widget, tx: &relm4::Sender<Msg>) -> gtk::Overlay {
@@ -3865,19 +4048,99 @@ fn guest_frame(id: TabId, body: &gtk::Widget, tx: &relm4::Sender<Msg>) -> gtk::O
     overlay.set_hexpand(true);
     overlay.set_vexpand(true);
     overlay.set_child(Some(body));
-    let close = gtk::Button::from_icon_name("window-close-symbolic");
-    close.add_css_class("flat");
-    close.add_css_class("split-close");
-    close.set_tooltip_text(Some("Close"));
-    close.set_halign(gtk::Align::End);
+    let close = split_close_button();
     close.set_valign(gtk::Align::Start);
     close.set_margin_top(8);
     close.set_margin_end(8);
-    close.update_property(&[gtk::accessible::Property::Label("Close")]);
     let tx = tx.clone();
     close.connect_clicked(move |_| tx.emit(Msg::CloseGuest(id)));
     overlay.add_overlay(&close);
     overlay
+}
+
+fn study_pane(
+    visible: Option<TabId>,
+    guests: &[(TabId, gtk::Widget, String)],
+    tx: &relm4::Sender<Msg>,
+) -> gtk::Widget {
+    if guests.len() == 1 {
+        let (id, body, _) = &guests[0];
+        body.set_hexpand(true);
+        body.set_vexpand(true);
+        return guest_frame(*id, body, tx).upcast();
+    }
+    let stack = adw::ViewStack::new();
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    stack.add_css_class("study-stack");
+    for (id, body, title) in guests {
+        body.set_hexpand(true);
+        body.set_vexpand(true);
+        stack.add_titled(body, Some(&id.keyword()), title);
+    }
+    if let Some(id) = visible {
+        stack.set_visible_child_name(&id.keyword());
+    }
+    let shown = Rc::new(Cell::new(visible.or_else(|| guests.first().map(|g| g.0))));
+    let switcher = adw::ViewSwitcher::new();
+    switcher.set_stack(Some(&stack));
+    switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+    switcher.set_hexpand(true);
+    let close = split_close_button();
+    let tx_close = tx.clone();
+    let shown_close = shown.clone();
+    close.connect_clicked(move |_| {
+        if let Some(id) = shown_close.get() {
+            tx_close.emit(Msg::CloseGuest(id));
+        }
+    });
+    let tx_show = tx.clone();
+    let shown_stack = shown.clone();
+    stack.connect_visible_child_notify(move |stack| {
+        let Some(name) = stack.visible_child_name() else {
+            return;
+        };
+        let Some(id) = TabId::from_keyword(name.as_str()) else {
+            return;
+        };
+        shown_stack.set(Some(id));
+        tx_show.emit(Msg::ShowGuest(id));
+    });
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    header.append(&switcher);
+    header.append(&close);
+    let chrome = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    chrome.add_css_class("study-stack-chrome");
+    chrome.set_hexpand(true);
+    chrome.set_vexpand(true);
+    chrome.append(&header);
+    chrome.append(&stack);
+    chrome.upcast()
+}
+
+fn find_study_stack(slot: &gtk::Box) -> Option<adw::ViewStack> {
+    let paned = slot.first_child()?.downcast::<gtk::Paned>().ok()?;
+    let end = paned.end_child()?;
+    find_view_stack(&end)
+}
+
+fn find_view_stack(widget: &gtk::Widget) -> Option<adw::ViewStack> {
+    if let Ok(stack) = widget.clone().downcast::<adw::ViewStack>() {
+        return Some(stack);
+    }
+    if let Some(overlay) = widget.downcast_ref::<gtk::Overlay>() {
+        if let Some(child) = overlay.child() {
+            return find_view_stack(&child);
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if let Some(found) = find_view_stack(&widget) {
+            return Some(found);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 /// Give a widget the size its parent already has.
@@ -3969,10 +4232,40 @@ fn rescue_split_guest(page: &adw::TabPage) {
     let Some(end) = paned.end_child() else {
         return;
     };
-    if let Some(overlay) = end.downcast_ref::<gtk::Overlay>() {
+    rescue_guest_widgets(&end);
+}
+
+fn rescue_guest_widgets(root: &gtk::Widget) {
+    if let Some(overlay) = root.downcast_ref::<gtk::Overlay>() {
         if let Some(child) = overlay.child() {
+            rescue_guest_widgets(&child);
+            if child.parent().is_some() {
+                unparent(&child);
+            }
+        }
+        return;
+    }
+    if let Some(stack) = root.downcast_ref::<adw::ViewStack>() {
+        let pages = stack.pages();
+        let n = pages.n_items();
+        let mut children = Vec::new();
+        for i in 0..n {
+            if let Some(item) = pages.item(i) {
+                if let Ok(page) = item.downcast::<adw::ViewStackPage>() {
+                    children.push(page.child());
+                }
+            }
+        }
+        for child in children {
             unparent(&child);
         }
+        return;
+    }
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        rescue_guest_widgets(&widget);
+        child = next;
     }
 }
 
@@ -4002,4 +4295,3 @@ relm4::new_stateless_action!(ToggleBookmarkAction, WindowActionGroup, "toggle-bo
 relm4::new_stateless_action!(AddNoteAction, WindowActionGroup, "add-note");
 relm4::new_stateless_action!(DetachTabAction, WindowActionGroup, "tab-detach");
 relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-beside");
-relm4::new_stateful_action!(FollowTabAction, WindowActionGroup, "tab-follow", (), bool);

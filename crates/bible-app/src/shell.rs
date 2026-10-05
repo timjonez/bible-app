@@ -289,6 +289,17 @@ pub fn tab_menu_model() -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some("Open beside"), Some("win.tab-open-beside"));
     menu.append(Some("Open in a window"), Some("win.tab-detach"));
-    menu.append(Some("Follow verse"), Some("win.tab-follow"));
     menu
+}
+
+/// Pin on an MHC/TSK location bar. Shown only when that view is a guest of a chapter.
+pub fn follow_pin() -> gtk::ToggleButton {
+    let btn = gtk::ToggleButton::new();
+    btn.set_icon_name("view-pin-symbolic");
+    btn.set_tooltip_text(Some("Follow the chapter"));
+    btn.add_css_class("flat");
+    btn.set_valign(gtk::Align::Center);
+    btn.set_visible(false);
+    btn.update_property(&[gtk::accessible::Property::Label("Follow the chapter")]);
+    btn
 }
