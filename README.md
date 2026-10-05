@@ -29,7 +29,7 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 
 **Follow cross-references and commentary.** A TSK superscript on a phrase opens its destinations: references on the left, the selected verse on the right. A verse number is a link when Matthew Henry starts a comment there. Bible references in Matthew Henry, the Treasury, and library articles are links, including Thayer’s roman-numeral chapters (`Mt. ii. 4`); click one to open that verse beside the study tab, or right-click for a new tab or window. Translator notes appear as a dagger on the matched phrase.
 
-**Search the library.** Phrase match is the default, so `ear` finds *ear*, *earth*, *hear*, and *heart*. The same menu offers all words, any word, and exact word. Scope covers the KJV, commentary, dictionaries, topics, notes, or the whole library. `H430` lists verses for that Strong’s number; `John 3:16` offers Go to; `John/light` limits the search to that book.
+**Search the library.** Contains match is the default, so `ear` finds *ear*, *earth*, *hear*, and *heart*. The same menu offers all words, any word, and exact word. Scope covers the KJV, commentary, dictionaries, topics, notes, or the whole library. `H430` lists verses for that Strong’s number; `John 3:16` offers Go to; `John/light` limits the search to that book.
 
 **Keep local marks.** Right-click a verse to bookmark it or add a note. Select words and highlight them. A bookmark underlines the verse number; a note washes it. Bookmarks, notes, and highlights are verse-anchored, stored separately from the library, and exportable as Markdown.
 
@@ -61,7 +61,7 @@ On first launch the app unpacks `data/bible-app.sqlite.gz` to `~/.local/share/bi
 | Ctrl+- / Ctrl++ | Smaller / larger text |
 | Ctrl+C | Copy the selection, or the current verse, with citation |
 
-Mouse back/forward buttons also walk history. In Search, arrow keys preview a hit, Enter opens it and closes Search, Esc returns to the previous passage.
+Mouse back/forward buttons also walk history. In Search, arrow keys preview a hit, Enter opens it beside Search and keeps the list, Esc returns to the previous passage.
 
 ## Files
 
