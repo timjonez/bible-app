@@ -120,15 +120,10 @@ fn apply_tag(buffer: &gtk::TextBuffer, name: &str, span: layout::Span) {
     buffer.apply_tag(&tag, &s, &e);
 }
 
-pub fn verse_menu_model(bookmarked: bool, has_note: bool) -> gio::Menu {
+pub fn verse_menu_model(has_note: bool, has_mhc: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some("Copy"), Some("win.copy-verse-here"));
-    let bookmark = if bookmarked {
-        "Remove bookmark"
-    } else {
-        "Bookmark"
-    };
-    menu.append(Some(bookmark), Some("win.toggle-bookmark"));
+    append_item(&menu, "Bookmark", "win.toggle-bookmark", Some("<Control>d"));
     let highlight = gio::Menu::new();
     let gold = format!("win.highlight('{}')", user_db::DEFAULT_HIGHLIGHT);
     highlight.append(Some("Gold"), Some(gold.as_str()));
@@ -138,8 +133,19 @@ pub fn verse_menu_model(bookmarked: bool, has_note: bool) -> gio::Menu {
     highlight.append(Some("Remove"), Some("win.highlight('none')"));
     menu.append_submenu(Some("Highlight"), &highlight);
     let note = if has_note { "Edit note" } else { "Add note" };
-    menu.append(Some(note), Some("win.add-note"));
+    append_item(&menu, note, "win.add-note", Some("<Control><Shift>n"));
+    if has_mhc {
+        menu.append(Some("Matthew Henry"), Some("win.open-mhc-here"));
+    }
     menu
+}
+
+fn append_item(menu: &gio::Menu, label: &str, action: &str, accel: Option<&str>) {
+    let item = gio::MenuItem::new(Some(label), Some(action));
+    if let Some(accel) = accel {
+        item.set_attribute_value("accel", Some(&accel.to_variant()));
+    }
+    menu.append_item(&item);
 }
 
 pub fn build_bookmarks(id: TabId, sender: relm4::Sender<super::app::Msg>) -> BookmarksWidgets {
@@ -789,7 +795,9 @@ fn snippet(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::gio;
     use super::snippet;
+    use gio::prelude::MenuModelExt;
 
     #[test]
     fn snippet_keeps_a_short_first_line() {
@@ -807,5 +815,36 @@ mod tests {
     #[test]
     fn snippet_uses_only_the_first_line() {
         assert_eq!(snippet("one\ntwo"), "one");
+    }
+
+    fn item_attr(menu: &gio::Menu, index: i32, name: &str) -> String {
+        menu.item_attribute_value(index, name, None)
+            .and_then(|v| v.get())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn verse_menu_keeps_bookmark_label_and_shows_mhc_when_present() {
+        let plain = super::verse_menu_model(false, false);
+        assert_eq!(plain.n_items(), 4);
+        assert_eq!(item_attr(&plain, 0, "label"), "Copy");
+        assert_eq!(item_attr(&plain, 0, "action"), "win.copy-verse-here");
+        assert_eq!(item_attr(&plain, 1, "label"), "Bookmark");
+        assert_eq!(item_attr(&plain, 1, "action"), "win.toggle-bookmark");
+        assert_eq!(item_attr(&plain, 1, "accel"), "<Control>d");
+        assert_eq!(item_attr(&plain, 2, "label"), "Highlight");
+        assert_eq!(item_attr(&plain, 3, "label"), "Add note");
+        assert_eq!(item_attr(&plain, 3, "action"), "win.add-note");
+        assert_eq!(item_attr(&plain, 3, "accel"), "<Control><Shift>n");
+
+        let noted = super::verse_menu_model(true, false);
+        assert_eq!(noted.n_items(), 4);
+        assert_eq!(item_attr(&noted, 1, "label"), "Bookmark");
+        assert_eq!(item_attr(&noted, 3, "label"), "Edit note");
+
+        let mhc = super::verse_menu_model(false, true);
+        assert_eq!(mhc.n_items(), 5);
+        assert_eq!(item_attr(&mhc, 4, "label"), "Matthew Henry");
+        assert_eq!(item_attr(&mhc, 4, "action"), "win.open-mhc-here");
     }
 }

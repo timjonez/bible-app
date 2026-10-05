@@ -69,6 +69,7 @@ pub struct App {
     font_provider: gtk::CssProvider,
     _theme_watch: theme::Watch,
     follow_action: gio::SimpleAction,
+    bookmark_action: gio::SimpleAction,
     user: Option<Connection>,
     workspace: Workspace,
     hosted: HashMap<TabId, HostedTab>,
@@ -125,6 +126,7 @@ pub enum Msg {
     OpenHitBeside(TabId, i32),
     OpenHitTab(TabId, Ref),
     OpenMhc,
+    OpenMhcHere,
     OpenTsk,
     OpenTskDest(Ref),
     OpenTskDestTab(Ref),
@@ -425,17 +427,28 @@ impl SimpleComponent for App {
         };
         let toggle_bookmark_action: RelmAction<ToggleBookmarkAction> = {
             let sender = sender.clone();
-            RelmAction::new_stateless(move |_| sender.input(Msg::ToggleBookmark))
+            RelmAction::new_stateful(&false, move |_, state: &mut bool| {
+                *state = !*state;
+                sender.input(Msg::ToggleBookmark);
+            })
         };
         let add_note_action: RelmAction<AddNoteAction> = {
             let sender = sender.clone();
             RelmAction::new_stateless(move |_| sender.input(Msg::AddNote))
+        };
+        let open_mhc_here: RelmAction<OpenMhcHereAction> = {
+            let sender = sender.clone();
+            RelmAction::new_stateless(move |_| sender.input(Msg::OpenMhcHere))
         };
         bookmarks_action.gio_action().set_enabled(marks_on);
         notes_action.gio_action().set_enabled(marks_on);
         export_notes_action.gio_action().set_enabled(marks_on);
         toggle_bookmark_action.gio_action().set_enabled(marks_on);
         add_note_action.gio_action().set_enabled(marks_on);
+        if error.is_some() {
+            open_mhc_here.gio_action().set_enabled(false);
+        }
+        let bookmark_gio = toggle_bookmark_action.gio_action().clone();
 
         let highlight_action = gio::SimpleAction::new("highlight", Some(glib::VariantTy::STRING));
         highlight_action.set_enabled(marks_on);
@@ -483,6 +496,7 @@ impl SimpleComponent for App {
         group.add_action(export_notes_action);
         group.add_action(toggle_bookmark_action);
         group.add_action(add_note_action);
+        group.add_action(open_mhc_here);
         group.add_action(detach_tab);
         group.add_action(beside_tab);
         group.add_action(follow_tab);
@@ -504,6 +518,7 @@ impl SimpleComponent for App {
             font_provider,
             _theme_watch,
             follow_action: follow_gio,
+            bookmark_action: bookmark_gio,
             user,
             workspace: Workspace::new(at),
             hosted: HashMap::new(),
@@ -614,7 +629,11 @@ impl SimpleComponent for App {
                 sender_keys.input(Msg::FontSmaller);
                 return glib::Propagation::Stop;
             }
-            if ctrl && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
+            if ctrl && shift && (keyval == gtk::gdk::Key::n || keyval == gtk::gdk::Key::N) {
+                sender_keys.input(Msg::AddNote);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && !shift && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
                 sender_keys.input(Msg::ToggleBookmark);
                 return glib::Propagation::Stop;
             }
@@ -764,6 +783,9 @@ impl SimpleComponent for App {
             Msg::OpenHitTab(id, at) => self.open_search_verse_tab(id, at),
             Msg::OpenMhc => {
                 self.in_current_tabs(|app| app.ensure_mhc());
+            }
+            Msg::OpenMhcHere => {
+                let _ = self.ensure_mhc();
             }
             Msg::OpenTsk => {
                 self.in_current_tabs(|app| app.ensure_tsk());
@@ -2119,16 +2141,11 @@ impl App {
             self.apply_passage_ref(id, at, true, true);
             return;
         }
-        if let Some(verse) = self.passage(id).and_then(|p| p.mhc_at(offset)) {
-            let at = Ref {
-                verse,
-                ..self.passage(id).map(|p| p.at).unwrap_or_else(|| self.at())
-            };
-            self.apply_passage_ref(id, at, false, false);
-            if let Some(p) = self.passage_mut(id) {
-                p.select_verse(verse);
+        if let Some(verse) = self.passage(id).and_then(|p| p.verse_num_at(offset)) {
+            if let Some(p) = self.passage(id) {
+                p.strongs_popover.popdown();
             }
-            let _ = self.ensure_mhc();
+            self.select_verse(id, verse);
             return;
         }
         let note = self
@@ -3072,6 +3089,14 @@ impl App {
                 tx.emit(Msg::FontSmaller);
                 return glib::Propagation::Stop;
             }
+            if ctrl && shift && (keyval == gtk::gdk::Key::n || keyval == gtk::gdk::Key::N) {
+                tx.emit(Msg::AddNote);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && !shift && (keyval == gtk::gdk::Key::d || keyval == gtk::gdk::Key::D) {
+                tx.emit(Msg::ToggleBookmark);
+                return glib::Propagation::Stop;
+            }
             glib::Propagation::Proceed
         });
         window.add_controller(keys);
@@ -3281,14 +3306,17 @@ impl App {
         {
             self.select_verse(id, verse);
         }
+        let bookmark_action = self.bookmark_action.clone();
         let Some(p) = self.passage_mut(id) else {
             return;
         };
         let mark = p.chapter_marks.get(&p.at.verse);
         let bookmarked = mark.is_some_and(|m| m.bookmark);
         let has_note = mark.is_some_and(|m| m.note);
+        let has_mhc = p.layout.mhc.iter().any(|m| m.verse == p.at.verse);
         p.verse_menu
-            .set_menu_model(Some(&marks::verse_menu_model(bookmarked, has_note)));
+            .set_menu_model(Some(&marks::verse_menu_model(has_note, has_mhc)));
+        bookmark_action.set_state(&bookmarked.to_variant());
         p.verse_menu
             .set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
         p.verse_menu.popup();
@@ -3998,8 +4026,15 @@ relm4::new_stateless_action!(TskAction, WindowActionGroup, "tsk");
 relm4::new_stateless_action!(BookmarksAction, WindowActionGroup, "bookmarks");
 relm4::new_stateless_action!(NotesAction, WindowActionGroup, "notes");
 relm4::new_stateless_action!(ExportNotesAction, WindowActionGroup, "export-notes");
-relm4::new_stateless_action!(ToggleBookmarkAction, WindowActionGroup, "toggle-bookmark");
+relm4::new_stateful_action!(
+    ToggleBookmarkAction,
+    WindowActionGroup,
+    "toggle-bookmark",
+    (),
+    bool
+);
 relm4::new_stateless_action!(AddNoteAction, WindowActionGroup, "add-note");
+relm4::new_stateless_action!(OpenMhcHereAction, WindowActionGroup, "open-mhc-here");
 relm4::new_stateless_action!(DetachTabAction, WindowActionGroup, "tab-detach");
 relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-beside");
 relm4::new_stateful_action!(FollowTabAction, WindowActionGroup, "tab-follow", (), bool);
