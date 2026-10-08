@@ -54,10 +54,10 @@ pub fn build() -> TskWidgets {
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     let heading = gtk::TextTag::new(Some("section"));
+    buffer.tag_table().add(&heading);
     heading.set_weight(700);
     heading.set_pixels_above_lines(16);
     heading.set_pixels_below_lines(4);
-    buffer.tag_table().add(&heading);
     cite::add_tag(&buffer);
 
     let view = gtk::TextView::new();
