@@ -1,4 +1,5 @@
 use crate::cite;
+use crate::column;
 use crate::history::History;
 use crate::occurrences;
 use crate::shell;
@@ -36,11 +37,17 @@ pub struct DictWidgets {
     pub trail: RefCell<History<i32>>,
     books: Vec<Book>,
     see_kjv: gtk::Button,
+    pub column: column::Column,
     occ_code: Rc<RefCell<String>>,
     syncing: Rc<Cell<bool>>,
 }
 
-pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) -> DictWidgets {
+pub fn build(
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+    books: &[Book],
+    column_px: i32,
+) -> DictWidgets {
     let bar = shell::location_bar(
         "Previous entry (Alt+Left)",
         "Next entry (Alt+Right)",
@@ -104,14 +111,15 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) 
     view.set_cursor_visible(false);
     view.set_wrap_mode(gtk::WrapMode::WordChar);
     view.set_direction(gtk::TextDirection::Ltr);
-    view.set_left_margin(20);
-    view.set_right_margin(20);
     view.set_top_margin(16);
     view.set_bottom_margin(16);
+    view.set_hexpand(true);
+    view.set_vexpand(true);
     view.set_accessible_role(gtk::AccessibleRole::Document);
     let text_scroll = gtk::ScrolledWindow::new();
     text_scroll.set_hexpand(true);
     text_scroll.set_vexpand(true);
+    text_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     text_scroll.set_child(Some(&view));
 
     let occ_code = Rc::new(RefCell::new(String::new()));
@@ -134,9 +142,10 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) 
         }
     });
 
+    let column = column::Column::new(&text_scroll, &view, column_px);
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     body.append(&see_kjv);
-    body.append(&text_scroll);
+    body.append(&column.root);
     let page = shell::bar_page(&bar.row, &body);
 
     install_css();
@@ -171,6 +180,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) 
         trail: RefCell::new(History::new(0)),
         books: books.to_vec(),
         see_kjv,
+        column,
         occ_code,
         syncing,
     };
@@ -179,6 +189,7 @@ pub fn build(id: TabId, sender: relm4::Sender<super::app::Msg>, books: &[Book]) 
 }
 
 pub fn wire(widgets: &DictWidgets, id: TabId, sender: relm4::Sender<super::app::Msg>) {
+    widgets.column.bind(sender.clone());
     let tx = sender.clone();
     widgets
         .prev

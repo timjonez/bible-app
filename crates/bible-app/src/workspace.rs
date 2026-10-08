@@ -61,6 +61,19 @@ impl TabKind {
         matches!(self, Self::Passage { .. })
     }
 
+    /// Prose read in a column: a chapter, commentary, the Treasury, a library
+    /// article, or a note. Lists (search, bookmarks) are not reading columns.
+    pub fn is_reading(&self) -> bool {
+        matches!(
+            self,
+            Self::Passage { .. }
+                | Self::Mhc { .. }
+                | Self::Tsk { .. }
+                | Self::Library { .. }
+                | Self::Notes
+        )
+    }
+
     pub fn is_mhc(&self) -> bool {
         matches!(self, Self::Mhc { .. })
     }
@@ -98,6 +111,12 @@ impl TabKind {
             _ => None,
         }
     }
+}
+
+/// Column-edge handles belong to a reading view that fills its tab.
+/// A split uses the divider between the views instead.
+pub fn shows_column_edges(kind: &TabKind, is_guest: bool, has_guests: bool) -> bool {
+    kind.is_reading() && !is_guest && !has_guests
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1466,5 +1485,32 @@ mod tests {
         assert!(ws.tab(mhc).unwrap().host.is_none());
         assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
         assert_eq!(ws.tabs().iter().filter(|t| t.host.is_none()).count(), 2);
+    }
+
+    #[test]
+    fn column_edges_follow_a_lone_reading_view() {
+        let chapter = TabKind::Passage { at: r(1, 1, 1) };
+        let henry = TabKind::Mhc {
+            at: r(1, 1, 1),
+            follow: false,
+        };
+        let treasury = TabKind::Tsk {
+            at: r(1, 1, 1),
+            follow: true,
+        };
+        let library = TabKind::Library {
+            module: "Easton".into(),
+            headword: None,
+        };
+        assert!(shows_column_edges(&chapter, false, false));
+        assert!(shows_column_edges(&henry, false, false));
+        assert!(shows_column_edges(&treasury, false, false));
+        assert!(shows_column_edges(&library, false, false));
+        assert!(shows_column_edges(&TabKind::Notes, false, false));
+        assert!(!shows_column_edges(&TabKind::Search, false, false));
+        assert!(!shows_column_edges(&TabKind::Bookmarks, false, false));
+        assert!(!shows_column_edges(&TabKind::Blank, false, false));
+        assert!(!shows_column_edges(&chapter, true, false));
+        assert!(!shows_column_edges(&henry, false, true));
     }
 }

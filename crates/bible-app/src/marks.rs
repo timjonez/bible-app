@@ -1,3 +1,4 @@
+use crate::column;
 use crate::layout::{self, ChapterLayout};
 use crate::nav::{self, Ref};
 use crate::user_db::{self, Bookmark, Note, VerseMarks};
@@ -44,6 +45,7 @@ pub struct NotesWidgets {
     pub syncing: Rc<Cell<bool>>,
     pub export: gtk::Button,
     pub actions: gtk::MenuButton,
+    pub column: column::Column,
     tab: TabId,
     sender: relm4::Sender<super::app::Msg>,
 }
@@ -176,7 +178,11 @@ pub fn build_bookmarks(id: TabId, sender: relm4::Sender<super::app::Msg>) -> Boo
     }
 }
 
-pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWidgets {
+pub fn build_notes(
+    id: TabId,
+    sender: relm4::Sender<super::app::Msg>,
+    column_px: i32,
+) -> NotesWidgets {
     let list = list_box();
     list.add_css_class("navigation-sidebar");
     list.remove_css_class("boxed-list");
@@ -244,7 +250,11 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
     let editor_scroll = gtk::ScrolledWindow::new();
     editor_scroll.set_hexpand(true);
     editor_scroll.set_vexpand(true);
+    editor_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     editor_scroll.set_child(Some(&editor));
+    // The tab shares the reading column. The verse dialog keeps its own padding.
+    let column = column::Column::new(&editor_scroll, &editor, column_px);
+    column.bind(sender.clone());
 
     let syncing = Rc::new(Cell::new(false));
     let send_save = sender.clone();
@@ -263,7 +273,7 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
     editor_pane.set_margin_bottom(8);
     editor_pane.set_hexpand(true);
     editor_pane.append(&content_header);
-    editor_pane.append(&editor_scroll);
+    editor_pane.append(&column.root);
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_start_child(Some(&sidebar));
@@ -286,6 +296,7 @@ pub fn build_notes(id: TabId, sender: relm4::Sender<super::app::Msg>) -> NotesWi
         syncing,
         export,
         actions,
+        column,
         tab: id,
         sender,
     }

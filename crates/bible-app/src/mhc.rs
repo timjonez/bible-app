@@ -1,4 +1,5 @@
 use crate::cite;
+use crate::column;
 use crate::history::History;
 use crate::nav::{self, Ref};
 use crate::picker;
@@ -32,11 +33,12 @@ pub struct MhcWidgets {
     pub syncing: Rc<Cell<bool>>,
     pub history: RefCell<History<Ref>>,
     pub placed: Cell<bool>,
+    pub column: column::Column,
     loaded: Cell<(u8, u8)>,
     sections: RefCell<Vec<(u8, i32)>>,
 }
 
-pub fn build() -> MhcWidgets {
+pub fn build(column_px: i32) -> MhcWidgets {
     let bar = shell::location_bar(
         "Previous chapter (Alt+Left)",
         "Next chapter (Alt+Right)",
@@ -63,8 +65,6 @@ pub fn build() -> MhcWidgets {
     view.set_editable(false);
     view.set_cursor_visible(false);
     view.set_wrap_mode(gtk::WrapMode::WordChar);
-    view.set_left_margin(20);
-    view.set_right_margin(20);
     view.set_top_margin(8);
     view.set_bottom_margin(16);
     view.set_hexpand(true);
@@ -74,9 +74,11 @@ pub fn build() -> MhcWidgets {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_hexpand(true);
     scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&view));
+    let column = column::Column::new(&scroll, &view, column_px);
 
-    let page = shell::bar_page(&bar.row, &scroll);
+    let page = shell::bar_page(&bar.row, &column.root);
     let menu = cite::menu_for(&view);
     let links = Rc::new(RefCell::new(Vec::new()));
     MhcWidgets {
@@ -101,6 +103,7 @@ pub fn build() -> MhcWidgets {
             verse: 1,
         })),
         placed: Cell::new(false),
+        column,
         loaded: Cell::new((0, 0)),
         sections: RefCell::new(Vec::new()),
     }
@@ -112,6 +115,7 @@ pub fn wire(
     sender: relm4::Sender<super::app::Msg>,
     books: &[Book],
 ) {
+    widgets.column.bind(sender.clone());
     widgets.syncing.set(true);
     let book_tx = sender.clone();
     let chapter_tx = sender.clone();
