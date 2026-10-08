@@ -80,6 +80,8 @@ pub struct App {
     /// Verse clicks and search move a new view into the other pane.
     /// The app menu and a blank tab turn this off and stay in the current tab bar.
     open_beside: bool,
+    /// The blank chooser being filled. Open helpers reuse this tab.
+    filling_blank: Option<TabId>,
     goto_entry: gtk::Entry,
     goto_popover: gtk::Popover,
     actions: gio::SimpleActionGroup,
@@ -518,6 +520,7 @@ impl SimpleComponent for App {
             sides: Rc::new(RefCell::new(Vec::new())),
             menu_tab: Rc::new(Cell::new(None)),
             open_beside: true,
+            filling_blank: None,
             goto_entry: goto_entry.clone(),
             goto_popover: goto_popover.clone(),
             actions: gio::SimpleActionGroup::new(),
@@ -1242,17 +1245,20 @@ impl App {
             }
         }
         let at = self.at_in(window);
-        let opened = self.workspace.open_search(window);
-        if self.open_beside {
-            let _ = self.workspace.place_in_study_stack(opened.id);
-        }
-        let mut pane = search::build_pane(self.search_mode, opened.id, self.msg_tx.clone());
+        let id = self.reuse_blank_or(TabKind::Search, |app| {
+            let opened = app.workspace.open_search(window);
+            if app.open_beside {
+                let _ = app.workspace.place_in_study_stack(opened.id);
+            }
+            opened.id
+        });
+        let mut pane = search::build_pane(self.search_mode, id, self.msg_tx.clone());
         pane.origin = Some(at);
-        self.wire_search(opened.id, &pane);
+        self.wire_search(id, &pane);
         let root = pane.root.clone();
-        self.add_page(opened.id, &root, "Search", TabContent::Search(pane));
-        self.focus_search(opened.id);
-        Some(opened.id)
+        self.add_page(id, &root, "Search", TabContent::Search(pane));
+        self.focus_search(id);
+        Some(id)
     }
 
     fn open_strongs_search(&mut self, code: &str) -> Option<TabId> {
@@ -2195,17 +2201,20 @@ impl App {
                 return Some(id);
             }
         }
-        let opened = self.workspace.open_mhc(at);
-        if self.open_beside {
-            let _ = self.workspace.place_in_study_stack(opened.id);
-        }
+        let id = self.reuse_blank_or(TabKind::Mhc { at, follow: false }, |app| {
+            let opened = app.workspace.open_mhc(at);
+            if app.open_beside {
+                let _ = app.workspace.place_in_study_stack(opened.id);
+            }
+            opened.id
+        });
         let widgets = mhc::build();
-        mhc::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
+        mhc::wire(&widgets, id, self.msg_tx.clone(), &self.books);
         let root = widgets.root.clone();
-        self.add_page(opened.id, &root, "Matthew Henry", TabContent::Mhc(widgets));
-        self.present_study(opened.id, at, PlaceMemory::Restart);
-        self.sync_tab_title(opened.id);
-        Some(opened.id)
+        self.add_page(id, &root, "Matthew Henry", TabContent::Mhc(widgets));
+        self.present_study(id, at, PlaceMemory::Restart);
+        self.sync_tab_title(id);
+        Some(id)
     }
 
     fn ensure_tsk(&mut self) -> Option<TabId> {
@@ -2220,17 +2229,20 @@ impl App {
                 return Some(id);
             }
         }
-        let opened = self.workspace.open_tsk(at);
-        if self.open_beside {
-            let _ = self.workspace.place_in_study_stack(opened.id);
-        }
+        let id = self.reuse_blank_or(TabKind::Tsk { at, follow: false }, |app| {
+            let opened = app.workspace.open_tsk(at);
+            if app.open_beside {
+                let _ = app.workspace.place_in_study_stack(opened.id);
+            }
+            opened.id
+        });
         let widgets = tsk::build();
-        tsk::wire(&widgets, opened.id, self.msg_tx.clone(), &self.books);
+        tsk::wire(&widgets, id, self.msg_tx.clone(), &self.books);
         let root = widgets.root.clone();
-        self.add_page(opened.id, &root, "TSK", TabContent::Tsk(widgets));
-        self.present_study(opened.id, at, PlaceMemory::Restart);
-        self.sync_tab_title(opened.id);
-        Some(opened.id)
+        self.add_page(id, &root, "TSK", TabContent::Tsk(widgets));
+        self.present_study(id, at, PlaceMemory::Restart);
+        self.sync_tab_title(id);
+        Some(id)
     }
 
     fn open_library(&mut self, module: &str, headword: Option<&str>) -> Option<TabId> {
@@ -2253,14 +2265,23 @@ impl App {
                 return Some(id);
             }
         }
-        let opened = self
-            .workspace
-            .open_library(module.to_string(), headword.map(str::to_string));
-        if self.open_beside {
-            let _ = self.workspace.place_in_study_stack(opened.id);
-        }
-        let mut widgets = dict::build(opened.id, self.msg_tx.clone(), &self.books);
-        dict::wire(&widgets, opened.id, self.msg_tx.clone());
+        let id = self.reuse_blank_or(
+            TabKind::Library {
+                module: module.to_string(),
+                headword: headword.map(str::to_string),
+            },
+            |app| {
+                let opened = app
+                    .workspace
+                    .open_library(module.to_string(), headword.map(str::to_string));
+                if app.open_beside {
+                    let _ = app.workspace.place_in_study_stack(opened.id);
+                }
+                opened.id
+            },
+        );
+        let mut widgets = dict::build(id, self.msg_tx.clone(), &self.books);
+        dict::wire(&widgets, id, self.msg_tx.clone());
         if let Some(conn) = &self.conn {
             dict::load_modules(&mut widgets, conn);
         }
@@ -2271,47 +2292,42 @@ impl App {
         }
         let title = dict::tab_title(&widgets);
         let root = widgets.root.clone();
-        self.add_page(opened.id, &root, &title, TabContent::Library(widgets));
-        Some(opened.id)
+        self.add_page(id, &root, &title, TabContent::Library(widgets));
+        Some(id)
     }
 
     fn ensure_bookmarks(&mut self) -> Option<TabId> {
         if self.error.is_some() || self.user.is_none() {
             return None;
         }
-        let opened = self.workspace.open_bookmarks();
-        let mut widgets = marks::build_bookmarks(opened.id, self.msg_tx.clone());
+        let id = self.reuse_blank_or(TabKind::Bookmarks, |app| app.workspace.open_bookmarks().id);
+        let mut widgets = marks::build_bookmarks(id, self.msg_tx.clone());
         if let Some(user) = &self.user {
             marks::fill_bookmarks(&mut widgets, user, &self.books);
         }
         let root = widgets.root.clone();
-        self.add_page(
-            opened.id,
-            &root,
-            "Bookmarks",
-            TabContent::Bookmarks(widgets),
-        );
+        self.add_page(id, &root, "Bookmarks", TabContent::Bookmarks(widgets));
         if self.open_beside {
-            self.join_study_stack(opened.id);
+            self.join_study_stack(id);
         }
-        Some(opened.id)
+        Some(id)
     }
 
     fn ensure_notes(&mut self) -> Option<TabId> {
         if self.error.is_some() || self.user.is_none() {
             return None;
         }
-        let opened = self.workspace.open_notes();
-        let mut widgets = marks::build_notes(opened.id, self.msg_tx.clone());
+        let id = self.reuse_blank_or(TabKind::Notes, |app| app.workspace.open_notes().id);
+        let mut widgets = marks::build_notes(id, self.msg_tx.clone());
         if let Some(user) = &self.user {
             marks::fill_notes(&mut widgets, user, &self.books);
         }
         let root = widgets.root.clone();
-        self.add_page(opened.id, &root, "Notes", TabContent::Notes(widgets));
+        self.add_page(id, &root, "Notes", TabContent::Notes(widgets));
         if self.open_beside {
-            self.join_study_stack(opened.id);
+            self.join_study_stack(id);
         }
-        Some(opened.id)
+        Some(id)
     }
 
     fn open_strongs(&mut self, id: TabId, offset: i32) {
@@ -2528,6 +2544,14 @@ impl App {
             self.sync_shells();
             return;
         }
+        // The chooser already has a tab page. Swap its child so the bar does
+        // not animate a new page in and this one out.
+        if self.hosted.get(&id).is_some_and(|hosted| {
+            hosted.page.is_some() && matches!(hosted.content, TabContent::Blank(_))
+        }) {
+            self.replace_tab_body(id, body, content);
+            return;
+        }
         let Some(view) = self.view_of(window) else {
             return;
         };
@@ -2552,6 +2576,21 @@ impl App {
             },
         );
         self.layout_tab(id);
+        self.select_tab(id);
+        self.sync_shells();
+    }
+
+    /// Keep `id`'s tab page and draw `body` in it.
+    fn replace_tab_body(&mut self, id: TabId, body: gtk::Widget, content: TabContent) {
+        if let Some(old) = self.hosted.get(&id).map(|hosted| hosted.body.clone()) {
+            unparent(&old);
+        }
+        if let Some(hosted) = self.hosted.get_mut(&id) {
+            hosted.body = body;
+            hosted.content = content;
+        }
+        self.layout_tab(id);
+        self.sync_tab_title(id);
         self.select_tab(id);
         self.sync_shells();
     }
@@ -2598,32 +2637,6 @@ impl App {
         });
     }
 
-    /// Put `id`'s page where `before` is, when both are in the same pane.
-    fn reorder_before(&self, id: TabId, before: TabId) {
-        if id == before {
-            return;
-        }
-        let Some(page) = self.page_of(id) else {
-            return;
-        };
-        let Some(sibling) = self.page_of(before) else {
-            return;
-        };
-        let Some(view) = self.view_holding(&page) else {
-            return;
-        };
-        let Some(other) = self.view_holding(&sibling) else {
-            return;
-        };
-        if view != other {
-            return;
-        };
-        let pos = view.page_position(&sibling);
-        if pos >= 0 {
-            view.reorder_page(&page, pos);
-        }
-    }
-
     fn blank_select_book(&mut self, id: TabId, idx: u32) {
         let Some(book) = picker::book_id_at(&self.books, idx) else {
             return;
@@ -2663,16 +2676,24 @@ impl App {
     }
 
     fn blank_open(&mut self, id: TabId, at: Ref) {
-        if !self.workspace.tab(id).is_some_and(|t| t.kind.is_blank()) {
+        if !self.workspace.replace_blank(id, TabKind::Passage { at }) {
             return;
         }
-        self.workspace.focus(id);
-        let window = self.window_of(id);
-        let opened = self.workspace.open_passage_in(window, at);
-        self.spawn_passage(opened.id, at);
-        self.reorder_before(opened.id, id);
-        self.request_close(id);
+        self.spawn_passage(id, at);
         self.save_state();
+    }
+
+    /// If a blank chooser is being filled, turn it into `kind`. Otherwise open a tab.
+    fn reuse_blank_or(&mut self, kind: TabKind, open: impl FnOnce(&mut Self) -> TabId) -> TabId {
+        if let Some(id) = self.claim_blank(kind) {
+            return id;
+        }
+        open(self)
+    }
+
+    fn claim_blank(&mut self, kind: TabKind) -> Option<TabId> {
+        let id = self.filling_blank.take()?;
+        self.workspace.replace_blank(id, kind).then_some(id)
     }
 
     fn launch_from_blank(&mut self, id: TabId, choice: launcher::Launch) {
@@ -2681,11 +2702,18 @@ impl App {
         }
         self.workspace.focus(id);
         let window = self.window_of(id);
+        self.filling_blank = Some(id);
         self.open_beside = false;
-        let target = match choice {
-            launcher::Launch::Search => self.open_search_tab(window),
-            launcher::Launch::Mhc => self.ensure_mhc(),
-            launcher::Launch::Tsk => self.ensure_tsk(),
+        match choice {
+            launcher::Launch::Search => {
+                let _ = self.open_search_tab(window);
+            }
+            launcher::Launch::Mhc => {
+                let _ = self.ensure_mhc();
+            }
+            launcher::Launch::Tsk => {
+                let _ = self.ensure_tsk();
+            }
             launcher::Launch::Library => {
                 let module = self
                     .dict_modules
@@ -2693,19 +2721,19 @@ impl App {
                     .find(|module| module.kind == "dictionary")
                     .or_else(|| self.dict_modules.first())
                     .map(|module| module.id.clone());
-                module.and_then(|module| self.open_library(&module, None))
+                if let Some(module) = module {
+                    let _ = self.open_library(&module, None);
+                }
             }
-            launcher::Launch::Notes => self.ensure_notes(),
-            launcher::Launch::Bookmarks => self.ensure_bookmarks(),
-        };
-        self.open_beside = true;
-        let Some(target) = target else {
-            return;
-        };
-        if target != id {
-            self.reorder_before(target, id);
-            self.request_close(id);
+            launcher::Launch::Notes => {
+                let _ = self.ensure_notes();
+            }
+            launcher::Launch::Bookmarks => {
+                let _ = self.ensure_bookmarks();
+            }
         }
+        self.open_beside = true;
+        self.filling_blank = None;
     }
 
     fn tab_title(&self, id: TabId) -> Option<String> {

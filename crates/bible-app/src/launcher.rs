@@ -1,4 +1,6 @@
 //! A blank tab: the passage book and chapter menus, or one of the study views.
+//! Picking one fills this tab. Opening a second tab and closing this one
+//! makes the tab bar animate the swap.
 use crate::picker;
 use crate::workspace::TabId;
 use adw::prelude::*;
