@@ -21,7 +21,7 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 
 ## What it can do
 
-**Read a chapter.** Book and chapter menus jump anywhere; type in the book popup to filter. Consecutive verses flow as prose by default, or one verse per block from the menu. Drag either edge of the chapter to set the column width. Font size, last position, and paragraph mode are remembered.
+**Read a chapter.** Book and chapter menus jump anywhere; type in the book popup to filter. Consecutive verses flow as prose by default, or one verse per block from the menu. Drag either edge of the text to set the column width. Commentary, the Treasury, a library article, and a note use that same width. Font size, column width, last position, and paragraph mode are remembered.
 
 **Open several passages at once.** Chapters and study views live in tabs. A new tab is a chooser, and the passage or study view you pick fills that same tab. A window has one side-by-side split: the chapter stays on the left, and Search, Henry, the Treasury, and the library share the right-hand pane. Drag a tab out, or use Open in a window, for a second reader window.
 

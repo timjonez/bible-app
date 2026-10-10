@@ -1051,10 +1051,10 @@ pub fn clamp_column_px(px: i32) -> i32 {
     px.clamp(MIN_COLUMN_PX, MAX_COLUMN_PX)
 }
 
-/// Left and right text margins for a chapter pane.
+/// Left and right text margins for a reading column.
 ///
-/// `column_resize` centers `preferred_px` in the pane. When another view is
-/// open the chapter fills the pane and the divider between the views is the
+/// `column_resize` centers `preferred_px` in the pane. When the view shares
+/// its tab with another, the text fills the pane and the divider is the
 /// resize control, so both margins stay at [`CHAPTER_MARGIN_X`].
 pub fn column_margins(pane_px: i32, preferred_px: i32, column_resize: bool) -> (i32, i32) {
     if !column_resize || pane_px <= 0 {

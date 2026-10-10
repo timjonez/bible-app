@@ -26,7 +26,8 @@ pub struct State {
     /// Older Exact word flag. `1` loads as Exact word in the match menu.
     #[serde(default)]
     pub search_words: u32,
-    /// Chapter column width in logical pixels. `0` keeps the automatic measure.
+    /// Reading-column width in logical pixels. `0` keeps the automatic measure.
+    /// Shared by a chapter, commentary, the Treasury, a library article, and a note.
     #[serde(default)]
     pub column_width: i32,
 }

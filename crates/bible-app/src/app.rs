@@ -1,3 +1,4 @@
+use crate::column;
 use crate::config;
 use crate::dict;
 use crate::launcher;
@@ -13,7 +14,7 @@ use crate::strongs;
 use crate::theme;
 use crate::tsk;
 use crate::user_db;
-use crate::workspace::{SplitOutcome, TabId, TabKind, WindowId, Workspace};
+use crate::workspace::{self, SplitOutcome, TabId, TabKind, WindowId, Workspace};
 use adw::prelude::*;
 use bible_app_db::{self, Book, DictModule, LibraryKind, MatchMode, SearchScope, WordMatch};
 use gtk::gio;
@@ -48,6 +49,17 @@ enum TabContent {
     Blank(launcher::BlankPage),
 }
 
+fn reading_column(content: &TabContent) -> Option<&column::Column> {
+    match content {
+        TabContent::Passage(passage) => Some(&passage.column),
+        TabContent::Mhc(widgets) => Some(&widgets.column),
+        TabContent::Tsk(widgets) => Some(&widgets.column),
+        TabContent::Library(widgets) => Some(&widgets.column),
+        TabContent::Notes(widgets) => Some(&widgets.column),
+        TabContent::Bookmarks(_) | TabContent::Search(_) | TabContent::Blank(_) => None,
+    }
+}
+
 struct SideWindow {
     id: WindowId,
     chrome: SideChrome,
@@ -63,7 +75,8 @@ pub struct App {
     search_db_path: Option<PathBuf>,
     dict_modules: Vec<DictModule>,
     font_size: i32,
-    /// `0` uses the automatic measure. A positive value is the dragged width.
+    /// Reading-column width in logical pixels. `0` uses the automatic measure.
+    /// A positive value is the width set by dragging a column edge.
     column_width: i32,
     paragraphs: bool,
     font_provider: gtk::CssProvider,
@@ -530,6 +543,7 @@ impl SimpleComponent for App {
         };
         model.apply_font();
         picker::install_css();
+        column::install_css();
         passage::install_css();
 
         let widgets = view_output!();
@@ -2038,26 +2052,34 @@ impl App {
     fn apply_column(&self) {
         let px = self.effective_column_px();
         for hosted in self.hosted.values() {
-            if let TabContent::Passage(p) = &hosted.content {
-                p.set_column_px(px);
+            if let Some(column) = reading_column(&hosted.content) {
+                column.set_px(px);
             }
         }
     }
 
-    /// Column edges belong to a chapter that fills its tab by itself.
+    /// Column edges belong to a reading view that fills its tab by itself.
     fn column_resize_for(&self, id: TabId) -> bool {
         let Some(tab) = self.workspace.tab(id) else {
             return true;
         };
-        tab.kind.is_passage() && tab.host.is_none() && self.workspace.guests_of(id).is_empty()
+        workspace::shows_column_edges(
+            &tab.kind,
+            tab.host.is_some(),
+            !self.workspace.guests_of(id).is_empty(),
+        )
     }
 
     fn apply_column_mode(&self) {
         let ids: Vec<TabId> = self.hosted.keys().copied().collect();
         for id in ids {
             let on = self.column_resize_for(id);
-            if let Some(TabContent::Passage(passage)) = self.hosted.get(&id).map(|h| &h.content) {
-                passage.set_column_resize(on);
+            if let Some(column) = self
+                .hosted
+                .get(&id)
+                .and_then(|hosted| reading_column(&hosted.content))
+            {
+                column.set_resize(on);
             }
         }
     }
@@ -2208,7 +2230,7 @@ impl App {
             }
             opened.id
         });
-        let widgets = mhc::build();
+        let widgets = mhc::build(self.effective_column_px());
         mhc::wire(&widgets, id, self.msg_tx.clone(), &self.books);
         let root = widgets.root.clone();
         self.add_page(id, &root, "Matthew Henry", TabContent::Mhc(widgets));
@@ -2236,7 +2258,7 @@ impl App {
             }
             opened.id
         });
-        let widgets = tsk::build();
+        let widgets = tsk::build(self.effective_column_px());
         tsk::wire(&widgets, id, self.msg_tx.clone(), &self.books);
         let root = widgets.root.clone();
         self.add_page(id, &root, "TSK", TabContent::Tsk(widgets));
@@ -2280,7 +2302,12 @@ impl App {
                 opened.id
             },
         );
-        let mut widgets = dict::build(id, self.msg_tx.clone(), &self.books);
+        let mut widgets = dict::build(
+            id,
+            self.msg_tx.clone(),
+            &self.books,
+            self.effective_column_px(),
+        );
         dict::wire(&widgets, id, self.msg_tx.clone());
         if let Some(conn) = &self.conn {
             dict::load_modules(&mut widgets, conn);
@@ -2318,7 +2345,7 @@ impl App {
             return None;
         }
         let id = self.reuse_blank_or(TabKind::Notes, |app| app.workspace.open_notes().id);
-        let mut widgets = marks::build_notes(id, self.msg_tx.clone());
+        let mut widgets = marks::build_notes(id, self.msg_tx.clone(), self.effective_column_px());
         if let Some(user) = &self.user {
             marks::fill_notes(&mut widgets, user, &self.books);
         }
@@ -2935,7 +2962,7 @@ impl App {
 
     /// Rebuild one tab's page: the view alone, or that view beside its guests.
     fn layout_tab(&mut self, id: TabId) {
-        // Collapse column insets before the paned measures the chapter.
+        // Collapse column insets before the paned measures the reading view.
         self.apply_column_mode();
         let Some(slot) = self.hosted.get(&id).and_then(|hosted| hosted.slot.clone()) else {
             return;
@@ -2970,7 +2997,7 @@ impl App {
                 paned.set_wide_handle(true);
                 paned.set_resize_start_child(true);
                 paned.set_resize_end_child(true);
-                // Chapter margins can still report a wide minimum on the first
+                // Column margins can still report a wide minimum on the first
                 // measure. Allow the handle to sit at half the tab anyway.
                 paned.set_shrink_start_child(true);
                 paned.set_shrink_end_child(true);
@@ -2991,7 +3018,7 @@ impl App {
             (Some(host_body), true) => {
                 slot.append(&host_body);
                 allocate_to_parent(&host_body);
-                // The chapter was measured at the split width. Fit the column
+                // The view was measured at the split width. Fit the column
                 // to the full tab now that the body has that size.
                 self.apply_column_mode();
             }
