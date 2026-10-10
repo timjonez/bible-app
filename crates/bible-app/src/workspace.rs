@@ -714,6 +714,22 @@ impl Workspace {
         OpenResult { id, created: true }
     }
 
+    /// Turn a blank tab into `kind` and keep its id, so the tab bar does not
+    /// gain a page and lose one.
+    pub fn replace_blank(&mut self, id: TabId, kind: TabKind) -> bool {
+        let blank = self
+            .tab(id)
+            .is_some_and(|tab| tab.kind.is_blank() && tab.host.is_none());
+        if !blank {
+            return false;
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            tab.kind = kind;
+        }
+        self.focus(id);
+        true
+    }
+
     pub fn open_search(&mut self, window: WindowId) -> OpenResult {
         let id = self.add_tab(TabKind::Search, window);
         OpenResult { id, created: true }
@@ -998,6 +1014,35 @@ mod tests {
         assert_eq!(ws.focused(), second.id);
         assert_eq!(ws.focused_passage_id(), Some(passage));
         assert_eq!(ws.tabs().len(), 3);
+    }
+
+    #[test]
+    fn replace_blank_keeps_the_same_tab() {
+        let mut ws = start();
+        let blank = ws.open_blank(WindowId::MAIN).id;
+        let other = ws.open_passage(r(19, 23, 1)).id;
+        let before: Vec<_> = ws.tabs().iter().map(|tab| tab.id).collect();
+        assert!(ws.replace_blank(blank, TabKind::Search));
+        let after: Vec<_> = ws.tabs().iter().map(|tab| tab.id).collect();
+        assert_eq!(before, after);
+        assert!(ws.tab(blank).unwrap().kind.is_search());
+        assert!(ws.tab(blank).unwrap().host.is_none());
+        assert_eq!(ws.focused(), blank);
+        assert_eq!(ws.focused_passage_id(), Some(other));
+        assert!(!ws.replace_blank(blank, TabKind::Notes));
+        assert!(ws.tab(blank).unwrap().kind.is_search());
+        assert!(!ws.replace_blank(other, TabKind::Bookmarks));
+        assert!(ws.tab(other).unwrap().kind.is_passage());
+
+        let chooser = ws.open_blank(WindowId::MAIN).id;
+        let at = r(43, 3, 16);
+        assert_eq!(ws.tabs().len(), 4);
+        assert!(ws.replace_blank(chooser, TabKind::Passage { at }));
+        assert_eq!(ws.tabs().len(), 4);
+        assert_eq!(ws.focused(), chooser);
+        assert_eq!(ws.focused_passage_ref(), Some(at));
+        assert_eq!(ws.last_at(), at);
+        assert_eq!(ws.tab(chooser).unwrap().window, WindowId::MAIN);
     }
 
     #[test]

@@ -63,16 +63,16 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
     let table = buffer.tag_table();
     for name in HIGHLIGHT_TAGS {
         let tag = gtk::TextTag::new(Some(&format!("hl-{name}")));
-        tag.set_priority(0);
         table.add(&tag);
+        tag.set_priority(0);
     }
     let bookmark = gtk::TextTag::new(Some("user-bookmark"));
+    table.add(&bookmark);
     bookmark.set_underline(gtk::pango::Underline::Low);
     bookmark.set_priority(1);
-    table.add(&bookmark);
     let note = gtk::TextTag::new(Some("user-note"));
-    note.set_priority(1);
     table.add(&note);
+    note.set_priority(1);
 }
 
 pub fn apply_tags(
