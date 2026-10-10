@@ -103,6 +103,18 @@ fn scrolled_page(stack: gtk::Stack) -> gtk::ScrolledWindow {
     scroll
 }
 
+fn scroll_body_to_top(scroll: &gtk::ScrolledWindow) {
+    let adj = scroll.vadjustment();
+    adj.set_value(adj.lower());
+    // The new page is measured after this handler returns. Snap again once
+    // that allocation has clamped the adjustment.
+    let scroll = scroll.clone();
+    glib::idle_add_local_once(move || {
+        let adj = scroll.vadjustment();
+        adj.set_value(adj.lower());
+    });
+}
+
 fn with_source_sidebar(
     stack: gtk::Stack,
     content: gtk::ScrolledWindow,
@@ -124,12 +136,20 @@ fn with_source_sidebar(
     }
 
     let names: Vec<String> = tabs.iter().map(|(id, _)| id.clone()).collect();
+    let body = content.clone();
     list.connect_row_selected(move |_, row| {
         let Some(row) = row else { return };
-        let Some(name) = names.get(row.index() as usize) else {
+        let index = row.index();
+        if index < 0 {
+            return;
+        }
+        let Some(name) = names.get(index as usize) else {
             return;
         };
+        // One scrolled window wraps every source. Keep the next article at
+        // the top instead of reusing the page the reader just left.
         stack.set_visible_child_name(name);
+        scroll_body_to_top(&body);
     });
     if let Some(row) = list.row_at_index(0) {
         list.select_row(Some(&row));
@@ -615,6 +635,83 @@ mod tests {
     fn several_see_lines() {
         let (_, codes) = split_see_also("See H410 \nSee H430", "H");
         assert_eq!(codes, vec!["H410".to_string(), "H430".to_string()]);
+    }
+
+    fn on_main_thread() -> bool {
+        let Ok(tid) = std::fs::read_link("/proc/thread-self") else {
+            return false;
+        };
+        tid.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u32>().ok())
+            == Some(std::process::id())
+    }
+
+    #[test]
+    fn switching_source_scrolls_the_body_to_the_top() {
+        if !on_main_thread() {
+            eprintln!("skip source scroll test: GTK must run on the main thread");
+            return;
+        }
+        let display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if !display {
+            eprintln!("skip source scroll test: no display");
+            return;
+        }
+        gtk::init().expect("gtk init");
+
+        let stack = gtk::Stack::new();
+        stack.set_vhomogeneous(false);
+        for (name, title) in [("strongs", "Strong's"), ("easton", "Easton's")] {
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            page.set_size_request(300, 2000);
+            page.append(&gtk::Label::new(Some(title)));
+            stack.add_titled(&page, Some(name), title);
+        }
+        let content = scrolled_page(stack.clone());
+        let tabs = vec![
+            ("strongs".into(), "Strong's".into()),
+            ("easton".into(), "Easton's".into()),
+        ];
+        let shown = stack.clone();
+        let wrap = with_source_sidebar(stack, content.clone(), &tabs);
+        let list = find_list_box(&wrap).expect("source list");
+
+        let adj = content.vadjustment();
+        adj.set_upper(2000.0);
+        adj.set_page_size(360.0);
+        adj.set_value(480.0);
+        assert!(
+            adj.value() > 100.0,
+            "fixture scroll should sit below the top"
+        );
+
+        let row = list.row_at_index(1).expect("second source");
+        list.select_row(Some(&row));
+        for _ in 0..50 {
+            if !glib::MainContext::default().iteration(false) {
+                break;
+            }
+        }
+
+        let adj = content.vadjustment();
+        assert_eq!(shown.visible_child_name().as_deref(), Some("easton"));
+        assert_eq!(adj.value(), adj.lower());
+    }
+
+    fn find_list_box(widget: &gtk::Widget) -> Option<gtk::ListBox> {
+        if let Ok(list) = widget.clone().downcast::<gtk::ListBox>() {
+            return Some(list);
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = find_list_box(&current) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
     }
 
     #[test]
