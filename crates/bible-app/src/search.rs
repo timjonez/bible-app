@@ -2,7 +2,7 @@ use crate::layout;
 use crate::nav::{self, Ref};
 use crate::workspace::TabId;
 use bible_app_db::{
-    AlignedSpan, Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode,
+    StoredSpan, Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode,
     SearchScope, VerseFilter, WordMatch,
 };
 use gtk::gio;
@@ -264,7 +264,7 @@ pub struct MarkedLine {
 impl MarkedLine {
     /// `verse` is stored KJV text. `spans` are character offsets into that
     /// same string.
-    pub fn from_verse(verse: &str, spans: &[AlignedSpan]) -> Self {
+    pub fn from_verse(verse: &str, spans: &[StoredSpan]) -> Self {
         let (body, _) = layout::split_notes(verse);
         let mut text = String::new();
         let mut char_out = Vec::new();
@@ -1200,7 +1200,7 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bible_app_db::{AlignedSpan, LibraryHit};
+    use bible_app_db::{StoredSpan, LibraryHit};
 
     fn books() -> Vec<Book> {
         vec![Book {
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn alignment_bolds_the_phrase_and_leaves_the_decoy() {
         let verse = "sister, and a sister";
-        let phrase = AlignedSpan::parse(verse, 12, 20).unwrap();
+        let phrase = StoredSpan::parse(verse, 12, 20).unwrap();
         let line = MarkedLine::from_verse(verse, &[phrase]);
         assert_eq!(line.text(), "sister, and a sister");
         assert_eq!(line.markup(), "sister, and <b>a sister</b>");
@@ -1410,7 +1410,7 @@ mod tests {
     #[test]
     fn alignment_bolds_brackets() {
         let verse = "the  [God] of heaven";
-        let god = AlignedSpan::parse(verse, 5, 10).unwrap();
+        let god = StoredSpan::parse(verse, 5, 10).unwrap();
         let line = MarkedLine::from_verse(verse, &[god]);
         assert_eq!(line.markup(), "the <b>[God]</b> of heaven");
     }
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn alignment_drops_a_trailing_note() {
         let verse = "God created.{a note}";
-        let word = AlignedSpan::parse(verse, 0, 3).unwrap();
+        let word = StoredSpan::parse(verse, 0, 3).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[word]).markup(),
             "<b>God</b> created."
@@ -1428,12 +1428,12 @@ mod tests {
     #[test]
     fn alignment_escapes_markup_characters() {
         let verse = "God & Father";
-        let word = AlignedSpan::parse(verse, 0, 3).unwrap();
+        let word = StoredSpan::parse(verse, 0, 3).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[word]).markup(),
             "<b>God</b> &amp; Father"
         );
-        let amp = AlignedSpan::parse(verse, 4, 5).unwrap();
+        let amp = StoredSpan::parse(verse, 4, 5).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[amp]).markup(),
             "God <b>&amp;</b> Father"
@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn leading_space_does_not_slide_the_bold() {
         let verse = " In those days";
-        let word = AlignedSpan::parse(verse, 1, 3).unwrap();
+        let word = StoredSpan::parse(verse, 1, 3).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[word]).markup(),
             "<b>In</b> those days"
@@ -1453,12 +1453,12 @@ mod tests {
     #[test]
     fn collapsed_whitespace_inside_a_span_stays_marked() {
         let verse = "a  b";
-        let spaces = AlignedSpan::parse(verse, 1, 3).unwrap();
+        let spaces = StoredSpan::parse(verse, 1, 3).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[spaces]).markup(),
             "a<b> </b>b"
         );
-        let second = AlignedSpan::parse(verse, 2, 3).unwrap();
+        let second = StoredSpan::parse(verse, 2, 3).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[second]).markup(),
             "a<b> </b>b"
@@ -1468,7 +1468,7 @@ mod tests {
     #[test]
     fn span_inside_a_note_adds_no_bold() {
         let verse = "God created.{a note}";
-        let note = AlignedSpan::parse(verse, 13, 18).unwrap();
+        let note = StoredSpan::parse(verse, 13, 18).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[note]).markup(),
             "God created."
@@ -1478,7 +1478,7 @@ mod tests {
     #[test]
     fn span_that_runs_into_a_note_is_clipped() {
         let verse = "God created.{a note}";
-        let clipped = AlignedSpan::parse(verse, 8, 20).unwrap();
+        let clipped = StoredSpan::parse(verse, 8, 20).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[clipped]).markup(),
             "God crea<b>ted.</b>"
@@ -1507,7 +1507,7 @@ mod tests {
     #[test]
     fn alignment_hit_ignores_tokens() {
         let verse = "sister, and a sister";
-        let phrase = AlignedSpan::parse(verse, 12, 20).unwrap();
+        let phrase = StoredSpan::parse(verse, 12, 20).unwrap();
         let line = MarkedLine::from_verse(verse, &[phrase]);
         let hit = ListedHit::strongs(verse_hit(verse), line);
         assert_eq!(hit.snippet, "sister, and a sister");

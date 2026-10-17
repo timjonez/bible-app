@@ -3,14 +3,13 @@ use rusqlite::Connection;
 use crate::{parse_strongs_code, DbError};
 
 /// Half-open character range into the stored verse, brackets included.
-/// Not a chapter-buffer offset and not a byte offset into the list line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AlignedSpan {
+pub struct StoredSpan {
     start: u32,
     end: u32,
 }
 
-impl AlignedSpan {
+impl StoredSpan {
     pub fn parse(verse: &str, start: i32, end: i32) -> Option<Self> {
         if start < 0 || end <= start {
             return None;
@@ -43,7 +42,7 @@ pub struct Occurrence {
     /// Stored KJV verse, brackets and trailing notes included.
     pub text: String,
     /// Matching rows in `verse_words.i` order. Empty when every row failed to parse.
-    pub spans: Vec<AlignedSpan>,
+    pub spans: Vec<StoredSpan>,
 }
 
 /// Unique KJV verses whose `verse_words` include `code` as a whole token.
@@ -173,8 +172,6 @@ fn canonical_code(code: &str) -> Option<String> {
     Some(format!("{lang}{num}"))
 }
 
-// Limit the verse page, then join every matching word. A limit on the
-// join would drop a later span of the last verse.
 fn query_aligned(
     conn: &Connection,
     pattern: &str,
@@ -261,7 +258,7 @@ struct AlignedRow {
 fn fold_aligned(rows: Vec<AlignedRow>) -> Vec<Occurrence> {
     let mut hits: Vec<Occurrence> = Vec::new();
     for row in rows {
-        let span = AlignedSpan::parse(&row.text, row.start, row.end);
+        let span = StoredSpan::parse(&row.text, row.start, row.end);
         if let Some(hit) = hits.last_mut().filter(|hit| {
             hit.book == row.book && hit.chapter == row.chapter && hit.verse == row.verse
         }) {
@@ -335,12 +332,12 @@ mod tests {
     #[test]
     fn aligned_span_rejects_an_empty_or_out_of_range_offset() {
         let verse = "God";
-        let whole = AlignedSpan::parse(verse, 0, 3).unwrap();
+        let whole = StoredSpan::parse(verse, 0, 3).unwrap();
         assert_eq!((whole.start(), whole.end()), (0, 3));
-        assert!(AlignedSpan::parse(verse, -1, 2).is_none());
-        assert!(AlignedSpan::parse(verse, 1, 1).is_none());
-        assert!(AlignedSpan::parse(verse, 2, 1).is_none());
-        assert!(AlignedSpan::parse(verse, 0, 4).is_none());
+        assert!(StoredSpan::parse(verse, -1, 2).is_none());
+        assert!(StoredSpan::parse(verse, 1, 1).is_none());
+        assert!(StoredSpan::parse(verse, 2, 1).is_none());
+        assert!(StoredSpan::parse(verse, 0, 4).is_none());
     }
 
     fn shipped_sqlite() -> Option<std::path::PathBuf> {
