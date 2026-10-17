@@ -1474,7 +1474,7 @@ impl App {
                 }
             }
             search::Plan::Goto(at) => {
-                let hit = search::goto_hit(at, &self.books);
+                let hit = search::ListedHit::plain(search::goto_hit(at, &self.books));
                 let label = format!("Go to {}", nav::format_ref(&self.books, at));
                 if let Some(pane) = self.search_mut(id) {
                     pane.hits = vec![hit];
@@ -1604,7 +1604,8 @@ impl App {
             .any(|module_row| module_row.id == module)
         {
             if let Some(pane) = self.search_mut(id) {
-                pane.hits.push(search::lexicon_hit(&code, module));
+                pane.hits
+                    .push(search::ListedHit::plain(search::lexicon_hit(&code, module)));
             }
         }
     }

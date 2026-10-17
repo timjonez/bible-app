@@ -370,7 +370,7 @@ impl ListedHit {
 }
 
 pub fn row(
-    hit: &LibraryHit,
+    hit: &ListedHit,
     books: &[Book],
     scope: SearchScope,
     tokens: &[String],
@@ -395,7 +395,7 @@ pub fn row(
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let snippet = gtk::Label::new(None);
-    snippet.set_markup(&emphasize(&hit.snippet, tokens, word_match));
+    snippet.set_markup(&hit.line_markup(tokens, word_match));
     snippet.set_xalign(0.0);
     snippet.set_yalign(0.0);
     snippet.set_hexpand(true);
@@ -451,7 +451,7 @@ fn attach_hit_menu(
     });
 }
 
-pub fn refill_list(pane: &Pane, hits: &[LibraryHit], books: &[Book], append: bool) {
+pub fn refill_list(pane: &Pane, hits: &[ListedHit], books: &[Book], append: bool) {
     if !append {
         while let Some(child) = pane.list.row_at_index(0) {
             pane.list.remove(&child);
@@ -562,7 +562,7 @@ pub struct Prepared {
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
-    pub hits: Vec<LibraryHit>,
+    pub hits: Vec<ListedHit>,
     pub total: i64,
     pub by_book: Vec<BookCount>,
     pub tokens: Vec<String>,
@@ -822,17 +822,20 @@ fn strongs_outcome(
     let hits = hits
         .into_iter()
         .map(|hit| {
-            let (body, _) = layout::split_notes(&hit.text);
-            LibraryHit {
-                kind: LibraryKind::Verse,
-                module: "KJV".into(),
-                title: "King James Version".into(),
-                book: Some(hit.book),
-                chapter: Some(hit.chapter),
-                verse: Some(hit.verse),
-                headword: None,
-                snippet: body.split_whitespace().collect::<Vec<_>>().join(" "),
-            }
+            let line = MarkedLine::from_verse(&hit.text, &hit.spans);
+            ListedHit::strongs(
+                LibraryHit {
+                    kind: LibraryKind::Verse,
+                    module: "KJV".into(),
+                    title: "King James Version".into(),
+                    book: Some(hit.book),
+                    chapter: Some(hit.chapter),
+                    verse: Some(hit.verse),
+                    headword: None,
+                    snippet: String::new(),
+                },
+                line,
+            )
         })
         .collect();
     Outcome {
@@ -929,7 +932,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
         hits
     };
     Outcome {
-        hits: note_hits(&hits),
+        hits: note_hits(&hits).into_iter().map(ListedHit::plain).collect(),
         total,
         by_book,
         tokens: prepared.compiled.tokens.clone(),
@@ -978,7 +981,7 @@ fn note_hits(hits: &[crate::user_db::NoteHit]) -> Vec<LibraryHit> {
 
 fn finish(page: LibraryPage, prepared: &Prepared, chosen: Option<u8>, append: bool) -> Outcome {
     Outcome {
-        hits: page.hits,
+        hits: page.hits.into_iter().map(ListedHit::plain).collect(),
         total: page.total,
         by_book: page.by_book,
         tokens: prepared.compiled.tokens.clone(),
@@ -1055,7 +1058,7 @@ pub struct Pane {
     pub words: WordMatch,
     pub range: SearchRange,
     pub chip: BookChip,
-    pub hits: Vec<LibraryHit>,
+    pub hits: Vec<ListedHit>,
     pub total: i64,
     pub tokens: Vec<String>,
     pub strongs: Option<String>,
