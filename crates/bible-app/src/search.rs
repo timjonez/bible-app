@@ -822,7 +822,7 @@ fn strongs_outcome(
     let hits = hits
         .into_iter()
         .map(|hit| {
-            let (body, _) = layout::split_notes(&hit.snippet);
+            let (body, _) = layout::split_notes(&hit.text);
             LibraryHit {
                 kind: LibraryKind::Verse,
                 module: "KJV".into(),

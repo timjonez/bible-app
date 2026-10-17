@@ -40,7 +40,10 @@ pub struct Occurrence {
     pub book: u8,
     pub chapter: u8,
     pub verse: u8,
-    pub snippet: String,
+    /// Stored KJV verse, brackets and trailing notes included.
+    pub text: String,
+    /// Matching rows in `verse_words.i` order. Empty when every row failed to parse.
+    pub spans: Vec<AlignedSpan>,
 }
 
 /// Unique KJV verses whose `verse_words` include `code` as a whole token.
@@ -52,28 +55,18 @@ pub fn strongs_occurrences(
     let Some(code) = canonical_code(code) else {
         return Ok(Vec::new());
     };
-    let pattern = like_token_pattern(&code);
-    let limit = limit.max(1) as i64;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT DISTINCT v.book, v.chapter, v.verse, v.text
-        FROM verse_words w
-        JOIN verses v
-          ON v.book = w.book AND v.chapter = w.chapter AND v.verse = w.verse
-        WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
-        ORDER BY v.book, v.chapter, v.verse
-        LIMIT ?2
-        "#,
-    )?;
-    let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| {
-        Ok(Occurrence {
-            book: row.get(0)?,
-            chapter: row.get(1)?,
-            verse: row.get(2)?,
-            snippet: row.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    query_aligned(
+        conn,
+        &like_token_pattern(&code),
+        StrongsWindow {
+            book_min: 0,
+            book_max: u8::MAX,
+            book: None,
+            chapter: None,
+            after: None,
+            limit,
+        },
+    )
 }
 
 /// Unique KJV verses tagged with `code` as a whole token.
@@ -151,55 +144,18 @@ pub fn strongs_page(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     let total: i64 = by_book.iter().map(|b| b.count).sum();
-    let book_n = i64::from(book.unwrap_or(0));
-    let (after_book, after_chapter, after_verse) = match after {
-        Some((b, c, v)) => (i64::from(b), i64::from(c), i64::from(v)),
-        None => (0, 0, 0),
-    };
-    let limit = limit.max(1) as i64;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT DISTINCT v.book, v.chapter, v.verse, v.text
-        FROM verse_words w
-        JOIN verses v
-          ON v.book = w.book AND v.chapter = w.chapter AND v.verse = w.verse
-        WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
-          AND v.book BETWEEN ?2 AND ?3
-          AND (?4 = 0 OR v.book = ?4)
-          AND (?5 = 0 OR v.chapter = ?5)
-          AND (
-            ?6 = 0
-            OR v.book > ?6
-            OR (v.book = ?6 AND v.chapter > ?7)
-            OR (v.book = ?6 AND v.chapter = ?7 AND v.verse > ?8)
-          )
-        ORDER BY v.book, v.chapter, v.verse
-        LIMIT ?9
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            pattern,
+    let hits = query_aligned(
+        conn,
+        &pattern,
+        StrongsWindow {
             book_min,
             book_max,
-            book_n,
-            chapter_n,
-            after_book,
-            after_chapter,
-            after_verse,
-            limit
-        ],
-        |row| {
-            let text: String = row.get(3)?;
-            Ok(Occurrence {
-                book: row.get(0)?,
-                chapter: row.get(1)?,
-                verse: row.get(2)?,
-                snippet: text,
-            })
+            book,
+            chapter,
+            after,
+            limit,
         },
     )?;
-    let hits = rows.collect::<Result<Vec<_>, _>>()?;
     let listed: i64 = if book.is_some() {
         by_book
             .iter()
@@ -215,6 +171,114 @@ pub fn strongs_page(
 fn canonical_code(code: &str) -> Option<String> {
     let (num, lang) = parse_strongs_code(code)?;
     Some(format!("{lang}{num}"))
+}
+
+// Limit the verse page, then join every matching word. A limit on the
+// join would drop a later span of the last verse.
+fn query_aligned(
+    conn: &Connection,
+    pattern: &str,
+    window: StrongsWindow,
+) -> Result<Vec<Occurrence>, DbError> {
+    let StrongsWindow {
+        book_min,
+        book_max,
+        book,
+        chapter,
+        after,
+        limit,
+    } = window;
+    let book_n = i64::from(book.unwrap_or(0));
+    let chapter_n = i64::from(chapter.unwrap_or(0));
+    let (after_book, after_chapter, after_verse) = match after {
+        Some((b, c, v)) => (i64::from(b), i64::from(c), i64::from(v)),
+        None => (0, 0, 0),
+    };
+    let limit = limit.max(1) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        WITH verse_page AS (
+            SELECT DISTINCT v.book, v.chapter, v.verse, v.text
+            FROM verse_words w
+            JOIN verses v
+              ON v.book = w.book AND v.chapter = w.chapter AND v.verse = w.verse
+            WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
+              AND v.book BETWEEN ?2 AND ?3
+              AND (?4 = 0 OR v.book = ?4)
+              AND (?5 = 0 OR v.chapter = ?5)
+              AND (
+                ?6 = 0
+                OR v.book > ?6
+                OR (v.book = ?6 AND v.chapter > ?7)
+                OR (v.book = ?6 AND v.chapter = ?7 AND v.verse > ?8)
+              )
+            ORDER BY v.book, v.chapter, v.verse
+            LIMIT ?9
+        )
+        SELECT p.book, p.chapter, p.verse, p.text, w.start, w.end_pos
+        FROM verse_page p
+        JOIN verse_words w
+          ON w.book = p.book AND w.chapter = p.chapter AND w.verse = p.verse
+        WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
+        ORDER BY p.book, p.chapter, p.verse, w.i
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            pattern,
+            book_min,
+            book_max,
+            book_n,
+            chapter_n,
+            after_book,
+            after_chapter,
+            after_verse,
+            limit
+        ],
+        |row| {
+            Ok(AlignedRow {
+                book: row.get(0)?,
+                chapter: row.get(1)?,
+                verse: row.get(2)?,
+                text: row.get(3)?,
+                start: row.get(4)?,
+                end: row.get(5)?,
+            })
+        },
+    )?;
+    Ok(fold_aligned(rows.collect::<Result<Vec<_>, _>>()?))
+}
+
+struct AlignedRow {
+    book: u8,
+    chapter: u8,
+    verse: u8,
+    text: String,
+    start: i32,
+    end: i32,
+}
+
+fn fold_aligned(rows: Vec<AlignedRow>) -> Vec<Occurrence> {
+    let mut hits: Vec<Occurrence> = Vec::new();
+    for row in rows {
+        let span = AlignedSpan::parse(&row.text, row.start, row.end);
+        if let Some(hit) = hits.last_mut().filter(|hit| {
+            hit.book == row.book && hit.chapter == row.chapter && hit.verse == row.verse
+        }) {
+            if let Some(span) = span {
+                hit.spans.push(span);
+            }
+            continue;
+        }
+        hits.push(Occurrence {
+            book: row.book,
+            chapter: row.chapter,
+            verse: row.verse,
+            text: row.text,
+            spans: span.into_iter().collect(),
+        });
+    }
+    hits
 }
 
 fn like_token_pattern(code: &str) -> String {
@@ -261,6 +325,13 @@ mod tests {
         hits.iter().map(|h| (h.book, h.chapter, h.verse)).collect()
     }
 
+    fn span_ends(hit: &Occurrence) -> Vec<(u32, u32)> {
+        hit.spans
+            .iter()
+            .map(|span| (span.start(), span.end()))
+            .collect()
+    }
+
     #[test]
     fn aligned_span_rejects_an_empty_or_out_of_range_offset() {
         let verse = "God";
@@ -298,7 +369,8 @@ mod tests {
         .unwrap();
         let hits = strongs_occurrences(&conn, "H7225", 20).unwrap();
         assert_eq!(refs(&hits), vec![(1, 1, 1)]);
-        assert_eq!(hits[0].snippet, "In the beginning");
+        assert_eq!(hits[0].text, "In the beginning");
+        assert_eq!(span_ends(&hits[0]), vec![(0, 16)]);
         assert_eq!(strongs_occurrence_count(&conn, "H7225").unwrap(), 1);
         assert_eq!(strongs_occurrence_count(&conn, "h7225").unwrap(), 1);
         assert!(strongs_occurrences(&conn, "nope", 20).unwrap().is_empty());
@@ -326,6 +398,11 @@ mod tests {
         let b = strongs_occurrences(&conn, "H1254", 20).unwrap();
         assert!(refs(&a).contains(&(1, 1, 1)));
         assert!(refs(&a).contains(&(1, 1, 3)));
+        let genesis = a
+            .iter()
+            .find(|hit| (hit.book, hit.chapter, hit.verse) == (1, 1, 1))
+            .unwrap();
+        assert_eq!(span_ends(genesis), vec![(0, 16)]);
         assert_eq!(refs(&b), vec![(1, 1, 3)]);
         assert_eq!(strongs_occurrence_count(&conn, "H7225").unwrap(), 2);
         assert_eq!(strongs_occurrence_count(&conn, "H1254").unwrap(), 1);
@@ -344,7 +421,46 @@ mod tests {
         .unwrap();
         let hits = strongs_occurrences(&conn, "H430", 20).unwrap();
         assert_eq!(refs(&hits), vec![(1, 1, 1)]);
+        assert_eq!(span_ends(&hits[0]), vec![(17, 20), (21, 28)]);
         assert_eq!(strongs_occurrence_count(&conn, "H430").unwrap(), 1);
+        let limited = strongs_occurrences(&conn, "H430", 1).unwrap();
+        assert_eq!(refs(&limited), vec![(1, 1, 1)]);
+        assert_eq!(span_ends(&limited[0]), vec![(17, 20), (21, 28)]);
+        let (page, _, _) = strongs_page(
+            &conn,
+            "H430",
+            StrongsWindow {
+                book_min: 1,
+                book_max: 66,
+                book: None,
+                chapter: None,
+                after: None,
+                limit: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(refs(&page), vec![(1, 1, 1)]);
+        assert_eq!(span_ends(&page[0]), vec![(17, 20), (21, 28)]);
+    }
+
+    #[test]
+    fn a_bad_offset_is_dropped_and_the_verse_stays() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO books (id, abbrev, name) VALUES (1, 'Ge', 'Genesis');
+            INSERT INTO verses (book, chapter, verse, text, para_break)
+                VALUES (1, 1, 1, 'God', 1);
+            INSERT INTO verse_words (book, chapter, verse, i, start, end_pos, strongs) VALUES
+                (1, 1, 1, 0, 0, 99, 'H430'),
+                (1, 1, 1, 1, 0, 3, 'H430');
+            "#,
+        )
+        .unwrap();
+        let hits = strongs_occurrences(&conn, "H430", 20).unwrap();
+        assert_eq!(refs(&hits), vec![(1, 1, 1)]);
+        assert_eq!(hits[0].text, "God");
+        assert_eq!(span_ends(&hits[0]), vec![(0, 3)]);
     }
 
     #[test]
@@ -368,7 +484,7 @@ mod tests {
             keys, sorted,
             "G26 hits should be in book/chapter/verse order"
         );
-        assert!(g26.iter().any(|h| !h.snippet.is_empty()));
+        assert!(g26.iter().any(|h| !h.text.is_empty()));
 
         let h430 = strongs_occurrences(&conn, "H430", DEFAULT_LIMIT).unwrap();
         let h430_n = strongs_occurrence_count(&conn, "H430").unwrap();
