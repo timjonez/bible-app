@@ -1045,6 +1045,17 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
 }
 
 impl Pane {
+    /// Inset the scope menu when this pane is the only split guest.
+    ///
+    /// That frame paints the close button over the top-right corner (28px,
+    /// 8px inset). The pane already has a 12px end margin, and another 36px
+    /// lines the menu up with the follow pin. A study stack draws its close
+    /// in the header, and a standalone tab has none, so those stay at 0.
+    pub fn set_close_clearance(&self, on: bool) {
+        self.scope_dd.set_margin_end(if on { 36 } else { 0 });
+        self.scope_dd.queue_resize();
+    }
+
     pub fn show_status(&self, text: &str) {
         self.status.set_label(text);
     }
