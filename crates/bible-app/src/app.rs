@@ -2960,6 +2960,22 @@ impl App {
         }
     }
 
+    fn sync_search_close_clearance(&self, id: TabId, guests: &[TabId]) {
+        let overlay = guests.len() == 1;
+        for guest in guests {
+            self.set_search_close_clearance(*guest, overlay);
+        }
+        self.set_search_close_clearance(id, false);
+    }
+
+    fn set_search_close_clearance(&self, id: TabId, on: bool) {
+        let Some(TabContent::Search(pane)) = self.hosted.get(&id).map(|hosted| &hosted.content)
+        else {
+            return;
+        };
+        pane.set_close_clearance(on);
+    }
+
     /// Rebuild one tab's page: the view alone, or that view beside its guests.
     fn layout_tab(&mut self, id: TabId) {
         // Collapse column insets before the paned measures the reading view.
@@ -2969,6 +2985,9 @@ impl App {
         };
         let host_body = self.hosted.get(&id).map(|hosted| hosted.body.clone());
         let guests = self.workspace.guests_of(id);
+        // A single guest gets an overlay close in its top-right corner.
+        // Search's scope menu lives there; a stack header does not cover it.
+        self.sync_search_close_clearance(id, &guests);
         let visible = self.workspace.guest_of(id);
         let guest_panes: Vec<(TabId, gtk::Widget, String)> = guests
             .iter()
