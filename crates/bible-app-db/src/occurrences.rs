@@ -2,6 +2,39 @@ use rusqlite::Connection;
 
 use crate::{parse_strongs_code, DbError};
 
+/// Half-open character range into the stored verse, brackets included.
+/// Not a chapter-buffer offset and not a byte offset into the list line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlignedSpan {
+    start: u32,
+    end: u32,
+}
+
+impl AlignedSpan {
+    pub fn parse(verse: &str, start: i32, end: i32) -> Option<Self> {
+        if start < 0 || end <= start {
+            return None;
+        }
+        let start = start as usize;
+        let end = end as usize;
+        if end > verse.chars().count() {
+            return None;
+        }
+        Some(Self {
+            start: start as u32,
+            end: end as u32,
+        })
+    }
+
+    pub fn start(self) -> u32 {
+        self.start
+    }
+
+    pub fn end(self) -> u32 {
+        self.end
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Occurrence {
     pub book: u8,
@@ -226,6 +259,17 @@ mod tests {
 
     fn refs(hits: &[Occurrence]) -> Vec<(u8, u8, u8)> {
         hits.iter().map(|h| (h.book, h.chapter, h.verse)).collect()
+    }
+
+    #[test]
+    fn aligned_span_rejects_an_empty_or_out_of_range_offset() {
+        let verse = "God";
+        let whole = AlignedSpan::parse(verse, 0, 3).unwrap();
+        assert_eq!((whole.start(), whole.end()), (0, 3));
+        assert!(AlignedSpan::parse(verse, -1, 2).is_none());
+        assert!(AlignedSpan::parse(verse, 1, 1).is_none());
+        assert!(AlignedSpan::parse(verse, 2, 1).is_none());
+        assert!(AlignedSpan::parse(verse, 0, 4).is_none());
     }
 
     fn shipped_sqlite() -> Option<std::path::PathBuf> {

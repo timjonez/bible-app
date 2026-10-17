@@ -2,8 +2,8 @@ use crate::layout;
 use crate::nav::{self, Ref};
 use crate::workspace::TabId;
 use bible_app_db::{
-    Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchScope,
-    VerseFilter, WordMatch,
+    AlignedSpan, Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode,
+    SearchScope, VerseFilter, WordMatch,
 };
 use gtk::gio;
 use gtk::prelude::*;
@@ -210,20 +210,25 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
             from = pos + needle.len().max(1);
         }
     }
-    marks.sort_unstable();
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (start, end) in marks {
-        if let Some(last) = merged.last_mut() {
-            if start <= last.1 {
-                last.1 = last.1.max(end);
-                continue;
-            }
-        }
-        merged.push((start, end));
-    }
+    paint_bold(text, &merge_ranges(marks))
+}
+
+fn escape_markup(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn paint_bold(text: &str, ranges: &[(usize, usize)]) -> String {
     let mut out = String::new();
     let mut cursor = 0;
-    for (start, end) in merged {
+    for &(start, end) in ranges {
+        if start >= end || end > text.len() || start < cursor {
+            continue;
+        }
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
         out.push_str(&escape_markup(&text[cursor..start]));
         out.push_str("<b>");
         out.push_str(&escape_markup(&text[start..end]));
@@ -234,10 +239,134 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
     out
 }
 
-fn escape_markup(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+/// Collapsed list line and the only bold ranges that index it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkedLine {
+    text: String,
+    ranges: Vec<(usize, usize)>,
+}
+
+impl MarkedLine {
+    /// `verse` is stored KJV text. `spans` are character offsets into that
+    /// same string.
+    pub fn from_verse(verse: &str, spans: &[AlignedSpan]) -> Self {
+        let (body, _) = layout::split_notes(verse);
+        let mut text = String::new();
+        let mut char_out = Vec::new();
+        let mut chars = body.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if !ch.is_whitespace() {
+                let start = text.len();
+                text.push(ch);
+                char_out.push((start, text.len()));
+                continue;
+            }
+            let mut run = 1;
+            while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                chars.next();
+                run += 1;
+            }
+            let drop_run = text.is_empty() || chars.peek().is_none();
+            let start = text.len();
+            if !drop_run {
+                text.push(' ');
+            }
+            let end = text.len();
+            char_out.extend(std::iter::repeat_n((start, end), run));
+        }
+
+        let body_len = char_out.len();
+        let mut ranges = Vec::new();
+        for span in spans {
+            let start = span.start() as usize;
+            let end = (span.end() as usize).min(body_len);
+            if start >= body_len || start >= end {
+                continue;
+            }
+            let mut lo = usize::MAX;
+            let mut hi = 0;
+            for &(out_start, out_end) in &char_out[start..end] {
+                if out_start < out_end {
+                    lo = lo.min(out_start);
+                    hi = hi.max(out_end);
+                }
+            }
+            if lo < hi {
+                ranges.push((lo, hi));
+            }
+        }
+        Self {
+            text,
+            ranges: merge_ranges(ranges),
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn markup(&self) -> String {
+        paint_bold(&self.text, &self.ranges)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RowMarks {
+    Query,
+    Alignment(MarkedLine),
+}
+
+#[derive(Debug, Clone)]
+pub struct ListedHit {
+    library: LibraryHit,
+    marks: RowMarks,
+}
+
+impl std::ops::Deref for ListedHit {
+    type Target = LibraryHit;
+
+    fn deref(&self) -> &LibraryHit {
+        &self.library
+    }
+}
+
+impl ListedHit {
+    pub fn plain(hit: LibraryHit) -> Self {
+        Self {
+            library: hit,
+            marks: RowMarks::Query,
+        }
+    }
+
+    pub fn strongs(mut hit: LibraryHit, line: MarkedLine) -> Self {
+        hit.snippet = line.text().to_string();
+        Self {
+            library: hit,
+            marks: RowMarks::Alignment(line),
+        }
+    }
+
+    pub fn line_markup(&self, tokens: &[String], word_match: WordMatch) -> String {
+        match &self.marks {
+            RowMarks::Query => emphasize(&self.library.snippet, tokens, word_match),
+            RowMarks::Alignment(line) => line.markup(),
+        }
+    }
 }
 
 pub fn row(
@@ -1068,7 +1197,7 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bible_app_db::LibraryHit;
+    use bible_app_db::{AlignedSpan, LibraryHit};
 
     fn books() -> Vec<Book> {
         vec![Book {
@@ -1251,6 +1380,156 @@ mod tests {
             "h<b>ear</b> thou in heaven"
         );
         assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix).contains("&lt;"));
+    }
+
+    fn verse_hit(snippet: &str) -> LibraryHit {
+        LibraryHit {
+            kind: LibraryKind::Verse,
+            module: "KJV".into(),
+            title: "King James Version".into(),
+            book: Some(1),
+            chapter: Some(1),
+            verse: Some(1),
+            headword: None,
+            snippet: snippet.into(),
+        }
+    }
+
+    #[test]
+    fn alignment_bolds_the_phrase_and_leaves_the_decoy() {
+        let verse = "sister, and a sister";
+        let phrase = AlignedSpan::parse(verse, 12, 20).unwrap();
+        let line = MarkedLine::from_verse(verse, &[phrase]);
+        assert_eq!(line.text(), "sister, and a sister");
+        assert_eq!(line.markup(), "sister, and <b>a sister</b>");
+    }
+
+    #[test]
+    fn alignment_bolds_brackets() {
+        let verse = "the  [God] of heaven";
+        let god = AlignedSpan::parse(verse, 5, 10).unwrap();
+        let line = MarkedLine::from_verse(verse, &[god]);
+        assert_eq!(line.markup(), "the <b>[God]</b> of heaven");
+    }
+
+    #[test]
+    fn alignment_drops_a_trailing_note() {
+        let verse = "God created.{a note}";
+        let word = AlignedSpan::parse(verse, 0, 3).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[word]).markup(),
+            "<b>God</b> created."
+        );
+    }
+
+    #[test]
+    fn alignment_escapes_markup_characters() {
+        let verse = "God & Father";
+        let word = AlignedSpan::parse(verse, 0, 3).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[word]).markup(),
+            "<b>God</b> &amp; Father"
+        );
+        let amp = AlignedSpan::parse(verse, 4, 5).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[amp]).markup(),
+            "God <b>&amp;</b> Father"
+        );
+    }
+
+    #[test]
+    fn leading_space_does_not_slide_the_bold() {
+        let verse = " In those days";
+        let word = AlignedSpan::parse(verse, 1, 3).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[word]).markup(),
+            "<b>In</b> those days"
+        );
+    }
+
+    #[test]
+    fn collapsed_whitespace_inside_a_span_stays_marked() {
+        let verse = "a  b";
+        let spaces = AlignedSpan::parse(verse, 1, 3).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[spaces]).markup(),
+            "a<b> </b>b"
+        );
+        let second = AlignedSpan::parse(verse, 2, 3).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[second]).markup(),
+            "a<b> </b>b"
+        );
+    }
+
+    #[test]
+    fn span_inside_a_note_adds_no_bold() {
+        let verse = "God created.{a note}";
+        let note = AlignedSpan::parse(verse, 13, 18).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[note]).markup(),
+            "God created."
+        );
+    }
+
+    #[test]
+    fn span_that_runs_into_a_note_is_clipped() {
+        let verse = "God created.{a note}";
+        let clipped = AlignedSpan::parse(verse, 8, 20).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[clipped]).markup(),
+            "God crea<b>ted.</b>"
+        );
+    }
+
+    #[test]
+    fn from_verse_matches_note_split_and_whitespace_collapse() {
+        let verse = "  In the  beginning.{a note}";
+        let line = MarkedLine::from_verse(verse, &[]);
+        let (body, _) = layout::split_notes(verse);
+        let expected = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(expected, "In the beginning.");
+        assert_eq!(line.text(), expected);
+    }
+
+    #[test]
+    fn plain_hit_emphasizes_the_token() {
+        let hit = ListedHit::plain(verse_hit("the only begotten Son"));
+        assert_eq!(
+            hit.line_markup(&["begotten".into()], WordMatch::Prefix),
+            "the only <b>begotten</b> Son"
+        );
+    }
+
+    #[test]
+    fn alignment_hit_ignores_tokens() {
+        let verse = "sister, and a sister";
+        let phrase = AlignedSpan::parse(verse, 12, 20).unwrap();
+        let line = MarkedLine::from_verse(verse, &[phrase]);
+        let hit = ListedHit::strongs(verse_hit(verse), line);
+        assert_eq!(hit.snippet, "sister, and a sister");
+        assert_eq!(
+            hit.line_markup(&["sister".into()], WordMatch::Exact),
+            "sister, and <b>a sister</b>"
+        );
+    }
+
+    #[test]
+    fn empty_alignment_does_not_fall_through_to_tokens() {
+        let verse = "sister, and a sister";
+        let line = MarkedLine::from_verse(verse, &[]);
+        let hit = ListedHit::strongs(verse_hit(verse), line);
+        assert_eq!(
+            hit.line_markup(&["sister".into()], WordMatch::Exact),
+            "sister, and a sister"
+        );
+    }
+
+    #[test]
+    fn paint_bold_skips_ranges_that_are_empty_or_misaligned() {
+        assert_eq!(paint_bold("ab", &[(0, 0), (1, 5), (0, 1)]), "<b>a</b>b");
+        assert_eq!(paint_bold("é", &[(1, 2)]), "é");
+        assert_eq!(paint_bold("God &", &[(0, 3)]), "<b>God</b> &amp;");
     }
 
     #[test]
