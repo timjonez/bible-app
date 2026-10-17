@@ -1529,6 +1529,43 @@ mod tests {
     }
 
     #[test]
+    fn shipped_g79_rows_bold_the_aligned_span() {
+        let Some(path) = std::env::var_os("BIBLE_APP_DB")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/bible-app.sqlite");
+                path.is_file().then_some(path)
+            })
+        else {
+            eprintln!("skipping: unpacked bible-app.sqlite not found");
+            return;
+        };
+        let conn = bible_app_db::open(&path).unwrap();
+        let hits = bible_app_db::strongs_occurrences(&conn, "G79", 10_000).unwrap();
+        let markup = |book, chapter, verse| {
+            let hit = hits
+                .iter()
+                .find(|hit| (hit.book, hit.chapter, hit.verse) == (book, chapter, verse))
+                .unwrap_or_else(|| panic!("missing {book} {chapter}:{verse}"));
+            MarkedLine::from_verse(&hit.text, &hit.spans).markup()
+        };
+        assert_eq!(
+            markup(40, 12, 50),
+            "For whosoever shall do the will of my Father which is in heaven, the same is my brother, and <b>sister</b>, and mother."
+        );
+        assert_eq!(
+            markup(42, 10, 39),
+            "And she had <b>a sister</b> called Mary, which also sat at Jesus' feet, and heard his word."
+        );
+        assert_eq!(
+            markup(40, 13, 56),
+            "And his <b>sisters</b>, are they not all with us? Whence then hath this [man] all these things?"
+        );
+    }
+
+    #[test]
     fn paint_bold_skips_ranges_that_are_empty_or_misaligned() {
         assert_eq!(paint_bold("ab", &[(0, 0), (1, 5), (0, 1)]), "<b>a</b>b");
         assert_eq!(paint_bold("é", &[(1, 2)]), "é");
