@@ -6,7 +6,8 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use occurrences::{
-    strongs_occurrence_count, strongs_occurrences, strongs_page, Occurrence, StrongsWindow,
+    strongs_occurrence_count, strongs_occurrences, strongs_page, StoredSpan, Occurrence,
+    StrongsWindow,
 };
 pub use search::{
     compile_query, ensure_entries_fts, ensure_resources_fts, ensure_verses_fts, is_prefix_token,
