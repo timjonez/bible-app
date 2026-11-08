@@ -77,39 +77,22 @@ pub fn build(
     pickers.append(&book);
     pickers.append(&chapter);
 
-    let mut choices = vec![
-        ("Search", None, Launch::Search),
-        ("Matthew Henry", None, Launch::Mhc),
-        (
-            "Treasury",
-            Some("Treasury of Scripture Knowledge"),
-            Launch::Tsk,
-        ),
-    ];
-    if library {
-        choices.push(("Library", Some("Dictionaries and topics"), Launch::Library));
-    }
-    if marks {
-        choices.push(("Notes", None, Launch::Notes));
-        choices.push(("Bookmarks", None, Launch::Bookmarks));
-    }
+    let choices = choices(library, marks);
 
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::None);
-    for (label, tip, _) in &choices {
-        let row_label = gtk::Label::new(Some(label));
-        row_label.set_xalign(0.0);
-        row_label.set_margin_top(10);
-        row_label.set_margin_bottom(10);
-        row_label.set_margin_start(12);
-        row_label.set_margin_end(12);
-        let row = gtk::ListBoxRow::new();
-        row.set_child(Some(&row_label));
-        if let Some(tip) = tip {
-            row.set_tooltip_text(Some(tip));
-        }
-        row.update_property(&[gtk::accessible::Property::Label(label)]);
+    for choice in &choices {
+        let row = adw::ActionRow::new();
+        row.set_title(choice.title);
+        row.set_subtitle(choice.subtitle);
+        row.set_activatable(true);
+        let icon = gtk::Image::from_icon_name(choice.icon);
+        icon.add_css_class("dim-label");
+        row.add_prefix(&icon);
+        let chevron = gtk::Image::from_icon_name("go-next-symbolic");
+        chevron.add_css_class("dim-label");
+        row.add_suffix(&chevron);
         list.append(&row);
     }
     let activate = sender;
@@ -118,28 +101,29 @@ pub fn build(
         if idx < 0 {
             return;
         }
-        let Some((_, _, choice)) = choices.get(idx as usize) else {
+        let Some(choice) = choices.get(idx as usize) else {
             return;
         };
         activate.emit(crate::app::Msg::BlankLaunch {
             id,
-            choice: *choice,
+            choice: choice.launch,
         });
     });
 
-    let open_label = gtk::Label::new(Some("Open"));
-    open_label.add_css_class("dim-label");
-    open_label.set_xalign(0.0);
-    let open_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    open_box.append(&open_label);
-    open_box.append(&list);
+    let read_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    read_box.append(&section_title("Read"));
+    read_box.append(&pickers);
 
-    let stack = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    stack.append(&pickers);
-    stack.append(&open_box);
+    let study_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    study_box.append(&section_title("Study"));
+    study_box.append(&list);
+
+    let stack = gtk::Box::new(gtk::Orientation::Vertical, 28);
+    stack.append(&read_box);
+    stack.append(&study_box);
 
     let clamp = adw::Clamp::new();
-    clamp.set_maximum_size(420);
+    clamp.set_maximum_size(460);
     clamp.set_tightening_threshold(360);
     clamp.set_child(Some(&stack));
 
@@ -159,6 +143,70 @@ pub fn build(
         chapter,
         syncing,
     }
+}
+
+/// One study view the blank tab can open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choice {
+    pub title: &'static str,
+    pub subtitle: &'static str,
+    pub icon: &'static str,
+    pub launch: Launch,
+}
+
+/// Study views offered on a blank tab, in display order. The library and the
+/// user's marks only appear when their databases are present.
+pub fn choices(library: bool, marks: bool) -> Vec<Choice> {
+    let mut out = vec![
+        Choice {
+            title: "Search",
+            subtitle: "Words, phrases, and Strong’s numbers",
+            icon: "system-search-symbolic",
+            launch: Launch::Search,
+        },
+        Choice {
+            title: "Matthew Henry",
+            subtitle: "Commentary, verse by verse",
+            icon: "x-office-document-symbolic",
+            launch: Launch::Mhc,
+        },
+        Choice {
+            title: "Treasury",
+            subtitle: "Treasury of Scripture Knowledge cross-references",
+            icon: "view-list-bullet-symbolic",
+            launch: Launch::Tsk,
+        },
+    ];
+    if library {
+        out.push(Choice {
+            title: "Library",
+            subtitle: "Dictionaries, lexicons, and topics",
+            icon: "accessories-dictionary-symbolic",
+            launch: Launch::Library,
+        });
+    }
+    if marks {
+        out.push(Choice {
+            title: "Notes",
+            subtitle: "Your notes on verses",
+            icon: "document-edit-symbolic",
+            launch: Launch::Notes,
+        });
+        out.push(Choice {
+            title: "Bookmarks",
+            subtitle: "Verses you have saved",
+            icon: "bookmark-new-symbolic",
+            launch: Launch::Bookmarks,
+        });
+    }
+    out
+}
+
+fn section_title(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("heading");
+    label.set_xalign(0.0);
+    label
 }
 
 /// The menu's own activate handler runs first and clears the search filter,
@@ -187,4 +235,39 @@ fn find_list(widget: &gtk::Widget) -> Option<gtk::ListView> {
         child = widget.next_sibling();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn choices_always_offer_search_and_commentaries() {
+        let launches: Vec<Launch> = choices(false, false).iter().map(|c| c.launch).collect();
+        assert_eq!(launches, vec![Launch::Search, Launch::Mhc, Launch::Tsk]);
+    }
+
+    #[test]
+    fn choices_add_library_and_marks_when_present() {
+        let launches: Vec<Launch> = choices(true, true).iter().map(|c| c.launch).collect();
+        assert_eq!(
+            launches,
+            vec![
+                Launch::Search,
+                Launch::Mhc,
+                Launch::Tsk,
+                Launch::Library,
+                Launch::Notes,
+                Launch::Bookmarks,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_choice_has_a_subtitle_and_symbolic_icon() {
+        for choice in choices(true, true) {
+            assert!(!choice.subtitle.is_empty(), "{}", choice.title);
+            assert!(choice.icon.ends_with("-symbolic"), "{}", choice.icon);
+        }
+    }
 }

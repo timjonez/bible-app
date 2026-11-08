@@ -125,6 +125,26 @@ impl Column {
     }
 }
 
+/// CSS class for commentary, Treasury, and library text. It takes the
+/// chapter's reading face and size.
+pub const STUDY_TEXT_CLASS: &str = "study-text";
+
+/// Read-only article text for a study view.
+pub fn study_view(buffer: &gtk::TextBuffer, top_margin: i32) -> gtk::TextView {
+    let view = gtk::TextView::new();
+    view.set_buffer(Some(buffer));
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.set_top_margin(top_margin);
+    view.set_bottom_margin(16);
+    view.set_hexpand(true);
+    view.set_vexpand(true);
+    view.set_accessible_role(gtk::AccessibleRole::Document);
+    view.add_css_class(STUDY_TEXT_CLASS);
+    view
+}
+
 fn apply_column_insets(view: &gtk::TextView, pane: i32, preferred: i32, resize: bool) {
     // Filling a split must drop the centering insets even when this view
     // has no width yet. Those insets are the text view's minimum, and a
@@ -296,7 +316,8 @@ pub fn install_css() {
             }
             .column-edge {
               min-width: 1px;
-              background-color: alpha(@window_fg_color, 0.28);
+              background-color: alpha(@window_fg_color, 0.08);
+              transition: background-color 150ms ease-out;
             }
             .column-handle:hover .column-edge {
               background-color: @accent_bg_color;

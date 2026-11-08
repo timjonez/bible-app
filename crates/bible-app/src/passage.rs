@@ -606,18 +606,12 @@ pub fn install_css() {
         provider.load_from_string(
             r#"
             paned.pane-split > separator {
-              background-color: transparent;
-              background-image: linear-gradient(
-                to right,
-                transparent,
-                transparent calc(50% - 0.5px),
-                alpha(@window_fg_color, 0.35) calc(50% - 0.5px),
-                alpha(@window_fg_color, 0.35) calc(50% + 0.5px),
-                transparent calc(50% + 0.5px)
-              );
+              background-color: alpha(@window_fg_color, 0.12);
+              background-image: none;
               border: none;
               box-shadow: none;
-              min-width: 9px;
+              min-width: 1px;
+              transition: background-color 150ms ease-out;
             }
             headerbar {
               min-height: 0;
@@ -639,15 +633,14 @@ pub fn install_css() {
               min-height: 28px;
               padding: 0;
             }
+            scrolledwindow.chip-strip undershoot.left {
+              background-image: linear-gradient(to right, @window_bg_color, alpha(@window_bg_color, 0));
+            }
+            scrolledwindow.chip-strip undershoot.right {
+              background-image: linear-gradient(to left, @window_bg_color, alpha(@window_bg_color, 0));
+            }
             paned.pane-split > separator:hover {
-              background-image: linear-gradient(
-                to right,
-                transparent,
-                transparent calc(50% - 0.5px),
-                @accent_bg_color calc(50% - 0.5px),
-                @accent_bg_color calc(50% + 0.5px),
-                transparent calc(50% + 0.5px)
-              );
+              background-color: @accent_bg_color;
             }
             "#,
         );
@@ -667,8 +660,9 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     italic.set_style(gtk::pango::Style::Italic);
     buffer.tag_table().add(&italic);
     let verse_num = gtk::TextTag::new(Some("verse-num"));
-    verse_num.set_weight(700);
-    verse_num.set_scale(0.75);
+    verse_num.set_weight(600);
+    verse_num.set_family(Some("sans-serif"));
+    verse_num.set_scale(0.7);
     verse_num.set_rise(gtk::pango::SCALE * 4);
     buffer.tag_table().add(&verse_num);
     let note = gtk::TextTag::new(Some("note"));

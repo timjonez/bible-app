@@ -124,7 +124,8 @@ fn apply_tag(buffer: &gtk::TextBuffer, name: &str, span: layout::Span) {
 
 pub fn verse_menu_model(has_note: bool, has_mhc: bool) -> gio::Menu {
     let menu = gio::Menu::new();
-    menu.append(Some("Copy"), Some("win.copy-verse-here"));
+    // Right-click makes this the current verse, which is what Ctrl+C copies.
+    append_item(&menu, "Copy", "win.copy-verse-here", Some("<Control>c"));
     append_item(&menu, "Bookmark", "win.toggle-bookmark", Some("<Control>d"));
     let highlight = gio::Menu::new();
     let gold = format!("win.highlight('{}')", user_db::DEFAULT_HIGHLIGHT);
@@ -840,6 +841,7 @@ mod tests {
         assert_eq!(plain.n_items(), 4);
         assert_eq!(item_attr(&plain, 0, "label"), "Copy");
         assert_eq!(item_attr(&plain, 0, "action"), "win.copy-verse-here");
+        assert_eq!(item_attr(&plain, 0, "accel"), "<Control>c");
         assert_eq!(item_attr(&plain, 1, "label"), "Bookmark");
         assert_eq!(item_attr(&plain, 1, "action"), "win.toggle-bookmark");
         assert_eq!(item_attr(&plain, 1, "accel"), "<Control>d");
