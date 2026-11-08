@@ -96,6 +96,7 @@ impl SplitShell {
         if menu.parent().is_some() {
             header.remove(menu);
         }
+        add_text_size_row(menu);
         header.set_show_start_title_buttons(false);
         header.set_show_end_title_buttons(false);
         header.set_show_title(true);
@@ -113,6 +114,107 @@ impl SplitShell {
         row.append(&controls);
         header.set_title_widget(Some(&row));
     }
+}
+
+/// `custom` id of the text size row in the main menu.
+pub const TEXT_SIZE_ROW: &str = "text-size";
+
+/// Smaller and larger text buttons in the menu. Buttons, not menu items, so
+/// a click leaves the menu open for the next step.
+fn add_text_size_row(menu: &gtk::MenuButton) {
+    let Some(popover) = menu.popover().and_downcast::<gtk::PopoverMenu>() else {
+        return;
+    };
+    let label = gtk::Label::new(Some("Text Size"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    buttons.add_css_class("linked");
+    for (icon, action, tip) in [
+        (
+            "zoom-out-symbolic",
+            "win.font-smaller",
+            "Smaller text (Ctrl+−)",
+        ),
+        (
+            "zoom-in-symbolic",
+            "win.font-larger",
+            "Larger text (Ctrl++)",
+        ),
+    ] {
+        let button = gtk::Button::from_icon_name(icon);
+        button.set_action_name(Some(action));
+        button.set_tooltip_text(Some(tip));
+        button.update_property(&[gtk::accessible::Property::Label(tip)]);
+        buttons.append(&button);
+    }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    // Line the label up with the menu items, which leave room for a check.
+    row.set_margin_start(33);
+    row.set_margin_end(6);
+    row.set_margin_top(2);
+    row.set_margin_bottom(2);
+    row.append(&label);
+    row.append(&buttons);
+
+    // Down inside a row of buttons has nowhere to go and GTK keeps focus on
+    // the last button. Send it on to the first menu item instead.
+    let keys = gtk::EventControllerKey::new();
+    let menu_popover = popover.clone();
+    keys.connect_key_pressed(move |_, keyval, _, _| {
+        if keyval == gtk::gdk::Key::Down || keyval == gtk::gdk::Key::KP_Down {
+            if let Some(item) = first_menu_item(menu_popover.upcast_ref()) {
+                item.grab_focus();
+                return gtk::glib::Propagation::Stop;
+            }
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    row.add_controller(keys);
+
+    popover.add_child(&row, TEXT_SIZE_ROW);
+}
+
+/// First visible model-backed item in a popover menu.
+fn first_menu_item(widget: &gtk::Widget) -> Option<gtk::Widget> {
+    if widget.css_name().as_str() == "modelbutton" && widget.is_visible() {
+        return Some(widget.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        if let Some(found) = first_menu_item(&next) {
+            return Some(found);
+        }
+        child = next.next_sibling();
+    }
+    None
+}
+
+/// The Ctrl+L popover: a reference entry with a hint for its two keys.
+pub fn goto_popover() -> (gtk::Entry, gtk::Popover) {
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("John 3:16"));
+    entry.set_tooltip_text(Some(
+        "Go to a reference (Enter). Shift+Enter opens beside (Ctrl+L)",
+    ));
+    entry.set_width_chars(24);
+    entry.update_property(&[gtk::accessible::Property::Label("Go to reference")]);
+    let hint = gtk::Label::new(Some("Enter to go · Shift+Enter opens beside"));
+    hint.add_css_class("caption");
+    hint.add_css_class("dim-label");
+    hint.set_xalign(0.0);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    body.set_margin_top(4);
+    body.set_margin_bottom(4);
+    body.set_margin_start(4);
+    body.set_margin_end(4);
+    body.append(&entry);
+    body.append(&hint);
+    let popover = gtk::Popover::new();
+    popover.set_autohide(true);
+    popover.add_css_class("goto-popover");
+    popover.set_child(Some(&body));
+    (entry, popover)
 }
 
 /// Back and forward through one passage's history, at the start of its bar.
@@ -246,17 +348,7 @@ pub fn open_side_window(menu: &impl IsA<gio::MenuModel>) -> SideChrome {
 
     let header = adw::HeaderBar::new();
 
-    let goto_entry = gtk::Entry::new();
-    goto_entry.set_placeholder_text(Some("John 3:16"));
-    goto_entry.set_tooltip_text(Some(
-        "Go to a reference (Enter). Shift+Enter opens beside (Ctrl+L)",
-    ));
-    goto_entry.set_width_chars(18);
-    goto_entry.update_property(&[gtk::accessible::Property::Label("Go to reference")]);
-    let goto_popover = gtk::Popover::new();
-    goto_popover.set_autohide(true);
-    goto_popover.add_css_class("goto-popover");
-    goto_popover.set_child(Some(&goto_entry));
+    let (goto_entry, goto_popover) = goto_popover();
     goto_popover.set_parent(&header);
 
     let shell = SplitShell::new();

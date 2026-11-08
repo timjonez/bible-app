@@ -343,17 +343,7 @@ impl SimpleComponent for App {
                     Some(e),
                 ),
             };
-        let goto_entry = gtk::Entry::new();
-        goto_entry.set_placeholder_text(Some("John 3:16"));
-        goto_entry.set_tooltip_text(Some(
-            "Go to a reference (Enter). Shift+Enter opens beside (Ctrl+L)",
-        ));
-        goto_entry.set_width_chars(18);
-        goto_entry.update_property(&[gtk::accessible::Property::Label("Go to reference")]);
-        let goto_popover = gtk::Popover::new();
-        goto_popover.set_autohide(true);
-        goto_popover.add_css_class("goto-popover");
-        goto_popover.set_child(Some(&goto_entry));
+        let (goto_entry, goto_popover) = shell::goto_popover();
         let goto_sender = sender.clone();
         goto_entry.connect_activate(move |entry| {
             goto_sender.input(Msg::GoTo(WindowId::MAIN, entry.text().to_string()));
@@ -2035,10 +2025,8 @@ impl App {
     }
 
     fn apply_font(&self) {
-        self.font_provider.load_from_string(&format!(
-            "textview.chapter-view {{ font-size: {}pt; }}",
-            self.font_size
-        ));
+        self.font_provider
+            .load_from_string(&layout::reading_css(self.font_size));
         self.apply_column();
     }
 
@@ -3014,7 +3002,9 @@ impl App {
                 paned.add_css_class("pane-split");
                 paned.set_hexpand(true);
                 paned.set_vexpand(true);
-                paned.set_wide_handle(true);
+                // A thin handle draws a 1px rule; GTK keeps a wider grab area
+                // around it, so the divider stays easy to drag.
+                paned.set_wide_handle(false);
                 paned.set_resize_start_child(true);
                 paned.set_resize_end_child(true);
                 // Column margins can still report a wide minimum on the first
@@ -4045,6 +4035,7 @@ fn load_library() -> Result<LoadedLibrary, String> {
 
 fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     let menu = gio::Menu::new();
+    menu.append_item(&text_size_section());
     menu.append(Some("Paragraphs"), Some("win.paragraphs"));
 
     let marks = gio::Menu::new();
@@ -4082,6 +4073,16 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
     }
     menu.append_section(None, &study);
     menu
+}
+
+/// Placeholder for the text size row. `shell::attach_header` fills it with
+/// real buttons, which keep the menu open; model items would close it.
+fn text_size_section() -> gio::MenuItem {
+    let text = gio::Menu::new();
+    let row = gio::MenuItem::new(None, None);
+    row.set_attribute_value("custom", Some(&shell::TEXT_SIZE_ROW.to_variant()));
+    text.append_item(&row);
+    gio::MenuItem::new_section(None, &text)
 }
 
 #[derive(Clone)]
@@ -4468,6 +4469,19 @@ relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-besid
 #[cfg(test)]
 mod tests {
     use super::window_title_from_tab;
+    use relm4::gtk::gio::{self, prelude::*};
+
+    #[test]
+    fn app_menu_starts_with_the_text_size_row() {
+        let menu = super::build_app_menu(&[]);
+        let section = menu
+            .item_link(0, gio::MENU_LINK_SECTION)
+            .expect("first item is a section");
+        let custom = section
+            .item_attribute_value(0, "custom", None)
+            .and_then(|v| v.get::<String>());
+        assert_eq!(custom.as_deref(), Some(crate::shell::TEXT_SIZE_ROW));
+    }
 
     #[test]
     fn window_title_uses_tab_and_app_name() {

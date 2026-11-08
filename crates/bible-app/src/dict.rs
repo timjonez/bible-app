@@ -105,17 +105,8 @@ pub fn build(
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     cite::add_tag(&buffer);
-    let view = gtk::TextView::new();
-    view.set_buffer(Some(&buffer));
-    view.set_editable(false);
-    view.set_cursor_visible(false);
-    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    let view = crate::column::study_view(&buffer, 16);
     view.set_direction(gtk::TextDirection::Ltr);
-    view.set_top_margin(16);
-    view.set_bottom_margin(16);
-    view.set_hexpand(true);
-    view.set_vexpand(true);
-    view.set_accessible_role(gtk::AccessibleRole::Document);
     let text_scroll = gtk::ScrolledWindow::new();
     text_scroll.set_hexpand(true);
     text_scroll.set_vexpand(true);

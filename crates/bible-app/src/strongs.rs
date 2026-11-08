@@ -75,6 +75,10 @@ pub fn present(
         );
     }
     let content = scrolled_page(stack.clone());
+    // The popover keeps the height it opened at. Open it tall enough for the
+    // longest source so switching to an article does not squeeze it into the
+    // space a short Strong's entry needed. Short pages keep their own height.
+    content.set_min_content_height(tallest_page(&stack).clamp(PAGE_MIN_HEIGHT, PAGE_MAX_HEIGHT));
     let child: gtk::Widget = if tabs.len() == 1 {
         content.upcast()
     } else {
@@ -86,14 +90,29 @@ pub fn present(
 }
 
 const PAGE_MAX_HEIGHT: i32 = 360;
+const PAGE_MIN_HEIGHT: i32 = 96;
+/// Width the article pages lay out at (their width request).
+const PAGE_WIDTH: i32 = 300;
+
+/// Natural height of the tallest page at the popover's page width.
+fn tallest_page(stack: &gtk::Stack) -> i32 {
+    let mut tallest = 0;
+    let mut child = stack.first_child();
+    while let Some(page) = child {
+        let (_, natural, _, _) = page.measure(gtk::Orientation::Vertical, PAGE_WIDTH);
+        tallest = tallest.max(natural);
+        child = page.next_sibling();
+    }
+    tallest
+}
 
 fn scrolled_page(stack: gtk::Stack) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_overlay_scrolling(false);
-    scroll.set_min_content_height(96);
+    scroll.set_min_content_height(PAGE_MIN_HEIGHT);
     scroll.set_max_content_height(PAGE_MAX_HEIGHT);
-    scroll.set_min_content_width(300);
+    scroll.set_min_content_width(PAGE_WIDTH);
     scroll.set_propagate_natural_height(true);
     scroll.set_propagate_natural_width(true);
     scroll.set_hexpand(true);
@@ -301,30 +320,13 @@ fn strongs_page(
             body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
 
-        if !def.lemma.is_empty() {
-            let sub = if def.pronunciation.is_empty() {
-                def.lemma.clone()
-            } else {
-                format!("{}  ({})", def.lemma, def.pronunciation)
-            };
-            let lemma = gtk::Label::new(Some(&sub));
-            lemma.add_css_class("heading");
-            lemma.set_xalign(0.0);
-            lemma.set_wrap(true);
-            lemma.set_selectable(true);
-            body.append(&lemma);
-        }
-
         let code = format!("{}{}", def.lang, def.num);
-        let title = gtk::Label::new(Some(&code));
         if def.lemma.is_empty() {
-            title.add_css_class("heading");
+            body.append(&entry_header(None, &code, None));
         } else {
-            title.add_css_class("dim-label");
+            let detail = (!def.pronunciation.is_empty()).then_some(def.pronunciation.as_str());
+            body.append(&entry_header(Some(&code), &def.lemma, detail));
         }
-        title.set_xalign(0.0);
-        title.set_selectable(true);
-        body.append(&title);
 
         let (text, see) = split_see_also(&def.definition, &def.lang);
         if !text.is_empty() {
@@ -332,23 +334,84 @@ fn strongs_page(
             label.set_max_width_chars(44);
             body.append(&label);
         }
-        for see_code in see {
-            body.append(&see_link(&see_code, sender.clone()));
+        if !see.is_empty() {
+            body.append(&see_also_row(&see, sender.clone()));
         }
-        body.append(&library_button(
-            sender.clone(),
-            bible_app_db::STRONGS_MODULE,
-            &code,
-        ));
         let count = counts.get(i).copied().unwrap_or(0);
-        body.append(&occurrences_button(sender.clone(), &code, count));
+        body.append(&actions(&[
+            occurrences_button(sender.clone(), &code, count),
+            library_button(sender.clone(), bible_app_db::STRONGS_MODULE, &code),
+        ]));
     }
     body
 }
 
+/// Small source line, the headword, and an optional dimmed pronunciation.
+pub(crate) fn entry_header(
+    eyebrow: Option<&str>,
+    headword: &str,
+    detail: Option<&str>,
+) -> gtk::Box {
+    let header = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    if let Some(eyebrow) = eyebrow {
+        let label = gtk::Label::new(Some(eyebrow));
+        label.add_css_class("caption");
+        label.add_css_class("dim-label");
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_selectable(true);
+        // Mouse selection only: keyboard focus would select the whole label.
+        label.set_focusable(false);
+        header.append(&label);
+    }
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let head = gtk::Label::new(Some(headword));
+    head.add_css_class("title-3");
+    head.set_xalign(0.0);
+    head.set_wrap(true);
+    head.set_selectable(true);
+    head.set_focusable(false);
+    line.append(&head);
+    if let Some(detail) = detail {
+        let label = gtk::Label::new(Some(detail));
+        label.add_css_class("dim-label");
+        label.set_valign(gtk::Align::Baseline);
+        label.set_xalign(0.0);
+        label.set_selectable(true);
+        label.set_focusable(false);
+        line.append(&label);
+    }
+    header.append(&line);
+    header
+}
+
+/// "See also" with one link per related code.
+fn see_also_row(codes: &[String], sender: relm4::Sender<super::app::Msg>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let lead = gtk::Label::new(Some("See also"));
+    lead.add_css_class("dim-label");
+    row.append(&lead);
+    for code in codes {
+        row.append(&see_link(code, sender.clone()));
+    }
+    row
+}
+
+/// Popover actions as one column of equal-width buttons.
+fn actions(buttons: &[gtk::Button]) -> gtk::Box {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    column.set_margin_top(4);
+    for button in buttons {
+        button.set_halign(gtk::Align::Fill);
+        column.append(button);
+    }
+    column
+}
+
 fn see_link(code: &str, sender: relm4::Sender<super::app::Msg>) -> gtk::Label {
     let link = gtk::Label::new(None);
-    link.set_markup(&format!("<a href=\"{code}\">See {code}</a>"));
+    link.set_markup(&format!("<a href=\"{code}\">{code}</a>"));
+    link.set_tooltip_text(Some(&format!("Open {code}. Right-click for a new tab.")));
     link.set_xalign(0.0);
     link.set_use_markup(true);
     let send = sender.clone();
@@ -431,11 +494,11 @@ fn lexicon_page(
             body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
         append_dict_entry(&body, entry, books, sender.clone());
-        body.append(&library_button(
+        body.append(&actions(&[library_button(
             sender.clone(),
             &entry.module,
             &entry.headword,
-        ));
+        )]));
     }
     body
 }
@@ -453,7 +516,11 @@ fn dict_page(
     body.set_width_request(300);
 
     append_dict_entry(&body, entry, books, sender.clone());
-    body.append(&library_button(sender, &entry.module, &entry.headword));
+    body.append(&actions(&[library_button(
+        sender,
+        &entry.module,
+        &entry.headword,
+    )]));
     body
 }
 
@@ -463,19 +530,7 @@ fn append_dict_entry(
     books: &[Book],
     sender: relm4::Sender<super::app::Msg>,
 ) {
-    let source = gtk::Label::new(Some(&entry.title));
-    source.add_css_class("dim-label");
-    source.add_css_class("caption");
-    source.set_xalign(0.0);
-    source.set_wrap(true);
-    body.append(&source);
-
-    let head = gtk::Label::new(Some(&entry.headword));
-    head.add_css_class("heading");
-    head.set_xalign(0.0);
-    head.set_wrap(true);
-    head.set_selectable(true);
-    body.append(&head);
+    body.append(&entry_header(Some(&entry.title), &entry.headword, None));
 
     let text = cite::linked_label(&entry.text, books, sender);
     text.set_width_chars(40);
@@ -645,6 +700,59 @@ mod tests {
             .and_then(|name| name.to_str())
             .and_then(|name| name.parse::<u32>().ok())
             == Some(std::process::id())
+    }
+
+    /// GTK widget tests run only on the main thread with a display
+    /// (`cargo test -- --test-threads=1` in a desktop session).
+    fn gtk_ready(name: &str) -> bool {
+        let display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if !on_main_thread() || !display {
+            eprintln!("skip {name}: GTK needs the main thread and a display");
+            return false;
+        }
+        gtk::init().expect("gtk init");
+        true
+    }
+
+    fn labels(widget: &gtk::Widget, out: &mut Vec<gtk::Label>) {
+        if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+            out.push(label);
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            labels(&next, out);
+            child = next.next_sibling();
+        }
+    }
+
+    #[test]
+    fn entry_header_orders_source_headword_and_detail() {
+        if !gtk_ready("entry header test") {
+            return;
+        }
+        let header = entry_header(Some("G2411"), "hieron", Some("hee-er-on'"));
+        let mut found = Vec::new();
+        labels(header.upcast_ref(), &mut found);
+        let text: Vec<String> = found.iter().map(|l| l.label().to_string()).collect();
+        assert_eq!(text, vec!["G2411", "hieron", "hee-er-on'"]);
+        assert!(found[1].has_css_class("title-3"));
+        // Focus would select the whole label when the popover opens.
+        assert!(found.iter().all(|l| l.is_selectable() && !l.is_focusable()));
+    }
+
+    #[test]
+    fn tallest_page_measures_the_longest_source() {
+        if !gtk_ready("tallest page test") {
+            return;
+        }
+        let stack = gtk::Stack::new();
+        for (name, height) in [("short", 120), ("long", 900)] {
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            page.set_size_request(PAGE_WIDTH, height);
+            stack.add_named(&page, Some(name));
+        }
+        assert_eq!(tallest_page(&stack), 900);
     }
 
     #[test]

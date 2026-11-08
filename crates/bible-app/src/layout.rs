@@ -1027,6 +1027,22 @@ pub const MIN_FONT: i32 = 10;
 pub const MAX_FONT: i32 = 28;
 pub const DEFAULT_FONT: i32 = 14;
 
+/// Book face for chapter text, most specific first. Every entry is a common
+/// serif install; `serif` lets fontconfig pick when none are present.
+pub const READING_FONTS: &str =
+    "\"Literata\", \"Source Serif 4\", \"Noto Serif\", \"Georgia\", \"Liberation Serif\", serif";
+/// Leading for chapter text, as a multiple of the font size.
+pub const READING_LINE_HEIGHT: f64 = 1.45;
+
+/// Stylesheet for the chapter text at `font_pt`.
+pub fn reading_css(font_pt: i32) -> String {
+    let pt = font_pt.clamp(MIN_FONT, MAX_FONT);
+    format!(
+        "textview.chapter-view, textview.study-text {{ font-size: {pt}pt; \
+         font-family: {READING_FONTS}; line-height: {READING_LINE_HEIGHT}; }}"
+    )
+}
+
 /// Side padding of the chapter text, in logical pixels.
 pub const CHAPTER_MARGIN_X: i32 = 28;
 /// Reading measure, in approximate characters.
@@ -2066,6 +2082,27 @@ God creates heaven and earth.
         assert_eq!(larger_font(14), 15);
         assert_eq!(smaller_font(MIN_FONT), MIN_FONT);
         assert_eq!(larger_font(MAX_FONT), MAX_FONT);
+    }
+
+    #[test]
+    fn reading_css_sets_a_serif_face_and_leading() {
+        let css = reading_css(16);
+        assert!(css.contains("font-size: 16pt;"), "{css}");
+        assert!(
+            css.starts_with("textview.chapter-view, textview.study-text {"),
+            "{css}"
+        );
+        assert!(css.contains("\"Noto Serif\""), "{css}");
+        assert!(
+            css.trim_end().ends_with("serif; line-height: 1.45; }"),
+            "{css}"
+        );
+    }
+
+    #[test]
+    fn reading_css_clamps_the_font() {
+        assert!(reading_css(2).contains(&format!("font-size: {MIN_FONT}pt;")));
+        assert!(reading_css(99).contains(&format!("font-size: {MAX_FONT}pt;")));
     }
 
     #[test]

@@ -62,16 +62,7 @@ pub fn build(column_px: i32) -> TskWidgets {
     heading.set_pixels_below_lines(4);
     cite::add_tag(&buffer);
 
-    let view = gtk::TextView::new();
-    view.set_buffer(Some(&buffer));
-    view.set_editable(false);
-    view.set_cursor_visible(false);
-    view.set_wrap_mode(gtk::WrapMode::WordChar);
-    view.set_top_margin(8);
-    view.set_bottom_margin(16);
-    view.set_hexpand(true);
-    view.set_vexpand(true);
-    view.set_accessible_role(gtk::AccessibleRole::Document);
+    let view = column::study_view(&buffer, 8);
 
     let menu = cite::menu_for(&view);
 
@@ -274,10 +265,11 @@ pub fn present_phrase(
     dests: &[PhraseDest],
     sender: relm4::Sender<super::app::Msg>,
 ) {
-    let title = gtk::Label::new(Some(heading));
-    title.add_css_class("heading");
-    title.set_xalign(0.0);
-    title.set_wrap(true);
+    let title = crate::strongs::entry_header(
+        Some("Treasury of Scripture Knowledge"),
+        &format!("“{heading}”"),
+        None,
+    );
     title.set_margin_start(12);
     title.set_margin_end(12);
     title.set_margin_top(10);

@@ -2,8 +2,8 @@ use crate::layout;
 use crate::nav::{self, Ref};
 use crate::workspace::TabId;
 use bible_app_db::{
-    StoredSpan, Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode,
-    SearchScope, VerseFilter, WordMatch,
+    Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchScope,
+    StoredSpan, VerseFilter, WordMatch,
 };
 use gtk::gio;
 use gtk::prelude::*;
@@ -1121,6 +1121,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     let chip_scroll = gtk::ScrolledWindow::new();
     chip_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     chip_scroll.set_propagate_natural_height(true);
+    chip_scroll.add_css_class("chip-strip");
     chip_scroll.set_child(Some(&chips));
 
     let list = gtk::ListBox::new();
@@ -1211,7 +1212,7 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bible_app_db::{StoredSpan, LibraryHit};
+    use bible_app_db::{LibraryHit, StoredSpan};
 
     fn books() -> Vec<Book> {
         vec![Book {
