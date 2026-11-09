@@ -23,11 +23,11 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 
 **Read a chapter.** Book and chapter menus jump anywhere; type in the book popup to filter. Consecutive verses flow as prose by default, or one verse per block from the menu. Drag either edge of the text to set the column width. Commentary, the Treasury, a library article, and a note use that same width. Text is set in a book serif; Henry, the Treasury, and library articles share its face and size, which Text Size in the menu (or Ctrl+−/Ctrl++) changes. Font size, column width, last position, and paragraph mode are remembered.
 
-**Open several passages at once.** Chapters and study views live in tabs. A new tab is a chooser, and the passage or study view you pick fills that same tab. A window has one side-by-side split: the chapter stays on the left, and Search, Henry, the Treasury, and the library share the right-hand pane. Drag a tab out, or use Open in a window, for a second reader window.
+**Open several passages at once.** Chapters and study views live in tabs. A new tab is a chooser, and the passage or study view you pick fills that same tab. A window has one side-by-side split: the chapter stays on the left, with one study view on the right. Opening another study view replaces the current side pane. Use **Move to tab** in the pane's header first if you want to keep it, including Search's query and results. Drag a tab out, or use Open in a window, for a second reader window.
 
 **Look a word up in place.** Click a tagged KJV word for Strong’s, then BDB or Thayer when that code is in the library, plus matching dictionary and topic articles. Sources sit on the left of the popover; the open article is on the right. See all opens Search for every KJV verse tagged with that number, so a hit can be opened beside the list or in a new tab. Scripture references in those articles are links and jump in the current passage.
 
-**Follow cross-references and commentary.** A TSK superscript on a phrase opens its destinations: references on the left, the selected verse on the right. Right-click a verse and choose Matthew Henry when commentary starts there; Henry then opens on the right of the chapter, sharing that pane with Search, the Treasury, and the library. Pin a split Henry or Treasury pane to follow the chapter; a standalone commentary tab walks Henry or the Treasury on its own. Bible references in Matthew Henry, the Treasury, and library articles are links, including Thayer’s roman-numeral chapters (`Mt. ii. 4`); click one to open that verse beside the study tab, or right-click for a new tab or window. Translator notes appear as a dagger on the matched phrase.
+**Follow cross-references and commentary.** A TSK superscript on a phrase opens its destinations: references on the left, the selected verse on the right. Right-click a verse and choose Matthew Henry when commentary starts there; Henry then opens on the right of the chapter, replacing the current side pane. Pin a split Henry or Treasury pane to follow the chapter; a standalone commentary tab walks Henry or the Treasury on its own. Bible references in Matthew Henry, the Treasury, and library articles are links, including Thayer’s roman-numeral chapters (`Mt. ii. 4`); click one to open that verse beside the study tab, or right-click for a new tab or window. Translator notes appear as a dagger on the matched phrase.
 
 **Search the library.** Contains match is the default, so `ear` finds *ear*, *earth*, *hear*, and *heart*. The same menu offers all words, any word, and exact word. Scope covers the KJV, commentary, dictionaries, topics, notes, or the whole library. `H430` lists verses for that Strong’s number; `John 3:16` offers Go to; `John/light` limits the search to that book.
 
@@ -38,8 +38,7 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 **Find your way around.** Tagged words show a pointer and underline on hover.
 The menu's Keyboard Shortcuts dialog (Ctrl+?) lists reading and study controls.
 Side-by-side study panes have headings; Henry and the Treasury label their
-follow control and hide duplicate navigation while following. Search offers
-“Back to …” after opening a different chapter, without clearing the results.
+follow control and hide duplicate navigation while following.
 The Library bar includes a dictionary picker and an introductory empty page.
 
 ## Run

@@ -138,8 +138,6 @@ pub enum Msg {
     PreviewHit(TabId, i32),
     SearchActivate(TabId),
     OpenHit(TabId, i32),
-    /// Return the passage beside Search to where the search started.
-    SearchBack(TabId),
     OpenHitBeside(TabId, i32),
     OpenHitTab(TabId, Ref),
     OpenMhc,
@@ -233,6 +231,7 @@ pub enum Msg {
     TabClosed(TabId),
     /// Dismiss the view drawn inside a split tab.
     CloseGuest(TabId),
+    MoveToTab(TabId),
     /// Show this guest in its host's study stack.
     ShowGuest(TabId),
     TabAttached {
@@ -781,7 +780,6 @@ impl SimpleComponent for App {
             }
             Msg::OpenHit(id, idx) => self.open_hit(id, idx, false, false),
             Msg::LibraryModule(id, pos) => self.switch_library_module(id, pos),
-            Msg::SearchBack(id) => self.search_back(id),
             Msg::OpenHitBeside(id, idx) => {
                 let idx = if idx < 0 {
                     self.search(id)
@@ -1083,6 +1081,7 @@ impl SimpleComponent for App {
                 }
             }
             Msg::CloseGuest(id) => self.forget_tab(id),
+            Msg::MoveToTab(id) => self.move_to_tab(id),
             Msg::ShowGuest(id) => self.show_stack_guest(id),
             Msg::TabAttached { id, window } => self.tab_attached(id, window),
             Msg::SplitTab(id) => self.split_tab(id),
@@ -1110,7 +1109,6 @@ impl SimpleComponent for App {
         self.apply_column_mode();
         self.sync_shells();
         self.sync_follow_pins();
-        self.sync_search_backs();
         self.sync_window_titles();
         let _ = sender;
     }
@@ -1267,7 +1265,7 @@ impl App {
         let id = self.reuse_blank_or(TabKind::Search, |app| {
             let opened = app.workspace.open_search(window);
             if app.open_beside {
-                let _ = app.workspace.place_in_study_stack(opened.id);
+                let _ = app.place_study_beside(opened.id);
             }
             opened.id
         });
@@ -2230,7 +2228,7 @@ impl App {
         let id = self.reuse_blank_or(TabKind::Mhc { at, follow: false }, |app| {
             let opened = app.workspace.open_mhc(at);
             if app.open_beside {
-                let _ = app.workspace.place_in_study_stack(opened.id);
+                let _ = app.place_study_beside(opened.id);
             }
             opened.id
         });
@@ -2258,7 +2256,7 @@ impl App {
         let id = self.reuse_blank_or(TabKind::Tsk { at, follow: false }, |app| {
             let opened = app.workspace.open_tsk(at);
             if app.open_beside {
-                let _ = app.workspace.place_in_study_stack(opened.id);
+                let _ = app.place_study_beside(opened.id);
             }
             opened.id
         });
@@ -2302,7 +2300,7 @@ impl App {
                     .workspace
                     .open_library(module.to_string(), headword.map(str::to_string));
                 if app.open_beside {
-                    let _ = app.workspace.place_in_study_stack(opened.id);
+                    let _ = app.place_study_beside(opened.id);
                 }
                 opened.id
             },
@@ -3315,11 +3313,53 @@ impl App {
     }
 
     fn join_study_stack(&mut self, id: TabId) {
-        if !self.workspace.place_in_study_stack(id) {
+        if !self.place_study_beside(id) {
             return;
         }
         self.embed_in_host(id);
         self.sync_shells();
+    }
+
+    fn place_study_beside(&mut self, id: TabId) -> bool {
+        let previous = self
+            .workspace
+            .study_stack_host(self.window_of(id))
+            .map(|host| self.workspace.guests_of(host))
+            .unwrap_or_default();
+        if !self.workspace.place_in_study_stack(id) {
+            return false;
+        }
+        for previous in previous {
+            if self.workspace.tab(previous).is_some() {
+                continue;
+            }
+            // Replacement is not Escape/Close Search: keep the passage at
+            // the selected hit instead of restoring Search's origin.
+            if let Some(hosted) = self.hosted.remove(&previous) {
+                unparent(&hosted.body);
+            }
+            if self
+                .search_mark
+                .as_ref()
+                .is_some_and(|mark| mark.tab == previous)
+            {
+                self.search_mark = None;
+            }
+        }
+        true
+    }
+
+    fn move_to_tab(&mut self, id: TabId) {
+        let Some(host) = self.workspace.move_to_tab(id) else {
+            return;
+        };
+        // Reparent the existing body, rather than rebuilding Search and
+        // losing its query, results, selection, and scroll position.
+        self.mount_real_tab(id);
+        self.layout_tab(host);
+        self.workspace.focus(id);
+        self.select_tab(id);
+        self.sync_pickers();
     }
 
     fn reuse_stack_guest(
@@ -3411,49 +3451,6 @@ impl App {
             Some(TabKind::Search) => "Search".into(),
             Some(TabKind::Blank) => "New".into(),
             None => String::new(),
-        }
-    }
-
-    /// The passage a search tab opens hits into.
-    fn search_passage(&self, id: TabId) -> Option<TabId> {
-        let host = self.workspace.tab(id).and_then(|tab| tab.host);
-        if let Some(host) = host.filter(|h| self.passage(*h).is_some()) {
-            return Some(host);
-        }
-        self.workspace.focused_passage_in(self.window_of(id))
-    }
-
-    fn search_back(&mut self, id: TabId) {
-        let Some(origin) = self.search(id).and_then(|pane| pane.origin) else {
-            return;
-        };
-        let Some(passage) = self.search_passage(id) else {
-            return;
-        };
-        self.search_mark = None;
-        self.apply_passage_ref(passage, origin, true, true);
-        self.sync_pickers();
-    }
-
-    fn sync_search_backs(&self) {
-        for (id, hosted) in &self.hosted {
-            let TabContent::Search(pane) = &hosted.content else {
-                continue;
-            };
-            let current = self
-                .search_passage(*id)
-                .and_then(|p| self.passage(p))
-                .map(|p| p.at);
-            let label = pane
-                .origin
-                .filter(|_| search::needs_back(pane.origin, current))
-                .map(|at| {
-                    format!(
-                        "Back to {}",
-                        nav::format_chapter(&self.books, at.book, at.chapter)
-                    )
-                });
-            pane.set_back(label.as_deref());
         }
     }
 
@@ -4380,12 +4377,20 @@ fn guest_frame(
     holder.set_vexpand(true);
     holder.set_child(Some(body));
     let close = split_close_button();
-    let tx = tx.clone();
-    close.connect_clicked(move |_| tx.emit(Msg::CloseGuest(id)));
+    let send_close = tx.clone();
+    close.connect_clicked(move |_| send_close.emit(Msg::CloseGuest(id)));
     let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
     frame.set_hexpand(true);
     frame.set_vexpand(true);
     let header = shell::guest_header(title, &close);
+    let move_to_tab = gtk::Button::from_icon_name("tab-new-symbolic");
+    move_to_tab.add_css_class("flat");
+    move_to_tab.set_valign(gtk::Align::Center);
+    move_to_tab.set_tooltip_text(Some("Move to tab"));
+    move_to_tab.update_property(&[gtk::accessible::Property::Label("Move to tab")]);
+    let send_move = tx.clone();
+    move_to_tab.connect_clicked(move |_| send_move.emit(Msg::MoveToTab(id)));
+    header.insert_child_after(&move_to_tab, close.prev_sibling().as_ref());
     if let Some(extra) = extra {
         if extra.parent().is_some() {
             extra.unparent();
@@ -4648,6 +4653,50 @@ relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-besid
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a GTK display; run separately with a Broadway or desktop display"]
+    fn side_pane_move_action_preserves_search_widgets_and_results() {
+        use adw::prelude::*;
+        use relm4::{adw, gtk};
+
+        adw::init().expect("GTK display");
+        let mut workspace = crate::workspace::Workspace::new(crate::nav::Ref {
+            book: 1,
+            chapter: 1,
+            verse: 1,
+        });
+        let host = workspace.focused();
+        let id = workspace.open_search(crate::workspace::WindowId::MAIN).id;
+        assert!(workspace.place_in_study_stack(id));
+        let (tx, rx) = relm4::channel();
+        let pane = crate::search::build_pane(bible_app_db::MatchMode::Phrase, id, tx.clone());
+        pane.entry.set_text("dream");
+        pane.list.append(&gtk::Label::new(Some("Genesis 41:1")));
+        let row = pane.list.row_at_index(0).unwrap();
+        pane.list.select_row(Some(&row));
+        let frame = super::guest_frame(id, "Search", pane.root.upcast_ref(), None, &tx);
+        let header = frame.first_child().unwrap();
+        let button = header
+            .last_child()
+            .unwrap()
+            .prev_sibling()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(button.tooltip_text().as_deref(), Some("Move to tab"));
+        assert!(button.is_focusable());
+        button.emit_clicked();
+        assert!(matches!(rx.recv_sync(), Some(super::Msg::MoveToTab(tab)) if tab == id));
+
+        assert_eq!(workspace.move_to_tab(id), Some(host));
+        let tab_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        super::unparent(pane.root.upcast_ref());
+        tab_body.append(&pane.root);
+        assert_eq!(pane.entry.text().as_str(), "dream");
+        assert_eq!(pane.list.selected_row(), Some(row));
+        assert_eq!(pane.root.parent().as_ref(), Some(tab_body.upcast_ref()));
+    }
+
     #[test]
     #[ignore = "requires a GTK display; run separately with a Broadway or desktop display"]
     fn promoted_follow_control_returns_to_its_navigation_bar() {
