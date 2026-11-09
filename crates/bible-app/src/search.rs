@@ -178,13 +178,15 @@ pub fn reference_text(hit: &LibraryHit, books: &[Book], scope: SearchScope) -> S
     }
 }
 
+#[cfg(test)]
 pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
+    paint_bold(text, &query_ranges(text, tokens, word_match))
+}
+
+fn query_ranges(text: &str, tokens: &[String], word_match: WordMatch) -> Vec<(usize, usize)> {
     let lower = text.to_lowercase();
     if lower.len() != text.len() {
-        return escape_markup(text);
+        return Vec::new();
     }
     let mut marks: Vec<(usize, usize)> = Vec::new();
     for token in tokens {
@@ -210,7 +212,7 @@ pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String
             from = pos + needle.len().max(1);
         }
     }
-    paint_bold(text, &merge_ranges(marks))
+    merge_ranges(marks)
 }
 
 fn escape_markup(text: &str) -> String {
@@ -219,8 +221,15 @@ fn escape_markup(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[cfg(test)]
 fn paint_bold(text: &str, ranges: &[(usize, usize)]) -> String {
-    let mut out = String::new();
+    paint(text, ranges, false)
+}
+
+/// Bold `ranges`. With `supplied`, KJV `[words]` lose their brackets and
+/// are set in italics, as in the reader.
+fn paint(text: &str, ranges: &[(usize, usize)], supplied: bool) -> String {
+    let mut bold = vec![false; text.len()];
     let mut cursor = 0;
     for &(start, end) in ranges {
         if start >= end || end > text.len() || start < cursor {
@@ -229,13 +238,40 @@ fn paint_bold(text: &str, ranges: &[(usize, usize)]) -> String {
         if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
             continue;
         }
-        out.push_str(&escape_markup(&text[cursor..start]));
-        out.push_str("<b>");
-        out.push_str(&escape_markup(&text[start..end]));
-        out.push_str("</b>");
+        bold[start..end].fill(true);
         cursor = end;
     }
-    out.push_str(&escape_markup(&text[cursor..]));
+
+    let mut out = String::new();
+    let mut run = String::new();
+    let mut state = (false, false);
+    let mut italic = false;
+    let flush = |out: &mut String, run: &mut String, (b, i): (bool, bool)| {
+        if run.is_empty() {
+            return;
+        }
+        let text = escape_markup(run);
+        out.push_str(&match (b, i) {
+            (true, true) => format!("<b><i>{text}</i></b>"),
+            (true, false) => format!("<b>{text}</b>"),
+            (false, true) => format!("<i>{text}</i>"),
+            (false, false) => text,
+        });
+        run.clear();
+    };
+    for (i, ch) in text.char_indices() {
+        if supplied && (ch == '[' || ch == ']') {
+            italic = ch == '[';
+            continue;
+        }
+        let now = (bold[i], italic);
+        if now != state {
+            flush(&mut out, &mut run, state);
+            state = now;
+        }
+        run.push(ch);
+    }
+    flush(&mut out, &mut run, state);
     out
 }
 
@@ -307,7 +343,7 @@ impl MarkedLine {
                 }
             }
             if lo < hi {
-                ranges.push((lo, hi));
+                ranges.push(tighten(&text, lo, hi));
             }
         }
         Self {
@@ -320,9 +356,23 @@ impl MarkedLine {
         &self.text
     }
 
+    #[cfg(test)]
     pub fn markup(&self) -> String {
         paint_bold(&self.text, &self.ranges)
     }
+}
+
+/// Stored spans can carry the punctuation between words (`": and God"`).
+/// Brackets mark supplied words and stay with them.
+fn tighten(text: &str, lo: usize, hi: usize) -> (usize, usize) {
+    let keep = |c: char| c.is_alphanumeric() || matches!(c, '[' | ']' | '\'');
+    let span = &text[lo..hi];
+    let Some(first) = span.find(keep) else {
+        return (lo, hi);
+    };
+    let last = span.rfind(keep).unwrap_or(first);
+    let last_len = span[last..].chars().next().map_or(0, char::len_utf8);
+    (lo + first, lo + last + last_len)
 }
 
 #[derive(Debug, Clone)]
@@ -362,9 +412,13 @@ impl ListedHit {
     }
 
     pub fn line_markup(&self, tokens: &[String], word_match: WordMatch) -> String {
+        let supplied = self.library.kind == LibraryKind::Verse;
         match &self.marks {
-            RowMarks::Query => emphasize(&self.library.snippet, tokens, word_match),
-            RowMarks::Alignment(line) => line.markup(),
+            RowMarks::Query => {
+                let text = &self.library.snippet;
+                paint(text, &query_ranges(text, tokens, word_match), supplied)
+            }
+            RowMarks::Alignment(line) => paint(&line.text, &line.ranges, supplied),
         }
     }
 }
@@ -1072,6 +1126,28 @@ pub struct Pane {
     sender: relm4::Sender<crate::app::Msg>,
 }
 
+/// A plain mouse wheel only reports vertical motion, which a horizontal-only
+/// strip ignores.
+fn scroll_sideways_with_wheel(scroll: &gtk::ScrolledWindow) {
+    const WHEEL_STEP: f64 = 60.0;
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+    wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let target = scroll.clone();
+    wheel.connect_scroll(move |controller, dx, dy| {
+        if dx != 0.0 || dy == 0.0 {
+            return gtk::glib::Propagation::Proceed;
+        }
+        let step = match controller.unit() {
+            gtk::gdk::ScrollUnit::Wheel => WHEEL_STEP,
+            _ => 1.0,
+        };
+        let adj = target.hadjustment();
+        adj.set_value(adj.value() + dy * step);
+        gtk::glib::Propagation::Stop
+    });
+    scroll.add_controller(wheel);
+}
+
 pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::Msg>) -> Pane {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
@@ -1123,6 +1199,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     chip_scroll.set_propagate_natural_height(true);
     chip_scroll.add_css_class("chip-strip");
     chip_scroll.set_child(Some(&chips));
+    scroll_sideways_with_wheel(&chip_scroll);
 
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -1482,7 +1559,22 @@ mod tests {
         let clipped = StoredSpan::parse(verse, 8, 20).unwrap();
         assert_eq!(
             MarkedLine::from_verse(verse, &[clipped]).markup(),
-            "God crea<b>ted.</b>"
+            "God crea<b>ted</b>."
+        );
+    }
+
+    #[test]
+    fn alignment_trims_punctuation_at_the_span_edges() {
+        let verse = "that [it was] good: and God divided";
+        let god = StoredSpan::parse(verse, 18, 27).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[god]).markup(),
+            "that [it was] good: <b>and God</b> divided"
+        );
+        let supplied = StoredSpan::parse(verse, 4, 14).unwrap();
+        assert_eq!(
+            MarkedLine::from_verse(verse, &[supplied]).markup(),
+            "that <b>[it was]</b> good: and God divided"
         );
     }
 
@@ -1563,6 +1655,32 @@ mod tests {
         assert_eq!(
             markup(40, 13, 56),
             "And his <b>sisters</b>, are they not all with us? Whence then hath this [man] all these things?"
+        );
+    }
+
+    #[test]
+    fn supplied_words_are_italic_without_brackets() {
+        let text = "darkness [was] upon";
+        assert_eq!(paint(text, &[], true), "darkness <i>was</i> upon");
+        assert_eq!(paint(text, &[], false), "darkness [was] upon");
+        assert_eq!(
+            paint("that [it was] good", &[(0, 8)], true),
+            "<b>that </b><b><i>it</i></b><i> was</i> good"
+        );
+        assert_eq!(paint("was] upon [the", &[], true), "was upon <i>the</i>");
+    }
+
+    #[test]
+    fn verse_rows_italicize_supplied_words_and_others_keep_brackets() {
+        let mut verse = verse_hit("darkness [was] upon the deep");
+        assert_eq!(
+            ListedHit::plain(verse.clone()).line_markup(&["deep".into()], WordMatch::Exact),
+            "darkness <i>was</i> upon the <b>deep</b>"
+        );
+        verse.kind = LibraryKind::Commentary;
+        assert_eq!(
+            ListedHit::plain(verse).line_markup(&["deep".into()], WordMatch::Exact),
+            "darkness [was] upon the <b>deep</b>"
         );
     }
 

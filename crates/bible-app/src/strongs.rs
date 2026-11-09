@@ -99,7 +99,11 @@ fn tallest_page(stack: &gtk::Stack) -> i32 {
     let mut tallest = 0;
     let mut child = stack.first_child();
     while let Some(page) = child {
-        let (_, natural, _, _) = page.measure(gtk::Orientation::Vertical, PAGE_WIDTH);
+        // Margins and wide rows put some pages over the page width. GTK
+        // rejects a height query below the minimum width.
+        let (min_width, _, _, _) = page.measure(gtk::Orientation::Horizontal, -1);
+        let (_, natural, _, _) =
+            page.measure(gtk::Orientation::Vertical, PAGE_WIDTH.max(min_width));
         tallest = tallest.max(natural);
         child = page.next_sibling();
     }
@@ -201,6 +205,11 @@ fn install_css() {
             r#"
             popover.word-popover contents {
               padding: 0;
+            }
+            /* The popover inherits the chapter's leading, which GTK applies
+               to the headword at some widths only. */
+            popover.word-popover .title-3 {
+              line-height: normal;
             }
             .word-sources {
               padding: 4px 0;

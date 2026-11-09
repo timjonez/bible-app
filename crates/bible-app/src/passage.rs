@@ -643,6 +643,9 @@ pub fn install_css() {
               margin-top: 6px;
               margin-bottom: 6px;
             }
+            tabbar tab {
+              min-width: 180px;
+            }
             button.split-close {
               background-color: alpha(@window_bg_color, 0.92);
               border-radius: 999px;
