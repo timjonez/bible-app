@@ -951,6 +951,23 @@ pub fn word_at_offset(words: &[WordSpan], offset: i32) -> Option<&WordSpan> {
         .find(|w| w.span.contains(offset) || w.lemma_span.is_some_and(|s| s.contains(offset)))
 }
 
+/// What the pointer is over in a chapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hover {
+    /// A word with Strong's codes; clicking opens its popover.
+    Word(Span),
+    /// A cross-reference marker or note link.
+    Link,
+}
+
+/// Clickable target at `offset`. Link markers win over the word they sit on.
+pub fn hover_at(words: &[WordSpan], links: &[(i32, i32)], offset: i32) -> Option<Hover> {
+    if links.iter().any(|(s, e)| offset >= *s && offset < *e) {
+        return Some(Hover::Link);
+    }
+    word_at_offset(words, offset).map(|w| Hover::Word(w.span))
+}
+
 /// Verses covered by a half-open text selection `[start, end)`.
 pub fn verses_in_selection(verse_start: &[(u8, i32)], start: i32, end: i32) -> Option<(u8, u8)> {
     if end <= start {
@@ -2082,6 +2099,32 @@ God creates heaven and earth.
         assert_eq!(larger_font(14), 15);
         assert_eq!(smaller_font(MIN_FONT), MIN_FONT);
         assert_eq!(larger_font(MAX_FONT), MAX_FONT);
+    }
+
+    fn tagged(start: i32, end: i32) -> WordSpan {
+        WordSpan {
+            span: Span { start, end },
+            lemma_span: None,
+            codes: vec!["G2411".into()],
+        }
+    }
+
+    #[test]
+    fn hover_finds_a_tagged_word() {
+        let words = [tagged(10, 16)];
+        assert_eq!(
+            hover_at(&words, &[], 12),
+            Some(Hover::Word(Span { start: 10, end: 16 }))
+        );
+        assert_eq!(hover_at(&words, &[], 16), None);
+        assert_eq!(hover_at(&words, &[], 3), None);
+    }
+
+    #[test]
+    fn hover_prefers_a_link_marker_over_its_word() {
+        let words = [tagged(10, 17)];
+        assert_eq!(hover_at(&words, &[(16, 17)], 16), Some(Hover::Link));
+        assert_eq!(hover_at(&[], &[(30, 31)], 30), Some(Hover::Link));
     }
 
     #[test]

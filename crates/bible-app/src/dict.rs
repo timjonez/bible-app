@@ -15,6 +15,8 @@ use std::rc::Rc;
 
 pub struct DictWidgets {
     pub root: gtk::Widget,
+    /// Which dictionary this tab reads.
+    pub module_dd: gtk::DropDown,
     pub search: gtk::SearchEntry,
     pub popover: gtk::Popover,
     pub list: gtk::ListBox,
@@ -54,6 +56,13 @@ pub fn build(
         "Previous entry",
         "Next entry",
     );
+    let module_dd = gtk::DropDown::from_strings(&[]);
+    module_dd.set_enable_search(false);
+    module_dd.set_valign(gtk::Align::Center);
+    module_dd.set_tooltip_text(Some("Dictionary"));
+    module_dd.update_property(&[gtk::accessible::Property::Label("Dictionary")]);
+    bar.pickers.append(&module_dd);
+
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search a headword"));
     search.set_width_chars(24);
@@ -84,6 +93,14 @@ pub fn build(
     popover.set_parent(&search);
 
     let syncing = Rc::new(Cell::new(false));
+    let send_module = sender.clone();
+    let sync_module = syncing.clone();
+    module_dd.connect_selected_notify(move |dd| {
+        if sync_module.get() || dd.selected() == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+        send_module.emit(super::app::Msg::LibraryModule(id, dd.selected()));
+    });
     let send_q = sender.clone();
     let sync_search = syncing.clone();
     search.connect_search_changed(move |entry| {
@@ -105,6 +122,11 @@ pub fn build(
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     cite::add_tag(&buffer);
+    let title_tag = gtk::TextTag::new(Some(EMPTY_TITLE_TAG));
+    title_tag.set_weight(700);
+    title_tag.set_scale(1.3);
+    title_tag.set_pixels_below_lines(4);
+    buffer.tag_table().add(&title_tag);
     let view = crate::column::study_view(&buffer, 16);
     view.set_direction(gtk::TextDirection::Ltr);
     let text_scroll = gtk::ScrolledWindow::new();
@@ -151,6 +173,7 @@ pub fn build(
     let links = Rc::new(RefCell::new(Vec::new()));
     let widgets = DictWidgets {
         root: page.upcast(),
+        module_dd,
         search,
         popover,
         list,
@@ -223,6 +246,46 @@ pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
         );
     }
     widgets.modules = modules;
+    let titles: Vec<&str> = widgets.modules.iter().map(|m| m.title.as_str()).collect();
+    widgets.syncing.set(true);
+    widgets
+        .module_dd
+        .set_model(Some(&gtk::StringList::new(&titles)));
+    widgets.syncing.set(false);
+    sync_module_picker(widgets);
+}
+
+/// Dictionary id at a picker position.
+pub fn module_at(widgets: &DictWidgets, pos: u32) -> Option<String> {
+    widgets.modules.get(pos as usize).map(|m| m.id.clone())
+}
+
+fn sync_module_picker(widgets: &DictWidgets) {
+    let Some(pos) = widgets
+        .module_id
+        .as_deref()
+        .and_then(|id| widgets.modules.iter().position(|m| m.id == id))
+    else {
+        return;
+    };
+    if widgets.module_dd.selected() != pos as u32 {
+        widgets.syncing.set(true);
+        widgets.module_dd.set_selected(pos as u32);
+        widgets.syncing.set(false);
+    }
+}
+
+const EMPTY_TITLE_TAG: &str = "empty-title";
+
+/// What an empty library tab says: which dictionary, and how to start.
+pub fn empty_text(title: &str) -> String {
+    format!(
+        "{title}\n\n\
+         Type a headword above to open its entry, for example grace or Jerusalem.\n\n\
+         Switch dictionaries with the menu beside the search. Clicking a word in \
+         the chapter also opens its Strong’s number, lexicons, and dictionary \
+         articles."
+    )
 }
 
 pub fn select_module(widgets: &mut DictWidgets, id: &str) {
@@ -240,7 +303,13 @@ pub fn select_module(widgets: &mut DictWidgets, id: &str) {
     widgets.popover.popdown();
     widgets.occ_code.borrow_mut().clear();
     widgets.see_kjv.set_visible(false);
-    paint_text(widgets, "Search a headword to open its entry.");
+    paint_text(widgets, &empty_text(&tab_title(widgets)));
+    let buffer = &widgets.buffer;
+    let start = buffer.start_iter();
+    let mut end = start;
+    end.forward_to_line_end();
+    buffer.apply_tag_by_name(EMPTY_TITLE_TAG, &start, &end);
+    sync_module_picker(widgets);
     sync_history(widgets);
 }
 
@@ -610,4 +679,17 @@ fn install_css() {
             );
         }
     });
+}
+
+#[cfg(test)]
+mod empty_tests {
+    use super::empty_text;
+
+    #[test]
+    fn empty_library_names_the_dictionary_and_how_to_start() {
+        let text = empty_text("Webster's 1828");
+        assert!(text.starts_with("Webster's 1828\n"));
+        assert!(text.contains("Type a headword"));
+        assert!(text.contains("Switch dictionaries"));
+    }
 }

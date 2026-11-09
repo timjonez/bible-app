@@ -292,7 +292,7 @@ impl Workspace {
             .find(|&id| self.tab(id).is_some_and(|t| pred(&t.kind)))
     }
 
-    /// Put `id` in this window's study stack, or start a split with a passage.
+    /// Put `id` beside the passage, replacing the previous study view.
     /// False when the window's split is a Bible|Bible (or other non-study) pair.
     pub fn place_in_study_stack(&mut self, id: TabId) -> bool {
         let Some(tab) = self.tab(id).cloned() else {
@@ -306,11 +306,24 @@ impl Workspace {
                 if host == id {
                     return false;
                 }
+                for previous in self.guests_of(host) {
+                    self.close(previous);
+                }
                 self.embed(id, host);
                 return true;
             }
         }
         self.move_beside(id)
+    }
+
+    /// Explicitly preserve a side-pane view as a regular tab in the same window.
+    pub fn move_to_tab(&mut self, id: TabId) -> Option<TabId> {
+        let host = self.tab(id)?.host?;
+        let window = self.tab(id)?.window;
+        self.release_guest(id);
+        self.repair(window);
+        self.focus(id);
+        Some(host)
     }
 
     /// The passage on the other side of `id`'s split, when that side is a passage.
@@ -609,6 +622,24 @@ impl Workspace {
         match &mut tab.kind {
             TabKind::Mhc { at: slot, .. } | TabKind::Tsk { at: slot, .. } => *slot = at,
             _ => {}
+        }
+    }
+
+    /// Switch a library tab to another dictionary. The old headword belongs
+    /// to the old dictionary, so it is dropped.
+    pub fn set_library_module(&mut self, id: TabId, module: String) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        if let TabKind::Library {
+            module: slot,
+            headword,
+        } = &mut tab.kind
+        {
+            if *slot != module {
+                *slot = module;
+                *headword = None;
+            }
         }
     }
 
@@ -1160,26 +1191,24 @@ mod tests {
         let passage = ws.focused();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
         assert!(ws.place_in_study_stack(mhc));
-        let tsk = ws.open_tsk(r(1, 1, 1)).id;
-        assert!(ws.place_in_study_stack(tsk));
-        let lib = ws.open_library("Easton".into(), Some("God".into())).id;
-        assert!(ws.place_in_study_stack(lib));
-        let notes = ws.open_notes().id;
         ws.navigate_passage(passage, r(43, 3, 16));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(tsk));
+        assert!(ws.tab(mhc).is_none());
+        ws.navigate_passage(passage, r(43, 3, 16));
         assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(43, 3, 16)));
+        let lib = ws.open_library("Easton".into(), Some("God".into())).id;
+        assert!(ws.place_in_study_stack(lib));
+        assert!(ws.tab(tsk).is_none());
+        let notes = ws.open_notes().id;
+        ws.navigate_passage(passage, r(43, 3, 16));
         match &ws.tab(lib).unwrap().kind {
             TabKind::Library { headword, .. } => assert_eq!(headword.as_deref(), Some("God")),
             other => panic!("{other:?}"),
         }
         assert!(matches!(ws.tab(notes).unwrap().kind, TabKind::Notes));
         assert!(ws.tab(notes).unwrap().host.is_none());
-        ws.set_follow(mhc, false);
-        ws.navigate_passage(passage, r(1, 2, 3));
-        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(43, 3, 16)));
-        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 2, 3)));
-        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
-        assert!(ws.tab(tsk).unwrap().kind.follows_verse());
     }
 
     #[test]
@@ -1187,13 +1216,14 @@ mod tests {
         let mut ws = start();
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
         assert!(ws.place_in_study_stack(mhc));
-        let tsk = ws.open_tsk(r(1, 1, 1)).id;
-        assert!(ws.place_in_study_stack(tsk));
         ws.set_follow(mhc, false);
         ws.set_study_at(mhc, r(19, 23, 1));
         assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(19, 23, 1)));
         assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
-        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(1, 1, 1)));
+        let tsk = ws.open_tsk(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(tsk));
+        ws.set_study_at(tsk, r(19, 23, 1));
+        assert_eq!(ws.tab(tsk).unwrap().kind.at(), Some(r(19, 23, 1)));
         assert!(ws.tab(tsk).unwrap().kind.follows_verse());
     }
 
@@ -1471,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_study_guests_on_one_host() {
+    fn opening_another_study_view_replaces_the_previous_one() {
         let mut ws = start();
         let left = ws.focused();
         let search = ws.open_search(WindowId::MAIN).id;
@@ -1480,24 +1510,19 @@ mod tests {
         assert!(ws.place_in_study_stack(mhc));
         let tsk = ws.open_tsk(r(1, 1, 1)).id;
         assert!(ws.place_in_study_stack(tsk));
-        assert_eq!(ws.tab(search).unwrap().host, Some(left));
-        assert_eq!(ws.tab(mhc).unwrap().host, Some(left));
+        assert!(ws.tab(search).is_none());
+        assert!(ws.tab(mhc).is_none());
         assert_eq!(ws.tab(tsk).unwrap().host, Some(left));
-        assert_eq!(ws.guests_of(left), vec![search, mhc, tsk]);
+        assert_eq!(ws.guests_of(left), vec![tsk]);
         assert_eq!(ws.guest_of(left), Some(tsk));
         assert_eq!(ws.tabs().iter().filter(|t| t.host.is_none()).count(), 1);
         assert!(ws.is_split());
         assert!(!ws.can_split(left));
-        assert!(ws.tab(mhc).unwrap().kind.follows_verse());
         assert!(ws.tab(tsk).unwrap().kind.follows_verse());
-        ws.show_guest(left, search);
-        assert_eq!(ws.guest_of(left), Some(search));
-        ws.show_guest(left, mhc);
-        assert_eq!(ws.guest_of(left), Some(mhc));
     }
 
     #[test]
-    fn search_then_mhc_reuse_the_right_side() {
+    fn search_then_mhc_replaces_search_without_moving_it_to_a_tab() {
         let mut ws = start();
         let left = ws.focused();
         let search = ws.open_search(WindowId::MAIN).id;
@@ -1505,17 +1530,64 @@ mod tests {
         let mhc = ws.open_mhc(r(1, 1, 1)).id;
         assert!(ws.place_in_study_stack(mhc));
         assert_eq!(ws.study_stack_host(WindowId::MAIN), Some(left));
-        assert_eq!(ws.stack_guest_kind(left, TabKind::is_search), Some(search));
+        assert!(ws.tab(search).is_none());
+        assert_eq!(ws.stack_guest_kind(left, TabKind::is_search), None);
         assert_eq!(ws.stack_guest_kind(left, TabKind::is_mhc), Some(mhc));
         assert_eq!(ws.guest_of(left), Some(mhc));
         assert_eq!(ws.visible(), vec![left, mhc]);
-        ws.show_guest(left, search);
-        assert_eq!(ws.visible(), vec![left, search]);
         assert_eq!(ws.tabs().iter().filter(|t| t.host.is_none()).count(), 1);
         ws.close(mhc);
-        assert_eq!(ws.tab(search).unwrap().host, Some(left));
-        assert!(ws.is_split());
-        assert_eq!(ws.guest_of(left), Some(search));
+        assert!(!ws.is_split());
+        assert_eq!(ws.guest_of(left), None);
+    }
+
+    #[test]
+    fn explicitly_moving_search_to_a_tab_preserves_it_when_henry_opens() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let search = ws.open_search(WindowId::MAIN).id;
+        assert!(ws.place_in_study_stack(search));
+        assert_eq!(ws.move_to_tab(search), Some(passage));
+        assert_eq!(ws.tab(search).unwrap().host, None);
+        assert_eq!(ws.tab(search).unwrap().window, WindowId::MAIN);
+        assert_eq!(ws.focused(), search);
+        assert_eq!(ws.visible(), vec![search]);
+        assert!(!ws.is_split());
+        assert_eq!(ws.move_to_tab(search), None);
+
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
+        assert_eq!(ws.tab(search).unwrap().kind, TabKind::Search);
+        assert_eq!(ws.tab(search).unwrap().host, None);
+        assert_eq!(ws.guests_of(passage), vec![mhc]);
+    }
+
+    #[test]
+    fn moving_commentary_to_a_tab_stops_following_the_passage() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
+        assert_eq!(ws.move_to_tab(mhc), Some(passage));
+        assert!(!ws.tab(mhc).unwrap().kind.follows_verse());
+        ws.navigate_passage(passage, r(43, 3, 16));
+        assert_eq!(ws.tab(mhc).unwrap().kind.at(), Some(r(1, 1, 1)));
+    }
+
+    #[test]
+    fn replacing_a_study_pane_does_not_close_another_windows_search() {
+        let mut ws = start();
+        let main_search = ws.open_search(WindowId::MAIN).id;
+        assert!(ws.place_in_study_stack(main_search));
+        let other_passage = ws.open_passage(r(19, 23, 1)).id;
+        let other_window = ws.detach(other_passage).unwrap().window;
+        let other_search = ws.open_search(other_window).id;
+        assert!(ws.place_in_study_stack(other_search));
+        ws.focus(ws.passage_beside(main_search).unwrap());
+        let mhc = ws.open_mhc(r(1, 1, 1)).id;
+        assert!(ws.place_in_study_stack(mhc));
+        assert!(ws.tab(main_search).is_none());
+        assert_eq!(ws.tab(other_search).unwrap().host, Some(other_passage));
     }
 
     #[test]
@@ -1557,5 +1629,25 @@ mod tests {
         assert!(!shows_column_edges(&TabKind::Blank, false, false));
         assert!(!shows_column_edges(&chapter, true, false));
         assert!(!shows_column_edges(&henry, false, true));
+    }
+
+    #[test]
+    fn switching_a_library_dictionary_drops_the_old_headword() {
+        let mut ws = Workspace::new(r(1, 1, 1));
+        let lib = ws.open_library("Easton".into(), Some("God".into())).id;
+        ws.set_library_module(lib, "Webster".into());
+        match &ws.tab(lib).unwrap().kind {
+            TabKind::Library { module, headword } => {
+                assert_eq!(module, "Webster");
+                assert_eq!(headword, &None);
+            }
+            other => panic!("{other:?}"),
+        }
+        ws.set_library_headword(lib, Some("grace".into()));
+        ws.set_library_module(lib, "Webster".into());
+        match &ws.tab(lib).unwrap().kind {
+            TabKind::Library { headword, .. } => assert_eq!(headword.as_deref(), Some("grace")),
+            other => panic!("{other:?}"),
+        }
     }
 }
