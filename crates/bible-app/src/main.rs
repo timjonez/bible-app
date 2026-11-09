@@ -14,6 +14,7 @@ mod passage;
 mod picker;
 mod search;
 mod shell;
+mod shortcuts;
 mod strongs;
 mod theme;
 mod tsk;

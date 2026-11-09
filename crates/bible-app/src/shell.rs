@@ -395,17 +395,47 @@ pub fn tab_menu_model() -> gio::Menu {
 }
 
 /// Pin on an MHC/TSK location bar. Shown only when that view is a guest of a chapter.
-///
-/// `margin_end` clears the guest-pane close overlay (28px button + 8px inset)
-/// so the pin is not drawn under the X.
 pub fn follow_pin() -> gtk::ToggleButton {
+    let content = adw::ButtonContent::new();
+    content.set_icon_name("view-pin-symbolic");
+    content.set_label(follow_label(false));
     let btn = gtk::ToggleButton::new();
-    btn.set_icon_name("view-pin-symbolic");
-    btn.set_tooltip_text(Some("Follow the chapter"));
+    btn.set_child(Some(&content));
+    btn.set_tooltip_text(Some("Keep this pane on the chapter beside it"));
     btn.add_css_class("flat");
     btn.set_valign(gtk::Align::Center);
-    btn.set_margin_end(36);
     btn.set_visible(false);
-    btn.update_property(&[gtk::accessible::Property::Label("Follow the chapter")]);
+    btn.connect_toggled(move |btn| content.set_label(follow_label(btn.is_active())));
     btn
+}
+
+pub fn follow_label(on: bool) -> &'static str {
+    if on {
+        "Following chapter"
+    } else {
+        "Follow chapter"
+    }
+}
+
+const GUEST_HEADER_CONTROL_H: i32 = 34;
+
+/// Title row for a study view sharing a tab: its name, then close.
+pub fn guest_header(title: &str, close: &gtk::Button) -> gtk::Box {
+    let label = gtk::Label::new(Some(title));
+    label.add_css_class("heading");
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("guest-header");
+    // Same box as the location bar beside it (6px margins around a 34px
+    // control row), so the two rules under them line up.
+    row.set_margin_top(6);
+    row.set_margin_bottom(6);
+    row.set_size_request(-1, GUEST_HEADER_CONTROL_H);
+    row.set_margin_start(16);
+    row.set_margin_end(6);
+    row.append(&label);
+    row.append(close);
+    row
 }

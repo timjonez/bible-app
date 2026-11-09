@@ -42,6 +42,9 @@ pub struct PassageView {
     pub bar_syncing: Rc<Cell<bool>>,
     pub layout: ChapterLayout,
     pub xref_tips: Rc<RefCell<Vec<(i32, i32, String)>>>,
+    /// Strong's-tagged words, for the hover cue.
+    hover_words: Rc<RefCell<Vec<layout::WordSpan>>>,
+    hovered_word: Rc<Cell<Option<layout::Span>>>,
     pub strongs_popover: gtk::Popover,
     pub tsk_popover: gtk::Popover,
     pub verse_menu: gtk::PopoverMenu,
@@ -115,6 +118,8 @@ impl PassageView {
             bar_syncing: bar.syncing,
             layout: ChapterLayout::default(),
             xref_tips: Rc::new(RefCell::new(Vec::new())),
+            hover_words: Rc::new(RefCell::new(Vec::new())),
+            hovered_word: Rc::new(Cell::new(None)),
             strongs_popover,
             tsk_popover,
             verse_menu,
@@ -201,29 +206,34 @@ impl PassageView {
         });
         self.view.add_controller(copy_keys);
 
+        // A pointer and a faint underline mark what a click will open, so
+        // tagged words read as lookups rather than plain text.
         let motion = gtk::EventControllerMotion::new();
         let view = self.view.clone();
         let tips = self.xref_tips.clone();
+        let words = self.hover_words.clone();
+        let shown = self.hovered_word.clone();
+        let shown_motion = shown.clone();
         motion.connect_motion(move |_, x, y| {
             let (bx, by) =
                 view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            let over = view
-                .iter_at_location(bx, by)
-                .map(|iter| {
-                    let off = iter.offset();
-                    tips.borrow().iter().any(|(s, e, _)| off >= *s && off < *e)
-                })
-                .unwrap_or(false);
-            let cursor = if over {
-                gtk::gdk::Cursor::from_name("pointer", None)
-            } else {
-                None
+            let hover = view.iter_at_location(bx, by).and_then(|iter| {
+                let links: Vec<(i32, i32)> =
+                    tips.borrow().iter().map(|(s, e, _)| (*s, *e)).collect();
+                layout::hover_at(&words.borrow(), &links, iter.offset())
+            });
+            let cursor = hover.map(|_| gtk::gdk::Cursor::from_name("pointer", None));
+            view.set_cursor(cursor.flatten().as_ref());
+            let word = match hover {
+                Some(layout::Hover::Word(span)) => Some(span),
+                _ => None,
             };
-            view.set_cursor(cursor.as_ref());
+            show_word_hover(&view.buffer(), &shown_motion, word);
         });
         let view = self.view.clone();
         motion.connect_leave(move |_| {
             view.set_cursor(None);
+            show_word_hover(&view.buffer(), &shown, None);
         });
         self.view.add_controller(motion);
     }
@@ -265,6 +275,10 @@ impl PassageView {
     }
 
     pub fn load(&mut self, ctx: &ChapterCtx<'_>, highlight: bool) {
+        // Offsets belong to the old buffer. Clear them before replacing it,
+        // even if the next chapter has a word at exactly the same offsets.
+        show_word_hover(&self.buffer, &self.hovered_word, None);
+        self.view.set_cursor(None);
         let verses = match bible_app_db::chapter(ctx.conn, self.at.book, self.at.chapter) {
             Ok(verses) if !verses.is_empty() => verses,
             Ok(_) => {
@@ -274,6 +288,7 @@ impl PassageView {
                 };
                 self.buffer.set_text(&self.layout.text);
                 self.xref_tips.borrow_mut().clear();
+                self.hover_words.borrow_mut().clear();
                 return;
             }
             Err(e) => {
@@ -283,6 +298,7 @@ impl PassageView {
                 };
                 self.buffer.set_text(&self.layout.text);
                 self.xref_tips.borrow_mut().clear();
+                self.hover_words.borrow_mut().clear();
                 return;
             }
         };
@@ -310,6 +326,7 @@ impl PassageView {
                 paragraphs: ctx.paragraphs,
             },
         );
+        *self.hover_words.borrow_mut() = self.layout.words.clone();
         self.strongs_popover.popdown();
         self.tsk_popover.popdown();
         self.apply_layout_tags();
@@ -654,6 +671,82 @@ pub fn install_css() {
     });
 }
 
+/// Move the hover underline to `word`, or clear it.
+fn show_word_hover(
+    buffer: &gtk::TextBuffer,
+    shown: &Cell<Option<layout::Span>>,
+    word: Option<layout::Span>,
+) {
+    if shown.get() == word {
+        return;
+    }
+    if let Some(old) = shown.get() {
+        buffer.remove_tag_by_name(
+            WORD_HOVER_TAG,
+            &buffer.iter_at_offset(old.start),
+            &buffer.iter_at_offset(old.end),
+        );
+    }
+    if let Some(span) = word {
+        buffer.apply_tag_by_name(
+            WORD_HOVER_TAG,
+            &buffer.iter_at_offset(span.start),
+            &buffer.iter_at_offset(span.end),
+        );
+    }
+    shown.set(word);
+}
+
+#[cfg(test)]
+mod hover_widget_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display; run separately with a Broadway or desktop display"]
+    fn loading_a_chapter_clears_the_previous_hover_even_on_error() {
+        adw::init().expect("GTK display");
+        let at = Ref {
+            book: 1,
+            chapter: 1,
+            verse: 1,
+        };
+        let mut passage = PassageView::new(at, &gio::SimpleActionGroup::new(), 640);
+        passage.buffer.set_text("old word");
+        show_word_hover(
+            &passage.buffer,
+            &passage.hovered_word,
+            Some(layout::Span { start: 0, end: 3 }),
+        );
+        assert!(passage.hovered_word.get().is_some());
+
+        // An empty in-memory DB exercises the early error return without
+        // depending on the shipped library or the user's settings.
+        let conn = Connection::open_in_memory().unwrap();
+        passage.load(
+            &ChapterCtx {
+                conn: &conn,
+                books: &[],
+                user: None,
+                paragraphs: true,
+            },
+            false,
+        );
+        assert_eq!(passage.hovered_word.get(), None);
+
+        // The same offsets in the next buffer must receive a fresh underline.
+        passage.buffer.set_text("new word");
+        show_word_hover(
+            &passage.buffer,
+            &passage.hovered_word,
+            Some(layout::Span { start: 0, end: 3 }),
+        );
+        let tag = passage.buffer.tag_table().lookup(WORD_HOVER_TAG).unwrap();
+        assert!(passage.buffer.start_iter().has_tag(&tag));
+    }
+}
+
+pub const WORD_HOVER_TAG: &str = "word-hover";
+
 pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     buffer.tag_table().add(&strongs::make_tag());
     let italic = gtk::TextTag::new(Some("italic"));
@@ -697,6 +790,9 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     buffer.tag_table().add(&current_verse);
     let search_hit = gtk::TextTag::new(Some("search-hit"));
     buffer.tag_table().add(&search_hit);
+    let word_hover = gtk::TextTag::new(Some(WORD_HOVER_TAG));
+    word_hover.set_underline(gtk::pango::Underline::Single);
+    buffer.tag_table().add(&word_hover);
     marks::install_tags(buffer);
     theme::paint_buffer(buffer);
     current_verse.set_priority(0);
@@ -710,6 +806,7 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     tsk_sup.set_priority(2);
     note_mark.set_priority(2);
     search_hit.set_priority(3);
+    word_hover.set_priority(3);
 }
 
 fn mark_spans(layout: &layout::ChapterLayout) -> Vec<layout::Span> {

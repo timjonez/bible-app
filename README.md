@@ -35,6 +35,13 @@ Licenses for the dumps (Open Scriptures BDB is CC BY 4.0) are in [`data/README.m
 
 **Follow the desktop theme.** On Omarchy the window tracks the current theme. Elsewhere it follows the libadwaita light/dark scheme and accent color.
 
+**Find your way around.** Tagged words show a pointer and underline on hover.
+The menu's Keyboard Shortcuts dialog (Ctrl+?) lists reading and study controls.
+Side-by-side study panes have headings; Henry and the Treasury label their
+follow control and hide duplicate navigation while following. Search offers
+“Back to …” after opening a different chapter, without clearing the results.
+The Library bar includes a dictionary picker and an introductory empty page.
+
 ## Run
 
 ```bash
@@ -62,6 +69,7 @@ On first launch the app unpacks `data/bible-app.sqlite.gz` to `~/.local/share/bi
 | Ctrl+C | Copy the selection, or the current verse, with citation |
 | Ctrl+D | Bookmark |
 | Ctrl+Shift+N | Add/Edit note |
+| Ctrl+? | Keyboard shortcuts |
 
 Mouse back/forward buttons also walk history. In Search, arrow keys preview a hit, Enter opens it beside Search and keeps the list, Esc returns to the previous passage.
 

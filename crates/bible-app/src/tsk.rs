@@ -26,6 +26,10 @@ pub struct TskWidgets {
     pub forward: gtk::Button,
     pub follow: gtk::ToggleButton,
     pub follow_syncing: Rc<Cell<bool>>,
+    /// The bar slot the pin returns to when it is not in a guest header.
+    pub pin_home: gtk::Box,
+    /// Location bar and the rule under it; hidden while the pane follows.
+    pub bar_row: gtk::Widget,
     pub buffer: gtk::TextBuffer,
     pub view: gtk::TextView,
     pub menu: gtk::PopoverMenu,
@@ -85,6 +89,8 @@ pub fn build(column_px: i32) -> TskWidgets {
         forward: bar.forward,
         follow,
         follow_syncing: Rc::new(Cell::new(false)),
+        pin_home: bar.end.clone(),
+        bar_row: bar.row.clone().upcast(),
         buffer,
         view,
         menu,

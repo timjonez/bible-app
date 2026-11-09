@@ -612,6 +612,24 @@ impl Workspace {
         }
     }
 
+    /// Switch a library tab to another dictionary. The old headword belongs
+    /// to the old dictionary, so it is dropped.
+    pub fn set_library_module(&mut self, id: TabId, module: String) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        if let TabKind::Library {
+            module: slot,
+            headword,
+        } = &mut tab.kind
+        {
+            if *slot != module {
+                *slot = module;
+                *headword = None;
+            }
+        }
+    }
+
     pub fn set_library_headword(&mut self, id: TabId, headword: Option<String>) {
         let Some(tab) = self.tab_mut(id) else {
             return;
@@ -1557,5 +1575,25 @@ mod tests {
         assert!(!shows_column_edges(&TabKind::Blank, false, false));
         assert!(!shows_column_edges(&chapter, true, false));
         assert!(!shows_column_edges(&henry, false, true));
+    }
+
+    #[test]
+    fn switching_a_library_dictionary_drops_the_old_headword() {
+        let mut ws = Workspace::new(r(1, 1, 1));
+        let lib = ws.open_library("Easton".into(), Some("God".into())).id;
+        ws.set_library_module(lib, "Webster".into());
+        match &ws.tab(lib).unwrap().kind {
+            TabKind::Library { module, headword } => {
+                assert_eq!(module, "Webster");
+                assert_eq!(headword, &None);
+            }
+            other => panic!("{other:?}"),
+        }
+        ws.set_library_headword(lib, Some("grace".into()));
+        ws.set_library_module(lib, "Webster".into());
+        match &ws.tab(lib).unwrap().kind {
+            TabKind::Library { headword, .. } => assert_eq!(headword.as_deref(), Some("grace")),
+            other => panic!("{other:?}"),
+        }
     }
 }

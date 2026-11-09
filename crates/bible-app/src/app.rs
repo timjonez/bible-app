@@ -10,6 +10,7 @@ use crate::passage::{self, PassageView};
 use crate::picker;
 use crate::search;
 use crate::shell::{self, SideChrome, SplitShell};
+use crate::shortcuts;
 use crate::strongs;
 use crate::theme;
 use crate::tsk;
@@ -137,6 +138,8 @@ pub enum Msg {
     PreviewHit(TabId, i32),
     SearchActivate(TabId),
     OpenHit(TabId, i32),
+    /// Return the passage beside Search to where the search started.
+    SearchBack(TabId),
     OpenHitBeside(TabId, i32),
     OpenHitTab(TabId, Ref),
     OpenMhc,
@@ -191,6 +194,8 @@ pub enum Msg {
     StudyBack(TabId),
     StudyForward(TabId),
     LibraryPrev(TabId),
+    /// Picker position of the dictionary a library tab switched to.
+    LibraryModule(TabId, u32),
     LibraryNext(TabId),
     LibraryBack(TabId),
     LibraryForward(TabId),
@@ -487,6 +492,9 @@ impl SimpleComponent for App {
         group.add_action(copy_verse);
         group.add_action(font_larger);
         group.add_action(font_smaller);
+        group.add_action(RelmAction::<ShortcutsAction>::new_stateless(|_| {
+            shortcuts::present_for_active_window();
+        }));
         group.add_action(mhc_action);
         group.add_action(tsk_action);
         group.add_action(bookmarks_action);
@@ -584,6 +592,10 @@ impl SimpleComponent for App {
                     return glib::Propagation::Stop;
                 }
                 sender_keys.input(Msg::Escape(WindowId::MAIN));
+                return glib::Propagation::Stop;
+            }
+            if shortcuts::is_shortcuts_key(keyval, ctrl) {
+                shortcuts::present_for_active_window();
                 return glib::Propagation::Stop;
             }
             if ctrl && (keyval == gtk::gdk::Key::l || keyval == gtk::gdk::Key::L) {
@@ -768,6 +780,8 @@ impl SimpleComponent for App {
                 self.open_hit(id, idx, false, false);
             }
             Msg::OpenHit(id, idx) => self.open_hit(id, idx, false, false),
+            Msg::LibraryModule(id, pos) => self.switch_library_module(id, pos),
+            Msg::SearchBack(id) => self.search_back(id),
             Msg::OpenHitBeside(id, idx) => {
                 let idx = if idx < 0 {
                     self.search(id)
@@ -1096,6 +1110,7 @@ impl SimpleComponent for App {
         self.apply_column_mode();
         self.sync_shells();
         self.sync_follow_pins();
+        self.sync_search_backs();
         self.sync_window_titles();
         let _ = sender;
     }
@@ -2271,6 +2286,7 @@ impl App {
                     self.hosted.get_mut(&id).map(|h| &mut h.content)
                 {
                     dict::select_module(widgets, module);
+                    self.workspace.set_library_module(id, module.to_string());
                     self.sync_tab_title(id);
                 }
                 return Some(id);
@@ -2310,6 +2326,23 @@ impl App {
         let root = widgets.root.clone();
         self.add_page(id, &root, &title, TabContent::Library(widgets));
         Some(id)
+    }
+
+    fn switch_library_module(&mut self, id: TabId, pos: u32) {
+        let Some(TabContent::Library(widgets)) = self.hosted.get_mut(&id).map(|h| &mut h.content)
+        else {
+            return;
+        };
+        let Some(module) = dict::module_at(widgets, pos) else {
+            return;
+        };
+        if dict::current_module(widgets) == Some(module.as_str()) {
+            return;
+        }
+        dict::select_module(widgets, &module);
+        widgets.search.grab_focus();
+        self.workspace.set_library_module(id, module);
+        self.sync_tab_title(id);
     }
 
     fn ensure_bookmarks(&mut self) -> Option<TabId> {
@@ -2949,22 +2982,6 @@ impl App {
         }
     }
 
-    fn sync_search_close_clearance(&self, id: TabId, guests: &[TabId]) {
-        let overlay = guests.len() == 1;
-        for guest in guests {
-            self.set_search_close_clearance(*guest, overlay);
-        }
-        self.set_search_close_clearance(id, false);
-    }
-
-    fn set_search_close_clearance(&self, id: TabId, on: bool) {
-        let Some(TabContent::Search(pane)) = self.hosted.get(&id).map(|hosted| &hosted.content)
-        else {
-            return;
-        };
-        pane.set_close_clearance(on);
-    }
-
     /// Rebuild one tab's page: the view alone, or that view beside its guests.
     fn layout_tab(&mut self, id: TabId) {
         // Collapse column insets before the paned measures the reading view.
@@ -2973,10 +2990,11 @@ impl App {
             return;
         };
         let host_body = self.hosted.get(&id).map(|hosted| hosted.body.clone());
+        // A promoted study tab must not leave its pin in the old split header.
+        if let Some((pin, home, _)) = self.follow_parts(id) {
+            move_widget(pin.upcast_ref(), &home);
+        }
         let guests = self.workspace.guests_of(id);
-        // A single guest gets an overlay close in its top-right corner.
-        // Search's scope menu lives there; a stack header does not cover it.
-        self.sync_search_close_clearance(id, &guests);
         let visible = self.workspace.guest_of(id);
         let guest_panes: Vec<(TabId, gtk::Widget, String)> = guests
             .iter()
@@ -2985,6 +3003,23 @@ impl App {
                 Some((guest, body, self.tab_label(guest)))
             })
             .collect();
+        // A lone guest shows its follow pin in the title row. Stacked guests
+        // keep it in their own bar, beside the switcher's titles.
+        let lone = guest_panes.len() == 1;
+        let mut header_pin: Option<gtk::Widget> = None;
+        for (guest, _, _) in &guest_panes {
+            if let Some((pin, home, _)) = self.follow_parts(*guest) {
+                if lone {
+                    header_pin = Some(pin.upcast());
+                } else {
+                    move_widget(pin.upcast_ref(), &home);
+                }
+            }
+        }
+        let lone_title = guest_panes
+            .first()
+            .map(|(guest, _, _)| self.guest_title(*guest))
+            .unwrap_or_default();
         if let Some(body) = &host_body {
             unparent(body);
         }
@@ -3015,6 +3050,7 @@ impl App {
                 paned.set_end_child(Some(&study_pane(
                     visible.or_else(|| guests.first().copied()),
                     &guest_panes,
+                    (&lone_title, header_pin.as_ref()),
                     &self.msg_tx,
                 )));
                 shell::mark_split_handle(&paned);
@@ -3200,6 +3236,10 @@ impl App {
                 tx.emit(Msg::Escape(id));
                 return glib::Propagation::Stop;
             }
+            if shortcuts::is_shortcuts_key(keyval, ctrl) {
+                shortcuts::present_for_active_window();
+                return glib::Propagation::Stop;
+            }
             if ctrl && (keyval == gtk::gdk::Key::l || keyval == gtk::gdk::Key::L) {
                 pop.popup();
                 entry.grab_focus();
@@ -3374,6 +3414,70 @@ impl App {
         }
     }
 
+    /// The passage a search tab opens hits into.
+    fn search_passage(&self, id: TabId) -> Option<TabId> {
+        let host = self.workspace.tab(id).and_then(|tab| tab.host);
+        if let Some(host) = host.filter(|h| self.passage(*h).is_some()) {
+            return Some(host);
+        }
+        self.workspace.focused_passage_in(self.window_of(id))
+    }
+
+    fn search_back(&mut self, id: TabId) {
+        let Some(origin) = self.search(id).and_then(|pane| pane.origin) else {
+            return;
+        };
+        let Some(passage) = self.search_passage(id) else {
+            return;
+        };
+        self.search_mark = None;
+        self.apply_passage_ref(passage, origin, true, true);
+        self.sync_pickers();
+    }
+
+    fn sync_search_backs(&self) {
+        for (id, hosted) in &self.hosted {
+            let TabContent::Search(pane) = &hosted.content else {
+                continue;
+            };
+            let current = self
+                .search_passage(*id)
+                .and_then(|p| self.passage(p))
+                .map(|p| p.at);
+            let label = pane
+                .origin
+                .filter(|_| search::needs_back(pane.origin, current))
+                .map(|at| {
+                    format!(
+                        "Back to {}",
+                        nav::format_chapter(&self.books, at.book, at.chapter)
+                    )
+                });
+            pane.set_back(label.as_deref());
+        }
+    }
+
+    /// Name shown over a study view beside the chapter.
+    fn guest_title(&self, id: TabId) -> String {
+        match self.workspace.tab(id).map(|tab| &tab.kind) {
+            Some(TabKind::Mhc { .. }) => "Matthew Henry".into(),
+            Some(TabKind::Tsk { .. }) => "Treasury of Scripture Knowledge".into(),
+            // The picker identifies the dictionary; a stable heading does not
+            // go stale when that picker changes.
+            Some(TabKind::Library { .. }) => "Library".into(),
+            _ => self.tab_label(id),
+        }
+    }
+
+    /// Follow pin, the bar slot it belongs in, and the bar row, for MHC/TSK.
+    fn follow_parts(&self, id: TabId) -> Option<(gtk::ToggleButton, gtk::Box, gtk::Widget)> {
+        match &self.hosted.get(&id)?.content {
+            TabContent::Mhc(w) => Some((w.follow.clone(), w.pin_home.clone(), w.bar_row.clone())),
+            TabContent::Tsk(w) => Some((w.follow.clone(), w.pin_home.clone(), w.bar_row.clone())),
+            _ => None,
+        }
+    }
+
     fn sync_follow_pins(&self) {
         let ids: Vec<TabId> = self.hosted.keys().copied().collect();
         for id in ids {
@@ -3402,9 +3506,31 @@ impl App {
         let Some(hosted) = self.hosted.get(&id) else {
             return;
         };
-        let (btn, syncing) = match &hosted.content {
-            TabContent::Mhc(w) => (&w.follow, &w.follow_syncing),
-            TabContent::Tsk(w) => (&w.follow, &w.follow_syncing),
+        let (btn, syncing, nav) = match &hosted.content {
+            TabContent::Mhc(w) => (
+                &w.follow,
+                &w.follow_syncing,
+                [
+                    w.back.upcast_ref::<gtk::Widget>(),
+                    w.forward.upcast_ref(),
+                    w.prev.upcast_ref(),
+                    w.next.upcast_ref(),
+                    w.book.upcast_ref(),
+                    w.chapter.upcast_ref(),
+                ],
+            ),
+            TabContent::Tsk(w) => (
+                &w.follow,
+                &w.follow_syncing,
+                [
+                    w.back.upcast_ref::<gtk::Widget>(),
+                    w.forward.upcast_ref(),
+                    w.prev.upcast_ref(),
+                    w.next.upcast_ref(),
+                    w.book.upcast_ref(),
+                    w.chapter.upcast_ref(),
+                ],
+            ),
             _ => return,
         };
         btn.set_visible(show);
@@ -3412,6 +3538,21 @@ impl App {
         syncing.set(true);
         btn.set_active(show && on);
         syncing.set(false);
+        // While it follows, the chapter beside it is the one control. A
+        // second book and chapter menu here only invites a mismatch.
+        let following = show && on;
+        for widget in nav {
+            widget.set_visible(!following);
+        }
+        // With the pin in the title row, a following pane needs no bar.
+        if let Some((pin, home, row)) = self.follow_parts(id) {
+            let pin_in_header = pin.parent().as_ref() != Some(home.upcast_ref());
+            let bar_shown = !(following && pin_in_header);
+            row.set_visible(bar_shown);
+            if let Some(rule) = row.next_sibling() {
+                rule.set_visible(bar_shown);
+            }
+        }
     }
 
     fn split_tab(&mut self, id: TabId) {
@@ -4072,6 +4213,12 @@ fn build_app_menu(modules: &[DictModule]) -> gio::Menu {
         study.append_submenu(Some("Topics"), &topics);
     }
     menu.append_section(None, &study);
+
+    let help = gio::Menu::new();
+    let shortcuts_item = gio::MenuItem::new(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
+    shortcuts_item.set_attribute_value("accel", Some(&"<Control>question".to_variant()));
+    help.append_item(&shortcuts_item);
+    menu.append_section(None, &help);
     menu
 }
 
@@ -4163,6 +4310,17 @@ fn window_title_from_tab(tab: Option<&str>) -> String {
     }
 }
 
+/// Put `widget` at the end of `home` unless it is already there.
+fn move_widget(widget: &gtk::Widget, home: &gtk::Box) {
+    if widget.parent().as_ref() == Some(home.upcast_ref()) {
+        return;
+    }
+    if widget.parent().is_some() {
+        widget.unparent();
+    }
+    home.append(widget);
+}
+
 fn unparent(widget: &gtk::Widget) {
     let Some(parent) = widget.parent() else {
         return;
@@ -4206,31 +4364,52 @@ fn split_close_button() -> gtk::Button {
     close
 }
 
-fn guest_frame(id: TabId, body: &gtk::Widget, tx: &relm4::Sender<Msg>) -> gtk::Overlay {
-    let overlay = gtk::Overlay::new();
-    overlay.set_hexpand(true);
-    overlay.set_vexpand(true);
-    overlay.set_child(Some(body));
+/// One study view beside the chapter: a title row over its body.
+///
+/// The body sits in an Overlay so `rescue_guest_widgets` and `unparent`
+/// release it the same way when the split is rebuilt.
+fn guest_frame(
+    id: TabId,
+    title: &str,
+    body: &gtk::Widget,
+    extra: Option<&gtk::Widget>,
+    tx: &relm4::Sender<Msg>,
+) -> gtk::Box {
+    let holder = gtk::Overlay::new();
+    holder.set_hexpand(true);
+    holder.set_vexpand(true);
+    holder.set_child(Some(body));
     let close = split_close_button();
-    close.set_valign(gtk::Align::Start);
-    close.set_margin_top(8);
-    close.set_margin_end(8);
     let tx = tx.clone();
     close.connect_clicked(move |_| tx.emit(Msg::CloseGuest(id)));
-    overlay.add_overlay(&close);
-    overlay
+    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    frame.set_hexpand(true);
+    frame.set_vexpand(true);
+    let header = shell::guest_header(title, &close);
+    if let Some(extra) = extra {
+        if extra.parent().is_some() {
+            extra.unparent();
+        }
+        header.insert_child_after(extra, header.first_child().as_ref());
+    }
+    frame.append(&header);
+    frame.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    frame.append(&holder);
+    frame
 }
 
+/// `lone` is the title and header widget used when there is one guest.
 fn study_pane(
     visible: Option<TabId>,
     guests: &[(TabId, gtk::Widget, String)],
+    lone: (&str, Option<&gtk::Widget>),
     tx: &relm4::Sender<Msg>,
 ) -> gtk::Widget {
     if guests.len() == 1 {
         let (id, body, _) = &guests[0];
         body.set_hexpand(true);
         body.set_vexpand(true);
-        return guest_frame(*id, body, tx).upcast();
+        return guest_frame(*id, lone.0, body, lone.1, tx).upcast();
     }
     let stack = adw::ViewStack::new();
     stack.set_hexpand(true);
@@ -4449,6 +4628,7 @@ relm4::new_stateful_action!(ParagraphsAction, WindowActionGroup, "paragraphs", (
 relm4::new_stateless_action!(CopyVerseAction, WindowActionGroup, "copy-verse");
 relm4::new_stateless_action!(FontLargerAction, WindowActionGroup, "font-larger");
 relm4::new_stateless_action!(FontSmallerAction, WindowActionGroup, "font-smaller");
+relm4::new_stateless_action!(ShortcutsAction, WindowActionGroup, "shortcuts");
 relm4::new_stateless_action!(MhcAction, WindowActionGroup, "mhc");
 relm4::new_stateless_action!(TskAction, WindowActionGroup, "tsk");
 relm4::new_stateless_action!(BookmarksAction, WindowActionGroup, "bookmarks");
@@ -4468,6 +4648,24 @@ relm4::new_stateless_action!(BesideTabAction, WindowActionGroup, "tab-open-besid
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a GTK display; run separately with a Broadway or desktop display"]
+    fn promoted_follow_control_returns_to_its_navigation_bar() {
+        use adw::prelude::*;
+        use relm4::{adw, gtk};
+
+        adw::init().expect("GTK display");
+        let pin = crate::shell::follow_pin();
+        let home = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let header = crate::shell::guest_header("Matthew Henry", &gtk::Button::new());
+        header.append(&pin);
+
+        super::move_widget(pin.upcast_ref(), &home);
+        assert_eq!(pin.parent().as_ref(), Some(home.upcast_ref()));
+        super::move_widget(pin.upcast_ref(), &home);
+        assert_eq!(home.first_child(), home.last_child());
+    }
+
     use super::window_title_from_tab;
     use relm4::gtk::gio::{self, prelude::*};
 
@@ -4481,6 +4679,19 @@ mod tests {
             .item_attribute_value(0, "custom", None)
             .and_then(|v| v.get::<String>());
         assert_eq!(custom.as_deref(), Some(crate::shell::TEXT_SIZE_ROW));
+    }
+
+    #[test]
+    fn app_menu_ends_with_keyboard_shortcuts() {
+        let menu = super::build_app_menu(&[]);
+        let last = menu.n_items() - 1;
+        let section = menu
+            .item_link(last, gio::MENU_LINK_SECTION)
+            .expect("last item is a section");
+        let action = section
+            .item_attribute_value(0, "action", None)
+            .and_then(|v| v.get::<String>());
+        assert_eq!(action.as_deref(), Some("win.shortcuts"));
     }
 
     #[test]

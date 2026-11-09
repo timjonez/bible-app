@@ -7,7 +7,7 @@ use bible_app_db::{
 };
 use gtk::gio;
 use gtk::prelude::*;
-use relm4::gtk;
+use relm4::{adw, gtk};
 use rusqlite::Connection;
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -1041,6 +1041,15 @@ pub fn lexicon_hit(code: &str, module: &str) -> LibraryHit {
     }
 }
 
+/// Whether the passage beside Search has left the chapter the search started
+/// from, so "Back to …" is worth showing.
+pub fn needs_back(origin: Option<Ref>, current: Option<Ref>) -> bool {
+    match (origin, current) {
+        (Some(o), Some(c)) => (o.book, o.chapter) != (c.book, c.chapter),
+        _ => false,
+    }
+}
+
 /// One window's search tab: the list, and the query it is showing.
 pub struct Pane {
     pub root: gtk::Box,
@@ -1051,6 +1060,8 @@ pub struct Pane {
     pub mode_dd: gtk::DropDown,
     pub range_dd: gtk::DropDown,
     pub status: gtk::Label,
+    /// Returns the passage beside Search to where the search started.
+    pub back: gtk::Button,
     pub empty: gtk::Label,
     pub query: String,
     pub scope: SearchScope,
@@ -1112,6 +1123,25 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     status.set_wrap(true);
     status.add_css_class("dim-label");
 
+    status.set_hexpand(true);
+    let back_content = adw::ButtonContent::new();
+    back_content.set_icon_name("go-previous-symbolic");
+    let back = gtk::Button::new();
+    back.set_child(Some(&back_content));
+    back.add_css_class("flat");
+    back.set_visible(false);
+    back.set_tooltip_text(Some(
+        "Return to the passage you were reading. Esc also closes Search.",
+    ));
+    let send_back = sender.clone();
+    back.connect_clicked(move |_| send_back.emit(crate::app::Msg::SearchBack(id)));
+    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    // Keep the row's height when "Back to …" hides, so the list does not jump.
+    status_row.set_size_request(-1, 34);
+    status.set_valign(gtk::Align::Center);
+    status_row.append(&status);
+    status_row.append(&back);
+
     let empty = gtk::Label::new(Some(empty_description("", SearchScope::Kjv).unwrap_or("")));
     empty.set_xalign(0.0);
     empty.set_wrap(true);
@@ -1141,7 +1171,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     root.add_css_class("search-pane");
     root.append(&filters);
     root.append(&modes);
-    root.append(&status);
+    root.append(&status_row);
     root.append(&empty);
     root.append(&chip_scroll);
     root.append(&list_scroll);
@@ -1155,6 +1185,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
         mode_dd,
         range_dd,
         status,
+        back,
         empty,
         query: String::new(),
         scope: SearchScope::Kjv,
@@ -1178,15 +1209,19 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
 }
 
 impl Pane {
-    /// Inset the scope menu when this pane is the only split guest.
-    ///
-    /// That frame paints the close button over the top-right corner (28px,
-    /// 8px inset). The pane already has a 12px end margin, and another 36px
-    /// lines the menu up with the follow pin. A study stack draws its close
-    /// in the header, and a standalone tab has none, so those stay at 0.
-    pub fn set_close_clearance(&self, on: bool) {
-        self.scope_dd.set_margin_end(if on { 36 } else { 0 });
-        self.scope_dd.queue_resize();
+    /// Show "Back to …" while the passage beside Search is somewhere else.
+    pub fn set_back(&self, label: Option<&str>) {
+        match label {
+            Some(label) => {
+                if let Some(content) = self.back.child().and_downcast::<adw::ButtonContent>() {
+                    content.set_label(label);
+                }
+                self.back
+                    .update_property(&[gtk::accessible::Property::Label(label)]);
+                self.back.set_visible(true);
+            }
+            None => self.back.set_visible(false),
+        }
     }
 
     pub fn show_status(&self, text: &str) {
@@ -1206,6 +1241,32 @@ impl Pane {
     pub fn sync_placeholder(&self) {
         self.entry
             .set_placeholder_text(Some(placeholder(self.scope)));
+    }
+}
+
+#[cfg(test)]
+mod back_tests {
+    use super::*;
+
+    fn r(book: u8, chapter: u8, verse: u8) -> Ref {
+        Ref {
+            book,
+            chapter,
+            verse,
+        }
+    }
+
+    #[test]
+    fn back_shows_once_the_passage_leaves_the_origin_chapter() {
+        assert!(needs_back(Some(r(41, 13, 1)), Some(r(43, 4, 10))));
+        assert!(needs_back(Some(r(41, 13, 1)), Some(r(41, 14, 1))));
+    }
+
+    #[test]
+    fn back_hides_in_the_origin_chapter_or_without_an_origin() {
+        assert!(!needs_back(Some(r(41, 13, 1)), Some(r(41, 13, 30))));
+        assert!(!needs_back(None, Some(r(41, 13, 1))));
+        assert!(!needs_back(Some(r(41, 13, 1)), None));
     }
 }
 
