@@ -23,6 +23,8 @@ pub struct State {
     pub paragraphs: bool,
     #[serde(default)]
     pub search_mode: u32,
+    #[serde(default)]
+    pub search_match_case: bool,
     /// Older Exact word flag. `1` loads as Exact word in the match menu.
     #[serde(default)]
     pub search_words: u32,
@@ -50,6 +52,7 @@ impl Default for State {
             interlinear: false,
             paragraphs: true,
             search_mode: 0,
+            search_match_case: false,
             search_words: 0,
             column_width: 0,
         }
@@ -76,6 +79,7 @@ impl State {
             interlinear: false,
             paragraphs,
             search_mode: 0,
+            search_match_case: false,
             search_words: 0,
             column_width: 0,
         }
@@ -229,6 +233,20 @@ mod tests {
         assert!(!s.interlinear);
         assert_eq!(s.font_size, layout::DEFAULT_FONT);
         assert_eq!(s.column_width, 0);
+        assert!(!s.search_match_case);
+    }
+
+    #[test]
+    fn search_match_case_round_trips_in_state() {
+        let state = State {
+            search_mode: 3,
+            search_match_case: true,
+            ..State::default()
+        };
+        let serialized = toml::to_string(&state).unwrap();
+        let restored: State = toml::from_str(&serialized).unwrap();
+        assert!(restored.search_match_case);
+        assert_eq!(restored.search_mode, 3);
     }
 
     #[test]

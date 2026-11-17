@@ -484,6 +484,7 @@ impl PassageView {
         tokens: &[String],
         strongs: Option<&str>,
         word_match: WordMatch,
+        match_case: bool,
     ) {
         let Some(tag) = self.buffer.tag_table().lookup("search-hit") else {
             return;
@@ -493,7 +494,13 @@ impl PassageView {
         self.buffer.remove_tag(&tag, &start, &end);
         if let Some(code) = strongs {
             for word in &self.layout.words {
-                if word.codes.iter().any(|c| c.eq_ignore_ascii_case(code)) {
+                if word.codes.iter().any(|c| {
+                    if match_case {
+                        c == code
+                    } else {
+                        c.eq_ignore_ascii_case(code)
+                    }
+                }) {
                     self.apply_tag("search-hit", word.span);
                 }
             }
@@ -506,7 +513,15 @@ impl PassageView {
             return;
         };
         let skip = mark_spans(&self.layout);
-        for span in token_spans(&self.layout.text, body, vend, tokens, word_match, &skip) {
+        for span in token_spans(
+            &self.layout.text,
+            body,
+            vend,
+            tokens,
+            word_match,
+            match_case,
+            &skip,
+        ) {
             self.apply_tag("search-hit", span);
         }
     }
@@ -829,6 +844,7 @@ fn token_spans(
     end: i32,
     tokens: &[String],
     word_match: WordMatch,
+    match_case: bool,
     skip: &[layout::Span],
 ) -> Vec<layout::Span> {
     let chars: Vec<char> = text.chars().collect();
@@ -838,21 +854,49 @@ fn token_spans(
         return Vec::new();
     }
     let slice: String = chars[start..end].iter().collect();
-    let lower = slice.to_lowercase();
-    if lower.len() != slice.len() {
+    if match_case && word_match == WordMatch::Exact {
+        let mut spans = Vec::new();
+        for token in tokens {
+            for (lo, hi) in bible_app_db::case_match_ranges(&slice, token, true) {
+                let abs = (start + slice[..lo].chars().count()) as i32;
+                let abs_end = (start + slice[..hi].chars().count()) as i32;
+                let before = neighbor_char(&chars, abs as isize - 1, skip, false);
+                let after = neighbor_char(&chars, abs_end as isize, skip, true);
+                if before.is_none_or(|c| !c.is_ascii_alphanumeric())
+                    && after.is_none_or(|c| !c.is_ascii_alphanumeric())
+                {
+                    spans.push(layout::Span {
+                        start: abs,
+                        end: abs_end,
+                    });
+                }
+            }
+        }
+        return spans;
+    }
+    let haystack = if match_case {
+        slice.clone()
+    } else {
+        slice.to_lowercase()
+    };
+    if haystack.len() != slice.len() {
         return Vec::new();
     }
     let mut spans = Vec::new();
     for token in tokens {
-        let needle = token.to_lowercase();
+        let needle = if match_case {
+            token.clone()
+        } else {
+            token.to_lowercase()
+        };
         if needle.is_empty() {
             continue;
         }
         let partial = word_match.partial();
         let mut from = 0;
-        while let Some(rel) = lower[from..].find(&needle) {
+        while let Some(rel) = haystack[from..].find(&needle) {
             let pos = from + rel;
-            let char_at = lower[..pos].chars().count();
+            let char_at = haystack[..pos].chars().count();
             let char_end = char_at + needle.chars().count();
             let abs = (start + char_at) as i32;
             let abs_end = (start + char_end) as i32;
@@ -909,6 +953,7 @@ mod token_span_tests {
             text.chars().count() as i32,
             &["moses".into()],
             WordMatch::Prefix,
+            false,
             &skip,
         );
         assert_eq!(
@@ -927,6 +972,7 @@ mod token_span_tests {
             text.chars().count() as i32,
             &["eart".into()],
             WordMatch::Prefix,
+            false,
             &[],
         );
         assert_eq!(spans, vec![layout::Span { start: 19, end: 23 }]);
@@ -936,10 +982,40 @@ mod token_span_tests {
             text.chars().count() as i32,
             &["ear".into()],
             WordMatch::Exact,
+            false,
             &[],
         );
         assert!(exact.is_empty(), "{exact:?}");
-        let hear = token_spans("hear thou", 0, 9, &["ear".into()], WordMatch::Prefix, &[]);
+        let hear = token_spans(
+            "hear thou",
+            0,
+            9,
+            &["ear".into()],
+            WordMatch::Prefix,
+            false,
+            &[],
+        );
         assert_eq!(hear, vec![layout::Span { start: 1, end: 4 }]);
+    }
+
+    #[test]
+    fn search_highlights_only_the_requested_case() {
+        let text = "holy Holy HOLY";
+        let tokens = ["Holy".into()];
+        let exact = token_spans(text, 0, 14, &tokens, WordMatch::Exact, true, &[]);
+        assert_eq!(exact, vec![layout::Span { start: 5, end: 9 }]);
+        let insensitive = token_spans(text, 0, 14, &tokens, WordMatch::Exact, false, &[]);
+        assert_eq!(insensitive.len(), 3);
+        let text = "Elōhim elōhim";
+        let accented = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["Elohim".into()],
+            WordMatch::Exact,
+            true,
+            &[],
+        );
+        assert_eq!(accented, vec![layout::Span { start: 0, end: 6 }]);
     }
 }

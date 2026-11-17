@@ -51,7 +51,7 @@ pub fn strongs_occurrences(
     code: &str,
     limit: usize,
 ) -> Result<Vec<Occurrence>, DbError> {
-    let Some(code) = canonical_code(code) else {
+    let Some(code) = canonical_code(code, false) else {
         return Ok(Vec::new());
     };
     query_aligned(
@@ -64,13 +64,14 @@ pub fn strongs_occurrences(
             chapter: None,
             after: None,
             limit,
+            match_case: false,
         },
     )
 }
 
 /// Unique KJV verses tagged with `code` as a whole token.
 pub fn strongs_occurrence_count(conn: &Connection, code: &str) -> Result<usize, DbError> {
-    let Some(code) = canonical_code(code) else {
+    let Some(code) = canonical_code(code, false) else {
         return Ok(0);
     };
     let pattern = like_token_pattern(&code);
@@ -96,6 +97,7 @@ pub struct StrongsWindow {
     pub chapter: Option<u8>,
     pub after: Option<(u8, u8, u8)>,
     pub limit: usize,
+    pub match_case: bool,
 }
 
 /// Occurrences inside a book window, with a count per book for the window
@@ -112,25 +114,27 @@ pub fn strongs_page(
         chapter,
         after,
         limit,
+        match_case,
     } = window;
-    let Some(code) = canonical_code(code) else {
+    let Some(code) = canonical_code(code, match_case) else {
         return Ok((Vec::new(), 0, Vec::new()));
     };
-    let pattern = like_token_pattern(&code);
+    let pattern = token_pattern(&code, match_case);
     let chapter_n = i64::from(chapter.unwrap_or(0));
-    let mut count_stmt = conn.prepare(
+    let predicate = token_predicate("strongs", match_case);
+    let mut count_stmt = conn.prepare(&format!(
         r#"
         SELECT book, COUNT(*) FROM (
             SELECT DISTINCT book, chapter, verse
             FROM verse_words
-            WHERE (' ' || strongs || ' ') LIKE ?1 ESCAPE '\'
+            WHERE {predicate}
               AND book BETWEEN ?2 AND ?3
               AND (?4 = 0 OR chapter = ?4)
         )
         GROUP BY book
         ORDER BY book
-        "#,
-    )?;
+        "#
+    ))?;
     let by_book = count_stmt
         .query_map(
             rusqlite::params![pattern, book_min, book_max, chapter_n],
@@ -153,6 +157,7 @@ pub fn strongs_page(
             chapter,
             after,
             limit,
+            match_case,
         },
     )?;
     let listed: i64 = if book.is_some() {
@@ -167,8 +172,13 @@ pub fn strongs_page(
     Ok((hits, listed, by_book))
 }
 
-fn canonical_code(code: &str) -> Option<String> {
+fn canonical_code(code: &str, match_case: bool) -> Option<String> {
     let (num, lang) = parse_strongs_code(code)?;
+    let lang = if match_case {
+        code.trim().chars().next()?.to_string()
+    } else {
+        lang
+    };
     Some(format!("{lang}{num}"))
 }
 
@@ -184,6 +194,7 @@ fn query_aligned(
         chapter,
         after,
         limit,
+        match_case,
     } = window;
     let book_n = i64::from(book.unwrap_or(0));
     let chapter_n = i64::from(chapter.unwrap_or(0));
@@ -192,14 +203,15 @@ fn query_aligned(
         None => (0, 0, 0),
     };
     let limit = limit.max(1) as i64;
-    let mut stmt = conn.prepare(
+    let predicate = token_predicate("w.strongs", match_case);
+    let mut stmt = conn.prepare(&format!(
         r#"
         WITH verse_page AS (
             SELECT DISTINCT v.book, v.chapter, v.verse, v.text
             FROM verse_words w
             JOIN verses v
               ON v.book = w.book AND v.chapter = w.chapter AND v.verse = w.verse
-            WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
+            WHERE {predicate}
               AND v.book BETWEEN ?2 AND ?3
               AND (?4 = 0 OR v.book = ?4)
               AND (?5 = 0 OR v.chapter = ?5)
@@ -216,10 +228,10 @@ fn query_aligned(
         FROM verse_page p
         JOIN verse_words w
           ON w.book = p.book AND w.chapter = p.chapter AND w.verse = p.verse
-        WHERE (' ' || w.strongs || ' ') LIKE ?1 ESCAPE '\'
+        WHERE {predicate}
         ORDER BY p.book, p.chapter, p.verse, w.i
-        "#,
-    )?;
+        "#
+    ))?;
     let rows = stmt.query_map(
         rusqlite::params![
             pattern,
@@ -288,6 +300,22 @@ fn like_token_pattern(code: &str) -> String {
     }
     out.push_str(" %");
     out
+}
+
+fn token_pattern(code: &str, match_case: bool) -> String {
+    if match_case {
+        format!(" {code} ")
+    } else {
+        like_token_pattern(code)
+    }
+}
+
+fn token_predicate(column: &str, match_case: bool) -> String {
+    if match_case {
+        format!("instr(' ' || {column} || ' ', ?1) > 0")
+    } else {
+        format!("(' ' || {column} || ' ') LIKE ?1 ESCAPE '\\'")
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +461,7 @@ mod tests {
                 chapter: None,
                 after: None,
                 limit: 1,
+                match_case: false,
             },
         )
         .unwrap();

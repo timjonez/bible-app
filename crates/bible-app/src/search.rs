@@ -2,8 +2,8 @@ use crate::layout;
 use crate::nav::{self, Ref};
 use crate::workspace::TabId;
 use bible_app_db::{
-    Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchScope,
-    StoredSpan, VerseFilter, WordMatch,
+    Book, BookCount, CompiledQuery, LibraryHit, LibraryKind, LibraryPage, MatchMode, SearchCursor,
+    SearchScope, StoredSpan, VerseFilter, WordMatch,
 };
 use gtk::gio;
 use gtk::prelude::*;
@@ -179,27 +179,51 @@ pub fn reference_text(hit: &LibraryHit, books: &[Book], scope: SearchScope) -> S
 }
 
 #[cfg(test)]
-pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch) -> String {
-    paint_bold(text, &query_ranges(text, tokens, word_match))
+pub fn emphasize(text: &str, tokens: &[String], word_match: WordMatch, match_case: bool) -> String {
+    paint_bold(text, &query_ranges(text, tokens, word_match, match_case))
 }
 
-fn query_ranges(text: &str, tokens: &[String], word_match: WordMatch) -> Vec<(usize, usize)> {
-    let lower = text.to_lowercase();
-    if lower.len() != text.len() {
+fn query_ranges(
+    text: &str,
+    tokens: &[String],
+    word_match: WordMatch,
+    match_case: bool,
+) -> Vec<(usize, usize)> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if match_case && word_match == WordMatch::Exact {
+        return merge_ranges(
+            tokens
+                .iter()
+                .flat_map(|token| bible_app_db::case_match_ranges(text, token, false))
+                .collect(),
+        );
+    }
+    let haystack = if match_case {
+        text.to_string()
+    } else {
+        text.to_lowercase()
+    };
+    if haystack.len() != text.len() {
         return Vec::new();
     }
     let mut marks: Vec<(usize, usize)> = Vec::new();
     for token in tokens {
-        let needle = token.to_lowercase();
+        let needle = if match_case {
+            token.clone()
+        } else {
+            token.to_lowercase()
+        };
         if needle.is_empty() {
             continue;
         }
         let partial = word_match.partial();
         let mut from = 0;
-        while let Some(rel) = lower[from..].find(&needle) {
+        while let Some(rel) = haystack[from..].find(&needle) {
             let pos = from + rel;
-            let before = lower[..pos].chars().next_back();
-            let after = lower[pos + needle.len()..].chars().next();
+            let before = haystack[..pos].chars().next_back();
+            let after = haystack[pos + needle.len()..].chars().next();
             let left_ok = before.is_none_or(|c| !c.is_ascii_alphanumeric());
             let right_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric());
             if partial || (left_ok && right_ok) {
@@ -411,24 +435,35 @@ impl ListedHit {
         }
     }
 
-    pub fn line_markup(&self, tokens: &[String], word_match: WordMatch) -> String {
+    pub fn line_markup(
+        &self,
+        tokens: &[String],
+        word_match: WordMatch,
+        match_case: bool,
+    ) -> String {
         let supplied = self.library.kind == LibraryKind::Verse;
         match &self.marks {
             RowMarks::Query => {
                 let text = &self.library.snippet;
-                paint(text, &query_ranges(text, tokens, word_match), supplied)
+                paint(
+                    text,
+                    &query_ranges(text, tokens, word_match, match_case),
+                    supplied,
+                )
             }
             RowMarks::Alignment(line) => paint(&line.text, &line.ranges, supplied),
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn row(
     hit: &ListedHit,
     books: &[Book],
     scope: SearchScope,
     tokens: &[String],
     word_match: WordMatch,
+    match_case: bool,
     id: TabId,
     sender: relm4::Sender<crate::app::Msg>,
 ) -> gtk::ListBoxRow {
@@ -449,7 +484,7 @@ pub fn row(
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
     let snippet = gtk::Label::new(None);
-    snippet.set_markup(&hit.line_markup(tokens, word_match));
+    snippet.set_markup(&hit.line_markup(tokens, word_match, match_case));
     snippet.set_xalign(0.0);
     snippet.set_yalign(0.0);
     snippet.set_hexpand(true);
@@ -522,6 +557,7 @@ pub fn refill_list(pane: &Pane, hits: &[ListedHit], books: &[Book], append: bool
             pane.scope,
             &pane.tokens,
             pane.words,
+            pane.match_case,
             pane.tab,
             pane.sender.clone(),
         ));
@@ -590,7 +626,6 @@ impl SearchRange {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookChip {
-    Auto,
     AllBooks,
     Book(u8),
 }
@@ -600,7 +635,7 @@ pub enum Plan {
     Idle,
     Short,
     Goto(Ref),
-    Ready(Prepared),
+    Ready(Box<Prepared>),
 }
 
 #[derive(Debug, Clone)]
@@ -609,7 +644,6 @@ pub struct Prepared {
     pub scope: SearchScope,
     pub filter: VerseFilter,
     pub chip: BookChip,
-    pub current_book: u8,
     pub db_path: std::path::PathBuf,
     pub user_path: Option<std::path::PathBuf>,
 }
@@ -623,13 +657,16 @@ pub struct Outcome {
     pub strongs: Option<String>,
     pub chosen_book: Option<u8>,
     pub append: bool,
+    pub next: SearchCursor,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     query: &str,
     books: &[Book],
     current: Ref,
     mode: MatchMode,
+    match_case: bool,
     range: SearchRange,
     chip: BookChip,
     scope: SearchScope,
@@ -640,9 +677,9 @@ pub fn plan(
     }
     let (slash_book, slash_chapter, text) = slash_target(query, books, current);
     let text = text.as_str();
-    if let Some(compiled) = bible_app_db::compile_query(text, mode) {
+    if let Some(compiled) = bible_app_db::compile_query_with_case(text, mode, match_case) {
         if compiled.strongs.is_some() {
-            return Plan::Ready(Prepared {
+            return Plan::Ready(Box::new(Prepared {
                 compiled,
                 scope,
                 filter: bounds(
@@ -652,10 +689,9 @@ pub fn plan(
                     slash_chapter,
                 ),
                 chip,
-                current_book: current.book,
                 db_path: std::path::PathBuf::new(),
                 user_path: None,
-            });
+            }));
         }
     }
     if slash_book.is_none() && query.chars().any(|c| c.is_ascii_digit()) {
@@ -663,14 +699,14 @@ pub fn plan(
             return Plan::Goto(at);
         }
     }
-    let letters = text.chars().filter(|c| c.is_ascii_alphanumeric()).count();
+    let letters = text.chars().filter(|c| c.is_alphanumeric()).count();
     if letters < 2 {
         return Plan::Short;
     }
-    let Some(compiled) = bible_app_db::compile_query(text, mode) else {
+    let Some(compiled) = bible_app_db::compile_query_with_case(text, mode, match_case) else {
         return Plan::Idle;
     };
-    Plan::Ready(Prepared {
+    Plan::Ready(Box::new(Prepared {
         compiled,
         scope,
         filter: bounds(
@@ -680,10 +716,9 @@ pub fn plan(
             slash_chapter,
         ),
         chip,
-        current_book: current.book,
         db_path: std::path::PathBuf::new(),
         user_path: None,
-    })
+    }))
 }
 
 fn slash_target(query: &str, books: &[Book], current: Ref) -> (Option<u8>, Option<u8>, String) {
@@ -753,7 +788,8 @@ fn bounds(
     filter
 }
 
-pub fn execute(prepared: &Prepared, after: Option<(u8, u8, u8)>, append: bool) -> Outcome {
+pub fn execute(prepared: &Prepared, cursor: Option<SearchCursor>, append: bool) -> Outcome {
+    let cursor = cursor.unwrap_or_default();
     let empty = Outcome {
         hits: Vec::new(),
         total: 0,
@@ -762,15 +798,16 @@ pub fn execute(prepared: &Prepared, after: Option<(u8, u8, u8)>, append: bool) -
         strongs: prepared.compiled.strongs.clone(),
         chosen_book: None,
         append,
+        next: cursor,
     };
     let Ok(conn) = open_reader(&prepared.db_path) else {
         return empty;
     };
     if let Some(code) = prepared.compiled.strongs.clone() {
-        return strongs_outcome(&conn, prepared, &code, after, append);
+        return strongs_outcome(&conn, prepared, &code, cursor, append);
     }
     if prepared.scope == SearchScope::Notes {
-        return notes_outcome(prepared, after, append);
+        return notes_outcome(prepared, cursor, append);
     }
     let chip = chip_arg(prepared.chip);
     let mut page = match bible_app_db::search_filtered(
@@ -779,53 +816,30 @@ pub fn execute(prepared: &Prepared, after: Option<(u8, u8, u8)>, append: bool) -
         prepared.scope,
         prepared.filter,
         chip,
-        after,
-        PAGE,
+        Some(cursor),
+        if prepared.scope == SearchScope::All && prepared.user_path.is_some() {
+            PAGE - PAGE / 5
+        } else {
+            PAGE
+        },
     ) {
         Ok(page) => page,
         Err(_) => return empty,
     };
-    let mut chosen = chip;
-    if prepared.chip == BookChip::Auto
-        && prepared.filter.book.is_none()
-        && prepared.filter.chapter.is_none()
-        && page
-            .by_book
-            .iter()
-            .any(|b| b.book == prepared.current_book && b.count > 0)
-    {
-        chosen = Some(prepared.current_book);
-        if let Ok(narrowed) = bible_app_db::search_filtered(
-            &conn,
-            &prepared.compiled,
-            prepared.scope,
-            prepared.filter,
-            chosen,
-            after,
-            PAGE,
-        ) {
-            page.hits = narrowed.hits;
-            page.total = narrowed.total;
-        }
-    }
     if prepared.scope == SearchScope::All {
         append_notes(prepared, &mut page);
     }
-    finish(page, prepared, chosen, append)
+    finish(page, prepared, chip, append)
 }
 
 fn strongs_outcome(
     conn: &Connection,
     prepared: &Prepared,
     code: &str,
-    after: Option<(u8, u8, u8)>,
+    mut cursor: SearchCursor,
     append: bool,
 ) -> Outcome {
-    let chip = match prepared.chip {
-        BookChip::Book(id) => Some(id),
-        BookChip::AllBooks => None,
-        BookChip::Auto => None,
-    };
+    let chip = chip_arg(prepared.chip);
     let Ok((hits, total, by_book)) = bible_app_db::strongs_page(
         conn,
         code,
@@ -834,8 +848,9 @@ fn strongs_outcome(
             book_max: prepared.filter.book_max,
             book: prepared.filter.book.or(chip),
             chapter: prepared.filter.chapter,
-            after,
+            after: cursor.strongs_after,
             limit: PAGE,
+            match_case: prepared.compiled.match_case,
         },
     ) else {
         return Outcome {
@@ -846,33 +861,12 @@ fn strongs_outcome(
             strongs: Some(code.to_string()),
             chosen_book: prepared.filter.book.or(chip),
             append,
+            next: cursor,
         };
     };
-    let mut chosen = prepared.filter.book.or(chip);
-    let (hits, total, by_book) = if prepared.chip == BookChip::Auto
-        && prepared.filter.book.is_none()
-        && prepared.filter.chapter.is_none()
-        && by_book
-            .iter()
-            .any(|b| b.book == prepared.current_book && b.count > 0)
-    {
-        chosen = Some(prepared.current_book);
-        bible_app_db::strongs_page(
-            conn,
-            code,
-            bible_app_db::StrongsWindow {
-                book_min: prepared.filter.book_min,
-                book_max: prepared.filter.book_max,
-                book: Some(prepared.current_book),
-                chapter: None,
-                after,
-                limit: PAGE,
-            },
-        )
-        .unwrap_or((hits, total, by_book))
-    } else {
-        (hits, total, by_book)
-    };
+    if let Some(last) = hits.last() {
+        cursor.strongs_after = Some((last.book, last.chapter, last.verse));
+    }
     let hits = hits
         .into_iter()
         .map(|hit| {
@@ -898,12 +892,13 @@ fn strongs_outcome(
         by_book,
         tokens: Vec::new(),
         strongs: Some(code.to_string()),
-        chosen_book: chosen,
+        chosen_book: prepared.filter.book.or(chip),
         append,
+        next: cursor,
     }
 }
 
-fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool) -> Outcome {
+fn notes_outcome(prepared: &Prepared, mut cursor: SearchCursor, append: bool) -> Outcome {
     let Some(path) = prepared.user_path.as_deref() else {
         return Outcome {
             hits: Vec::new(),
@@ -913,6 +908,7 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
             strongs: None,
             chosen_book: None,
             append,
+            next: cursor,
         };
     };
     let Ok(conn) = open_reader(path) else {
@@ -924,18 +920,19 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
             strongs: None,
             chosen_book: None,
             append,
+            next: cursor,
         };
     };
     let chip = chip_arg(prepared.chip);
     let book = prepared.filter.book.or(chip);
     let Ok(page) = crate::user_db::search_notes(
         &conn,
-        &prepared.compiled.fts,
-        prepared.compiled.substring.as_deref(),
+        &prepared.compiled,
         prepared.filter.book_min,
         prepared.filter.book_max,
         book,
         prepared.filter.chapter,
+        cursor.notes,
         PAGE,
     ) else {
         return Outcome {
@@ -946,10 +943,9 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
             strongs: None,
             chosen_book: book,
             append,
+            next: cursor,
         };
     };
-    let hits = page.hits;
-    let mut total = page.total;
     let by_book = page
         .by_book
         .iter()
@@ -958,41 +954,19 @@ fn notes_outcome(prepared: &Prepared, _after: Option<(u8, u8, u8)>, append: bool
             count: *count,
         })
         .collect::<Vec<_>>();
-    let mut chosen = book;
-    let hits = if prepared.chip == BookChip::Auto
-        && prepared.filter.book.is_none()
-        && prepared.filter.chapter.is_none()
-        && by_book
-            .iter()
-            .any(|b| b.book == prepared.current_book && b.count > 0)
-    {
-        chosen = Some(prepared.current_book);
-        crate::user_db::search_notes(
-            &conn,
-            &prepared.compiled.fts,
-            prepared.compiled.substring.as_deref(),
-            prepared.filter.book_min,
-            prepared.filter.book_max,
-            Some(prepared.current_book),
-            None,
-            PAGE,
-        )
-        .map(|page| {
-            total = page.total;
-            page.hits
-        })
-        .unwrap_or(hits)
-    } else {
-        hits
-    };
+    cursor.notes += page.hits.len();
     Outcome {
-        hits: note_hits(&hits).into_iter().map(ListedHit::plain).collect(),
-        total,
+        hits: note_hits(&page.hits)
+            .into_iter()
+            .map(ListedHit::plain)
+            .collect(),
+        total: page.total,
         by_book,
         tokens: prepared.compiled.tokens.clone(),
         strongs: None,
-        chosen_book: chosen,
+        chosen_book: book,
         append,
+        next: cursor,
     }
 }
 
@@ -1005,16 +979,18 @@ fn append_notes(prepared: &Prepared, page: &mut LibraryPage) {
     };
     let Ok(found) = crate::user_db::search_notes(
         &conn,
-        &prepared.compiled.fts,
-        prepared.compiled.substring.as_deref(),
+        &prepared.compiled,
         prepared.filter.book_min,
         prepared.filter.book_max,
-        prepared.filter.book,
+        chip_arg(prepared.chip).or(prepared.filter.book),
         prepared.filter.chapter,
-        8,
+        page.next.notes,
+        PAGE.saturating_sub(page.hits.len()),
     ) else {
         return;
     };
+    page.total += found.total;
+    page.next.notes += found.hits.len();
     page.hits.extend(note_hits(&found.hits));
 }
 
@@ -1042,13 +1018,14 @@ fn finish(page: LibraryPage, prepared: &Prepared, chosen: Option<u8>, append: bo
         strongs: None,
         chosen_book: chosen.or(prepared.filter.book),
         append,
+        next: page.next,
     }
 }
 
 fn chip_arg(chip: BookChip) -> Option<u8> {
     match chip {
         BookChip::Book(id) => Some(id),
-        BookChip::Auto | BookChip::AllBooks => None,
+        BookChip::AllBooks => None,
     }
 }
 
@@ -1103,12 +1080,14 @@ pub struct Pane {
     pub chips: gtk::Box,
     pub scope_dd: gtk::DropDown,
     pub mode_dd: gtk::DropDown,
+    pub case_check: gtk::CheckButton,
     pub range_dd: gtk::DropDown,
     pub status: gtk::Label,
     pub empty: gtk::Label,
     pub query: String,
     pub scope: SearchScope,
     pub mode: MatchMode,
+    pub match_case: bool,
     pub words: WordMatch,
     pub range: SearchRange,
     pub chip: BookChip,
@@ -1118,6 +1097,7 @@ pub struct Pane {
     pub strongs: Option<String>,
     pub chosen: Option<u8>,
     pub counts: Vec<BookCount>,
+    pub cursor: SearchCursor,
     pub origin: Option<Ref>,
     pub gen: Rc<Cell<u64>>,
     pub hold: Rc<Cell<bool>>,
@@ -1148,7 +1128,12 @@ fn scroll_sideways_with_wheel(scroll: &gtk::ScrolledWindow) {
     scroll.add_controller(wheel);
 }
 
-pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::Msg>) -> Pane {
+pub fn build_pane(
+    mode: MatchMode,
+    match_case: bool,
+    id: TabId,
+    sender: relm4::Sender<crate::app::Msg>,
+) -> Pane {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some(placeholder(SearchScope::Kjv)));
     entry.set_tooltip_text(Some(
@@ -1168,6 +1153,10 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     mode_dd.set_tooltip_text(Some("Contains, all words, any word, or exact word"));
     mode_dd.update_property(&[gtk::accessible::Property::Label("Match")]);
 
+    let case_check = gtk::CheckButton::with_label("Match case");
+    case_check.set_active(match_case);
+    case_check.set_tooltip_text(Some("Match uppercase and lowercase exactly"));
+
     let range_dd = gtk::DropDown::from_strings(&SearchRange::ALL.map(SearchRange::label));
     range_dd.set_selected(SearchRange::All.index());
     range_dd.set_enable_search(false);
@@ -1181,6 +1170,7 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
     mode_dd.set_hexpand(true);
     range_dd.set_hexpand(true);
     modes.append(&mode_dd);
+    modes.append(&case_check);
     modes.append(&range_dd);
 
     let status = gtk::Label::new(Some(&status("", 0, 0, SearchScope::Kjv)));
@@ -1230,21 +1220,24 @@ pub fn build_pane(mode: MatchMode, id: TabId, sender: relm4::Sender<crate::app::
         chips,
         scope_dd,
         mode_dd,
+        case_check,
         range_dd,
         status,
         empty,
         query: String::new(),
         scope: SearchScope::Kjv,
         mode,
+        match_case,
         words: mode.word_match(),
         range: SearchRange::All,
-        chip: BookChip::Auto,
+        chip: BookChip::AllBooks,
         hits: Vec::new(),
         total: 0,
         tokens: Vec::new(),
         strongs: None,
         chosen: None,
         counts: Vec::new(),
+        cursor: SearchCursor::default(),
         origin: None,
         gen: Rc::new(Cell::new(0)),
         hold: Rc::new(Cell::new(false)),
@@ -1279,6 +1272,800 @@ impl Pane {
 mod tests {
     use super::*;
     use bible_app_db::{LibraryHit, StoredSpan};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SearchFixture {
+        dir: std::path::PathBuf,
+        db_path: std::path::PathBuf,
+        user_path: std::path::PathBuf,
+        books: Vec<Book>,
+    }
+
+    impl SearchFixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "bible-app-search-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let db_path = dir.join("library.sqlite");
+            let user_path = dir.join("user.sqlite");
+            let conn = bible_app_db::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO books (id, abbrev, name) VALUES
+                    (5, 'De', 'Deuteronomy'), (23, 'Isa', 'Isaiah'),
+                    (40, 'Mt', 'Matthew'), (44, 'Ac', 'Acts');
+                INSERT INTO verses (book, chapter, verse, text, para_break) VALUES
+                    (5, 33, 8, 'with thy holy one', 0),
+                    (23, 1, 4, 'they have provoked the Holy One', 0),
+                    (40, 4, 5, 'holy city', 0),
+                    (44, 2, 27, 'Holy One to see corruption', 0),
+                    (44, 3, 14, 'Holy One and the Just', 0),
+                    (44, 13, 35, 'Holy One to see corruption', 0);
+                INSERT INTO verse_words (book, chapter, verse, i, start, end_pos, strongs) VALUES
+                    (40, 4, 5, 0, 0, 4, 'G40'),
+                    (44, 2, 27, 0, 0, 4, 'G40'),
+                    (44, 3, 14, 0, 0, 4, 'G40');
+                INSERT INTO modules (id, kind, title, license) VALUES
+                    ('MHC', 'commentary', 'Matthew Henry', 'public-domain'),
+                    ('Easton', 'dictionary', 'Easton', 'public-domain'),
+                    ('Nave', 'topic', 'Nave', 'public-domain');
+                INSERT INTO resources (module, book, chapter, verse, text) VALUES
+                    ('MHC', 5, 33, 8, 'the holy one in Deuteronomy'),
+                    ('MHC', 44, 2, 27, 'the Holy One in Acts');
+                INSERT INTO entries (module, i, headword, text) VALUES
+                    ('Easton', 0, 'Holy One', 'a dictionary entry'),
+                    ('Easton', 1, 'holy one', 'another dictionary entry'),
+                    ('Nave', 0, 'Holy One', 'a topic'),
+                    ('Nave', 1, 'holy one', 'another topic');
+                "#,
+            )
+            .unwrap();
+            bible_app_db::rebuild_verses_fts(&conn).unwrap();
+            bible_app_db::rebuild_resources_fts(&conn).unwrap();
+            bible_app_db::rebuild_entries_fts(&conn).unwrap();
+            let books = bible_app_db::books(&conn).unwrap();
+            drop(conn);
+
+            let user = crate::user_db::open(&user_path).unwrap();
+            crate::user_db::upsert_note(&user, at(5, 33, 8), "the holy one").unwrap();
+            crate::user_db::upsert_note(&user, at(44, 2, 27), "the Holy One").unwrap();
+            drop(user);
+            Self {
+                dir,
+                db_path,
+                user_path,
+                books,
+            }
+        }
+
+        fn prepare(
+            &self,
+            query: &str,
+            origin: Ref,
+            mode: MatchMode,
+            scope: SearchScope,
+            range: SearchRange,
+            chip: BookChip,
+        ) -> Prepared {
+            self.prepare_with_case(query, origin, mode, false, scope, range, chip)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn prepare_with_case(
+            &self,
+            query: &str,
+            origin: Ref,
+            mode: MatchMode,
+            match_case: bool,
+            scope: SearchScope,
+            range: SearchRange,
+            chip: BookChip,
+        ) -> Prepared {
+            let Plan::Ready(mut prepared) = plan(
+                query,
+                &self.books,
+                origin,
+                mode,
+                match_case,
+                range,
+                chip,
+                scope,
+            ) else {
+                panic!("expected a search for {query:?}");
+            };
+            prepared.db_path = self.db_path.clone();
+            prepared.user_path = Some(self.user_path.clone());
+            *prepared
+        }
+
+        fn search(
+            &self,
+            query: &str,
+            scope: SearchScope,
+            range: SearchRange,
+            chip: BookChip,
+        ) -> Outcome {
+            let prepared = self.prepare(
+                query,
+                at(44, 2, 27),
+                MatchMode::ExactWord,
+                scope,
+                range,
+                chip,
+            );
+            execute(&prepared, None, false)
+        }
+    }
+
+    impl Drop for SearchFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.db_path);
+            let _ = std::fs::remove_file(&self.user_path);
+            let _ = std::fs::remove_dir(&self.dir);
+        }
+    }
+
+    fn at(book: u8, chapter: u8, verse: u8) -> Ref {
+        Ref {
+            book,
+            chapter,
+            verse,
+        }
+    }
+
+    fn references(outcome: &Outcome) -> Vec<(u8, u8, u8)> {
+        outcome
+            .hits
+            .iter()
+            .filter_map(|hit| hit_ref(hit).map(|at| (at.book, at.chapter, at.verse)))
+            .collect()
+    }
+
+    #[test]
+    fn whole_bible_search_is_case_insensitive_and_not_limited_to_the_open_book() {
+        let fixture = SearchFixture::new();
+        let expected = vec![
+            (5, 33, 8),
+            (23, 1, 4),
+            (44, 2, 27),
+            (44, 3, 14),
+            (44, 13, 35),
+        ];
+        for origin in [at(44, 2, 27), at(5, 33, 8)] {
+            for mode in [MatchMode::ExactWord, MatchMode::Phrase] {
+                for query in ["Holy One", "holy one", "HOLY ONE"] {
+                    let prepared = fixture.prepare(
+                        query,
+                        origin,
+                        mode,
+                        SearchScope::Kjv,
+                        SearchRange::All,
+                        BookChip::AllBooks,
+                    );
+                    let outcome = execute(&prepared, None, false);
+                    assert_eq!(references(&outcome), expected, "{query}, {mode:?}");
+                    assert_eq!(outcome.total, 5);
+                    assert_eq!(outcome.chosen_book, None);
+                    assert_eq!(
+                        outcome.by_book,
+                        vec![
+                            BookCount { book: 5, count: 1 },
+                            BookCount { book: 23, count: 1 },
+                            BookCount { book: 44, count: 3 },
+                        ]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn match_case_controls_every_text_mode_and_their_counts() {
+        let fixture = SearchFixture::new();
+        for mode in MatchMode::ALL {
+            for (query, match_case, expected) in [
+                (
+                    "Holy One",
+                    false,
+                    if mode == MatchMode::AnyWord { 6 } else { 5 },
+                ),
+                (
+                    "holy one",
+                    false,
+                    if mode == MatchMode::AnyWord { 6 } else { 5 },
+                ),
+                ("Holy One", true, 4),
+                (
+                    "holy one",
+                    true,
+                    if mode == MatchMode::AnyWord { 2 } else { 1 },
+                ),
+            ] {
+                let prepared = fixture.prepare_with_case(
+                    query,
+                    at(44, 2, 27),
+                    mode,
+                    match_case,
+                    SearchScope::Kjv,
+                    SearchRange::All,
+                    BookChip::AllBooks,
+                );
+                let outcome = execute(&prepared, None, false);
+                assert_eq!(outcome.total, expected, "{mode:?}, {query:?}, {match_case}");
+                assert_eq!(outcome.hits.len() as i64, expected);
+                if match_case && query == "Holy One" {
+                    assert!(!references(&outcome).contains(&(5, 33, 8)));
+                    assert!(references(&outcome).contains(&(44, 2, 27)));
+                }
+                if match_case && query == "holy one" {
+                    assert!(references(&outcome).contains(&(5, 33, 8)));
+                    assert!(!references(&outcome).contains(&(44, 2, 27)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn match_case_near_query_is_planned_and_returns_results() {
+        let fixture = SearchFixture::new();
+        for query in ["Holy NEAR One", "Holy NEAR/3 One"] {
+            let prepared = fixture.prepare_with_case(
+                query,
+                at(44, 2, 27),
+                MatchMode::ExactWord,
+                true,
+                SearchScope::Kjv,
+                SearchRange::All,
+                BookChip::AllBooks,
+            );
+            let outcome = execute(&prepared, None, false);
+            assert_eq!(outcome.total, 4, "{query}");
+            assert!(references(&outcome).contains(&(44, 2, 27)));
+            assert!(!references(&outcome).contains(&(5, 33, 8)));
+        }
+    }
+
+    #[test]
+    fn match_case_applies_to_commentary_entries_notes_and_all_library() {
+        let fixture = SearchFixture::new();
+        for mode in MatchMode::ALL {
+            for scope in [
+                SearchScope::Commentary,
+                SearchScope::Dictionaries,
+                SearchScope::Topics,
+                SearchScope::Notes,
+                SearchScope::All,
+            ] {
+                for (query, match_case) in [
+                    ("Holy One", false),
+                    ("holy one", false),
+                    ("Holy One", true),
+                    ("holy one", true),
+                ] {
+                    let prepared = fixture.prepare_with_case(
+                        query,
+                        at(44, 2, 27),
+                        mode,
+                        match_case,
+                        scope,
+                        SearchRange::All,
+                        BookChip::AllBooks,
+                    );
+                    let outcome = execute(&prepared, None, false);
+                    let expected_total = if scope == SearchScope::All {
+                        if !match_case {
+                            if mode == MatchMode::AnyWord {
+                                14
+                            } else {
+                                13
+                            }
+                        } else if query == "Holy One" {
+                            8
+                        } else if mode == MatchMode::AnyWord {
+                            6
+                        } else {
+                            5
+                        }
+                    } else if match_case {
+                        1
+                    } else {
+                        2
+                    };
+                    assert_eq!(
+                        outcome.total, expected_total,
+                        "{scope:?}, {mode:?}, {query:?}, {match_case}"
+                    );
+                    let lower = outcome.hits.iter().any(|hit| {
+                        hit.snippet.contains("holy one")
+                            || hit.headword.as_deref() == Some("holy one")
+                    });
+                    let upper = outcome.hits.iter().any(|hit| {
+                        hit.snippet.contains("Holy One")
+                            || hit.headword.as_deref() == Some("Holy One")
+                    });
+                    assert_eq!(
+                        (lower, upper),
+                        if !match_case {
+                            (true, true)
+                        } else if query == "Holy One" {
+                            (false, true)
+                        } else {
+                            (true, false)
+                        },
+                        "{scope:?}, {mode:?}, {query:?}, {match_case}: {:?}",
+                        outcome.hits
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn match_case_applies_to_strongs_codes_and_reference_queries() {
+        let fixture = SearchFixture::new();
+        for (query, match_case, count) in [
+            ("G40", false, 3),
+            ("g40", false, 3),
+            ("G40", true, 3),
+            ("g40", true, 0),
+        ] {
+            let prepared = fixture.prepare_with_case(
+                query,
+                at(44, 2, 27),
+                MatchMode::ExactWord,
+                match_case,
+                SearchScope::Kjv,
+                SearchRange::All,
+                BookChip::AllBooks,
+            );
+            let outcome = execute(&prepared, None, false);
+            assert_eq!(outcome.total, count, "{query}, {match_case}");
+            assert_eq!(outcome.hits.len() as i64, count);
+        }
+        let origin = at(44, 2, 27);
+        for (query, match_case, expected) in [
+            ("Deuteronomy 33:8", true, true),
+            ("deuteronomy 33:8", true, true),
+            ("DEUTERONOMY 33:8", true, true),
+            ("deuteronomy 33:8", false, true),
+            ("De 33:8", true, true),
+            ("de 33:8", true, true),
+            ("33:8", true, true),
+        ] {
+            let planned = plan(
+                query,
+                &fixture.books,
+                origin,
+                MatchMode::ExactWord,
+                match_case,
+                SearchRange::All,
+                BookChip::AllBooks,
+                SearchScope::Kjv,
+            );
+            assert_eq!(matches!(planned, Plan::Goto(_)), expected, "{query}");
+        }
+        for (query, expected) in [("Deuteronomy/holy one", 1), ("Deuteronomy/Holy One", 0)] {
+            let prepared = fixture.prepare_with_case(
+                query,
+                origin,
+                MatchMode::ExactWord,
+                true,
+                SearchScope::Kjv,
+                SearchRange::All,
+                BookChip::AllBooks,
+            );
+            assert_eq!(execute(&prepared, None, false).total, expected, "{query}");
+        }
+        let prepared = fixture.prepare_with_case(
+            "deuteronomy/holy one",
+            origin,
+            MatchMode::ExactWord,
+            true,
+            SearchScope::Kjv,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        assert_eq!(execute(&prepared, None, false).total, 1);
+    }
+
+    #[test]
+    #[ignore = "requires BIBLE_APP_DB or an unpacked data/bible-app.sqlite"]
+    fn shipped_holy_one_search_includes_deuteronomy_and_acts() {
+        let path = std::env::var_os("BIBLE_APP_DB")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/bible-app.sqlite");
+                path.is_file().then_some(path)
+            })
+            .expect("set BIBLE_APP_DB to an unpacked bible-app.sqlite");
+        let conn = open_reader(&path).unwrap();
+        let books = bible_app_db::books(&conn).unwrap();
+        let mut previous = None;
+        for query in ["Holy One", "holy one", "HOLY ONE"] {
+            let Plan::Ready(mut prepared) = plan(
+                query,
+                &books,
+                at(44, 2, 27),
+                MatchMode::ExactWord,
+                false,
+                SearchRange::All,
+                BookChip::AllBooks,
+                SearchScope::Kjv,
+            ) else {
+                panic!("expected a search");
+            };
+            prepared.db_path = path.clone();
+            let outcome = execute(&prepared, None, false);
+            let refs = references(&outcome);
+            assert!(refs.contains(&(5, 33, 8)), "{query}: {refs:?}");
+            assert!(refs.contains(&(44, 2, 27)), "{query}: {refs:?}");
+            assert!(outcome.total > 3);
+            assert_eq!(outcome.chosen_book, None);
+            if let Some(expected) = &previous {
+                assert_eq!(&refs, expected);
+            }
+            previous = Some(refs);
+        }
+        for (query, expected, excluded) in [
+            ("Holy One", (44, 2, 27), (5, 33, 8)),
+            ("holy one", (5, 33, 8), (44, 2, 27)),
+        ] {
+            let Plan::Ready(mut prepared) = plan(
+                query,
+                &books,
+                at(44, 2, 27),
+                MatchMode::ExactWord,
+                true,
+                SearchRange::All,
+                BookChip::AllBooks,
+                SearchScope::Kjv,
+            ) else {
+                panic!("expected a case-sensitive search");
+            };
+            prepared.db_path = path.clone();
+            let outcome = execute(&prepared, None, false);
+            let refs = references(&outcome);
+            assert!(refs.contains(&expected), "{query}: {refs:?}");
+            assert!(!refs.contains(&excluded), "{query}: {refs:?}");
+        }
+
+        for match_case in [false, true] {
+            let Plan::Ready(mut prepared) = plan(
+                "Holy One",
+                &books,
+                at(44, 2, 27),
+                MatchMode::ExactWord,
+                match_case,
+                SearchRange::All,
+                BookChip::AllBooks,
+                SearchScope::All,
+            ) else {
+                panic!("expected a whole-library search");
+            };
+            prepared.db_path = path.clone();
+            let mut cursor = None;
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                let page = execute(&prepared, cursor, cursor.is_some());
+                for hit in &page.hits {
+                    let key = format!(
+                        "{:?} {} {:?} {:?} {:?} {:?} {}",
+                        hit.kind,
+                        hit.module,
+                        hit.book,
+                        hit.chapter,
+                        hit.verse,
+                        hit.headword,
+                        hit.snippet
+                    );
+                    assert!(seen.insert(key.clone()), "repeated {key}");
+                }
+                if seen.len() as i64 == page.total {
+                    break;
+                }
+                assert!(
+                    !page.hits.is_empty(),
+                    "stopped at {} of {}",
+                    seen.len(),
+                    page.total
+                );
+                cursor = Some(page.next);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_ranges_and_book_chips_still_narrow_the_results() {
+        let fixture = SearchFixture::new();
+        for (range, chip, expected) in [
+            (
+                SearchRange::ThisBook,
+                BookChip::AllBooks,
+                vec![(44, 2, 27), (44, 3, 14), (44, 13, 35)],
+            ),
+            (
+                SearchRange::ThisChapter,
+                BookChip::AllBooks,
+                vec![(44, 2, 27)],
+            ),
+            (
+                SearchRange::Ot,
+                BookChip::AllBooks,
+                vec![(5, 33, 8), (23, 1, 4)],
+            ),
+            (
+                SearchRange::Nt,
+                BookChip::AllBooks,
+                vec![(44, 2, 27), (44, 3, 14), (44, 13, 35)],
+            ),
+            (SearchRange::All, BookChip::Book(5), vec![(5, 33, 8)]),
+        ] {
+            let outcome = fixture.search("Holy One", SearchScope::Kjv, range, chip);
+            assert_eq!(references(&outcome), expected, "{range:?}, {chip:?}");
+            assert_eq!(outcome.total, expected.len() as i64);
+        }
+        let selected = fixture.search(
+            "Holy One",
+            SearchScope::Kjv,
+            SearchRange::All,
+            BookChip::Book(44),
+        );
+        assert_eq!(selected.total, 3);
+        assert_eq!(selected.chosen_book, Some(44));
+        assert_eq!(selected.by_book.len(), 3);
+        let all = fixture.search(
+            "Holy One",
+            SearchScope::Kjv,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        assert_eq!(all.total, 5);
+        assert_eq!(all.chosen_book, None);
+
+        let slash = fixture.search(
+            "Deuteronomy/Holy One",
+            SearchScope::Kjv,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        assert_eq!(references(&slash), vec![(5, 33, 8)]);
+    }
+
+    #[test]
+    fn whole_bible_search_pages_continue_into_later_books() {
+        let fixture = SearchFixture::new();
+        let conn = Connection::open(&fixture.db_path).unwrap();
+        for verse in 1..=85 {
+            conn.execute(
+                "INSERT INTO verses (book, chapter, verse, text) VALUES (5, 1, ?1, 'holy one')",
+                [verse],
+            )
+            .unwrap();
+        }
+        bible_app_db::rebuild_verses_fts(&conn).unwrap();
+        drop(conn);
+
+        let prepared = fixture.prepare(
+            "Holy One",
+            at(44, 2, 27),
+            MatchMode::ExactWord,
+            SearchScope::Kjv,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        let first = execute(&prepared, None, false);
+        assert_eq!(first.hits.len(), PAGE);
+        assert_eq!(first.total, 90);
+        assert_eq!(first.chosen_book, None);
+        let second = execute(&prepared, Some(first.next), true);
+        assert!(second.append);
+        assert_eq!(second.total, 90);
+        assert_eq!(second.hits.len(), 10);
+        assert!(references(&second).contains(&(44, 2, 27)));
+
+        let lower = fixture.prepare_with_case(
+            "holy one",
+            at(44, 2, 27),
+            MatchMode::ExactWord,
+            true,
+            SearchScope::Kjv,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        let first = execute(&lower, None, false);
+        assert_eq!(first.hits.len(), PAGE);
+        assert_eq!(first.total, 86);
+        let second = execute(&lower, Some(first.next), true);
+        assert_eq!(second.hits.len(), 6);
+        assert_eq!(second.total, 86);
+        assert!(references(&second).contains(&(5, 33, 8)));
+        assert!(!references(&second).contains(&(44, 2, 27)));
+    }
+
+    #[test]
+    fn all_sources_and_individual_scopes_page_without_duplicates_or_gaps() {
+        use std::collections::HashSet;
+
+        let fixture = SearchFixture::new();
+        let conn = Connection::open(&fixture.db_path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO modules (id, kind, title, license) VALUES
+                ('TSK', 'commentary', 'TSK', 'public-domain'),
+                ('Smith', 'dictionary', 'Smith', 'public-domain');
+             BEGIN",
+        )
+        .unwrap();
+        for verse in 1..=85 {
+            conn.execute(
+                "INSERT INTO verses (book, chapter, verse, text) VALUES (5, 1, ?1, 'CasePage verse')",
+                [verse],
+            )
+            .unwrap();
+            for module in ["MHC", "TSK"] {
+                conn.execute(
+                    "INSERT INTO resources (module, book, chapter, verse, text)
+                     VALUES (?1, 5, 1, ?2, 'CasePage commentary')",
+                    rusqlite::params![module, verse],
+                )
+                .unwrap();
+            }
+            for module in ["Easton", "Smith", "Nave"] {
+                conn.execute(
+                    "INSERT INTO entries (module, i, headword, text)
+                     VALUES (?1, ?2, ?3, 'CasePage entry')",
+                    rusqlite::params![module, verse + 1000, format!("Entry {verse:03}")],
+                )
+                .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        bible_app_db::rebuild_verses_fts(&conn).unwrap();
+        bible_app_db::rebuild_resources_fts(&conn).unwrap();
+        bible_app_db::rebuild_entries_fts(&conn).unwrap();
+        drop(conn);
+        let user = crate::user_db::open(&fixture.user_path).unwrap();
+        user.execute_batch("BEGIN").unwrap();
+        for verse in 1..=85 {
+            crate::user_db::upsert_note(&user, at(5, 1, verse), "CasePage note").unwrap();
+        }
+        user.execute_batch("COMMIT").unwrap();
+        drop(user);
+
+        for (scope, total) in [
+            (SearchScope::All, 595),
+            (SearchScope::Kjv, 85),
+            (SearchScope::Commentary, 170),
+            (SearchScope::Dictionaries, 170),
+            (SearchScope::Topics, 85),
+            (SearchScope::Notes, 85),
+        ] {
+            for match_case in [false, true] {
+                let prepared = fixture.prepare_with_case(
+                    "CasePage",
+                    at(44, 2, 27),
+                    MatchMode::ExactWord,
+                    match_case,
+                    scope,
+                    SearchRange::All,
+                    BookChip::AllBooks,
+                );
+                let mut cursor = None;
+                let mut seen = HashSet::new();
+                while seen.len() < total {
+                    let page = execute(&prepared, cursor, cursor.is_some());
+                    assert_eq!(page.total, total as i64, "{scope:?}");
+                    assert!(!page.hits.is_empty(), "{scope:?} stopped at {}", seen.len());
+                    assert!(page.hits.len() <= PAGE);
+                    for hit in &page.hits {
+                        let key = format!(
+                            "{:?} {} {:?} {:?} {:?} {:?}",
+                            hit.kind, hit.module, hit.book, hit.chapter, hit.verse, hit.headword
+                        );
+                        assert!(seen.insert(key.clone()), "{scope:?} repeated {key}");
+                    }
+                    assert_ne!(cursor, Some(page.next), "{scope:?} cursor did not advance");
+                    cursor = Some(page.next);
+                }
+                assert_eq!(seen.len(), total, "{scope:?}");
+                assert!(
+                    execute(&prepared, cursor, true).hits.is_empty(),
+                    "{scope:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_scope_book_chip_counts_only_results_in_that_book() {
+        let fixture = SearchFixture::new();
+        let selected = fixture.search(
+            "Holy One",
+            SearchScope::All,
+            SearchRange::All,
+            BookChip::Book(44),
+        );
+        assert_eq!(selected.total, 5);
+        assert_eq!(selected.hits.len(), 5);
+        assert!(selected.hits.iter().all(|hit| hit.book == Some(44)));
+        assert!(!selected
+            .hits
+            .iter()
+            .any(|hit| { matches!(hit.kind, LibraryKind::Dictionary | LibraryKind::Topic) }));
+    }
+
+    #[test]
+    fn strongs_and_notes_search_across_books_until_a_chip_is_selected() {
+        let fixture = SearchFixture::new();
+        for (query, scope, all_refs, acts_refs) in [
+            (
+                "G40",
+                SearchScope::Kjv,
+                vec![(40, 4, 5), (44, 2, 27), (44, 3, 14)],
+                vec![(44, 2, 27), (44, 3, 14)],
+            ),
+            (
+                "Holy One",
+                SearchScope::Notes,
+                vec![(5, 33, 8), (44, 2, 27)],
+                vec![(44, 2, 27)],
+            ),
+        ] {
+            let all = fixture.search(query, scope, SearchRange::All, BookChip::AllBooks);
+            assert_eq!(references(&all), all_refs);
+            assert_eq!(all.total, all_refs.len() as i64);
+            assert_eq!(all.chosen_book, None);
+            let acts = fixture.search(query, scope, SearchRange::All, BookChip::Book(44));
+            assert_eq!(references(&acts), acts_refs);
+            assert_eq!(acts.total, acts_refs.len() as i64);
+            assert_eq!(acts.chosen_book, Some(44));
+            assert_eq!(acts.by_book.len(), 2);
+        }
+    }
+
+    #[test]
+    fn commentary_and_whole_library_search_do_not_narrow_to_the_open_book() {
+        let fixture = SearchFixture::new();
+        let comments = fixture.search(
+            "Holy One",
+            SearchScope::Commentary,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        assert_eq!(references(&comments), vec![(5, 33, 8), (44, 2, 27)]);
+        assert_eq!(comments.chosen_book, None);
+
+        let library = fixture.search(
+            "Holy One",
+            SearchScope::All,
+            SearchRange::All,
+            BookChip::AllBooks,
+        );
+        for kind in [
+            LibraryKind::Verse,
+            LibraryKind::Commentary,
+            LibraryKind::Note,
+        ] {
+            assert!(library
+                .hits
+                .iter()
+                .any(|hit| hit.kind == kind && hit.book == Some(5)));
+            assert!(library
+                .hits
+                .iter()
+                .any(|hit| hit.kind == kind && hit.book == Some(44)));
+        }
+        assert!(library
+            .hits
+            .iter()
+            .any(|hit| hit.kind == LibraryKind::Dictionary));
+        assert_eq!(library.chosen_book, None);
+    }
 
     fn books() -> Vec<Book> {
         vec![Book {
@@ -1344,13 +2131,26 @@ mod tests {
             chapter: 1,
             verse: 1,
         };
+        for query in ["john 3:16", "JOHN 3:16", "John 3:16"] {
+            assert!(
+                matches!(
+                    plan(
+                        query, &books, current, MatchMode::ExactWord, true,
+                        SearchRange::All, BookChip::AllBooks, SearchScope::Kjv,
+                    ),
+                    Plan::Goto(at) if (at.book, at.chapter, at.verse) == (43, 3, 16)
+                ),
+                "{query}"
+            );
+        }
         match plan(
             "John 3:16",
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::All,
-            BookChip::Auto,
+            BookChip::AllBooks,
             SearchScope::Kjv,
         ) {
             Plan::Goto(at) => assert_eq!((at.book, at.chapter, at.verse), (43, 3, 16)),
@@ -1361,8 +2161,9 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::All,
-            BookChip::Auto,
+            BookChip::AllBooks,
             SearchScope::Kjv,
         ) {
             Plan::Ready(p) => assert_eq!(p.compiled.strongs.as_deref(), Some("H430")),
@@ -1373,6 +2174,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::All,
             BookChip::AllBooks,
             SearchScope::Kjv,
@@ -1389,8 +2191,9 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::All,
-            BookChip::Auto,
+            BookChip::AllBooks,
             SearchScope::Kjv,
         ) {
             Plan::Ready(p) => {
@@ -1405,8 +2208,9 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::All,
-            BookChip::Auto,
+            BookChip::AllBooks,
             SearchScope::Kjv,
         ) {
             Plan::Ready(p) => {
@@ -1422,8 +2226,9 @@ mod tests {
                 &books,
                 current,
                 MatchMode::Phrase,
+                false,
                 SearchRange::All,
-                BookChip::Auto,
+                BookChip::AllBooks,
                 SearchScope::Kjv,
             ),
             Plan::Short
@@ -1436,7 +2241,8 @@ mod tests {
             emphasize(
                 "the only begotten Son",
                 &["begotten".into()],
-                WordMatch::Prefix
+                WordMatch::Prefix,
+                false
             ),
             "the only <b>begotten</b> Son"
         );
@@ -1444,7 +2250,8 @@ mod tests {
             emphasize(
                 "the heaven and the earth.",
                 &["eart".into()],
-                WordMatch::Prefix
+                WordMatch::Prefix,
+                false
             ),
             "the heaven and the <b>eart</b>h."
         );
@@ -1452,15 +2259,43 @@ mod tests {
             emphasize(
                 "the heaven and the earth.",
                 &["ear".into()],
-                WordMatch::Exact
+                WordMatch::Exact,
+                false
             ),
             "the heaven and the earth."
         );
         assert_eq!(
-            emphasize("hear thou in heaven", &["ear".into()], WordMatch::Prefix),
+            emphasize(
+                "hear thou in heaven",
+                &["ear".into()],
+                WordMatch::Prefix,
+                false
+            ),
             "h<b>ear</b> thou in heaven"
         );
-        assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix).contains("&lt;"));
+        assert!(emphasize("a < b & c", &["b".into()], WordMatch::Prefix, false).contains("&lt;"));
+    }
+
+    #[test]
+    fn emphasize_respects_match_case() {
+        let tokens = ["Holy".into()];
+        assert_eq!(
+            emphasize("holy Holy HOLY", &tokens, WordMatch::Exact, true),
+            "holy <b>Holy</b> HOLY"
+        );
+        assert_eq!(
+            emphasize("holy Holy HOLY", &tokens, WordMatch::Exact, false),
+            "<b>holy</b> <b>Holy</b> <b>HOLY</b>"
+        );
+        assert_eq!(
+            emphasize(
+                "Elohim Elōhim Elo\u{304}him elōhim",
+                &["Elohim".into()],
+                WordMatch::Exact,
+                true,
+            ),
+            "<b>Elohim</b> <b>Elōhim</b> <b>Elo\u{304}him</b> elōhim"
+        );
     }
 
     fn verse_hit(snippet: &str) -> LibraryHit {
@@ -1592,7 +2427,7 @@ mod tests {
     fn plain_hit_emphasizes_the_token() {
         let hit = ListedHit::plain(verse_hit("the only begotten Son"));
         assert_eq!(
-            hit.line_markup(&["begotten".into()], WordMatch::Prefix),
+            hit.line_markup(&["begotten".into()], WordMatch::Prefix, false),
             "the only <b>begotten</b> Son"
         );
     }
@@ -1605,7 +2440,7 @@ mod tests {
         let hit = ListedHit::strongs(verse_hit(verse), line);
         assert_eq!(hit.snippet, "sister, and a sister");
         assert_eq!(
-            hit.line_markup(&["sister".into()], WordMatch::Exact),
+            hit.line_markup(&["sister".into()], WordMatch::Exact, false),
             "sister, and <b>a sister</b>"
         );
     }
@@ -1616,7 +2451,7 @@ mod tests {
         let line = MarkedLine::from_verse(verse, &[]);
         let hit = ListedHit::strongs(verse_hit(verse), line);
         assert_eq!(
-            hit.line_markup(&["sister".into()], WordMatch::Exact),
+            hit.line_markup(&["sister".into()], WordMatch::Exact, false),
             "sister, and a sister"
         );
     }
@@ -1674,12 +2509,12 @@ mod tests {
     fn verse_rows_italicize_supplied_words_and_others_keep_brackets() {
         let mut verse = verse_hit("darkness [was] upon the deep");
         assert_eq!(
-            ListedHit::plain(verse.clone()).line_markup(&["deep".into()], WordMatch::Exact),
+            ListedHit::plain(verse.clone()).line_markup(&["deep".into()], WordMatch::Exact, false),
             "darkness <i>was</i> upon the <b>deep</b>"
         );
         verse.kind = LibraryKind::Commentary;
         assert_eq!(
-            ListedHit::plain(verse).line_markup(&["deep".into()], WordMatch::Exact),
+            ListedHit::plain(verse).line_markup(&["deep".into()], WordMatch::Exact, false),
             "darkness [was] upon the <b>deep</b>"
         );
     }
@@ -1727,6 +2562,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::ThisChapter,
             BookChip::AllBooks,
             SearchScope::Commentary,
@@ -1741,6 +2577,7 @@ mod tests {
             &books,
             current,
             MatchMode::Phrase,
+            false,
             SearchRange::ThisChapter,
             BookChip::AllBooks,
             SearchScope::Kjv,

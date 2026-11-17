@@ -72,6 +72,8 @@ pub struct App {
     error: Option<String>,
     /// Saved match mode, used when a search tab is opened.
     search_mode: MatchMode,
+    /// Saved case preference, used when a search tab is opened.
+    search_match_case: bool,
     search_mark: Option<SearchMark>,
     search_db_path: Option<PathBuf>,
     dict_modules: Vec<DictModule>,
@@ -112,6 +114,7 @@ struct SearchMark {
     tokens: Vec<String>,
     strongs: Option<String>,
     words: WordMatch,
+    match_case: bool,
 }
 
 impl SearchMark {
@@ -131,6 +134,7 @@ pub enum Msg {
     Search(TabId, String),
     SetSearchScope(TabId, SearchScope),
     SetSearchMode(TabId, MatchMode),
+    SetSearchMatchCase(TabId, bool),
     SetSearchRange(TabId, search::SearchRange),
     SelectSearchBook(TabId, Option<u8>),
     SearchReady(TabId, u64, search::Outcome),
@@ -320,8 +324,9 @@ impl SimpleComponent for App {
             );
         }
 
+        let state = config::load_state();
         let (conn, search_db_path, books, at, font_size, paragraphs, search_mode, error) =
-            match load_library() {
+            match load_library(&state) {
                 Ok((conn, path, books, at, font_size, paragraphs, mode)) => (
                     Some(conn),
                     Some(path),
@@ -513,11 +518,12 @@ impl SimpleComponent for App {
             books,
             error,
             search_mode,
+            search_match_case: state.search_match_case,
             search_mark: None,
             search_db_path,
             dict_modules,
             font_size,
-            column_width: loaded_column_width(),
+            column_width: loaded_column_width(state.column_width),
             paragraphs,
             font_provider,
             _theme_watch,
@@ -703,7 +709,7 @@ impl SimpleComponent for App {
                 }
                 if let Some(pane) = self.search_mut(id) {
                     pane.query = query;
-                    pane.chip = search::BookChip::Auto;
+                    pane.chip = search::BookChip::AllBooks;
                 }
                 self.schedule_search(id, false);
             }
@@ -712,7 +718,7 @@ impl SimpleComponent for App {
                 if changed {
                     if let Some(pane) = self.search_mut(id) {
                         pane.scope = scope;
-                        pane.chip = search::BookChip::Auto;
+                        pane.chip = search::BookChip::AllBooks;
                         pane.sync_placeholder();
                         pane.range_dd
                             .set_visible(search::SearchRange::applies(scope));
@@ -726,9 +732,23 @@ impl SimpleComponent for App {
                     if let Some(pane) = self.search_mut(id) {
                         pane.mode = mode;
                         pane.words = mode.word_match();
-                        pane.chip = search::BookChip::Auto;
+                        pane.chip = search::BookChip::AllBooks;
                     }
                     self.search_mode = mode;
+                    self.save_state();
+                    self.schedule_search(id, false);
+                }
+            }
+            Msg::SetSearchMatchCase(id, match_case) => {
+                let changed = self
+                    .search(id)
+                    .is_some_and(|pane| pane.match_case != match_case);
+                if changed {
+                    if let Some(pane) = self.search_mut(id) {
+                        pane.match_case = match_case;
+                        pane.chip = search::BookChip::AllBooks;
+                    }
+                    self.search_match_case = match_case;
                     self.save_state();
                     self.schedule_search(id, false);
                 }
@@ -738,7 +758,7 @@ impl SimpleComponent for App {
                 if changed {
                     if let Some(pane) = self.search_mut(id) {
                         pane.range = range;
-                        pane.chip = search::BookChip::Auto;
+                        pane.chip = search::BookChip::AllBooks;
                     }
                     self.schedule_search(id, false);
                 }
@@ -762,7 +782,7 @@ impl SimpleComponent for App {
                 let shown = pane
                     .hits
                     .iter()
-                    .filter(|hit| search::hit_ref(hit).is_some())
+                    .filter(|hit| hit.kind != LibraryKind::Lexicon)
                     .count() as i64;
                 if pane.query.trim().is_empty() || shown >= pane.total {
                     return;
@@ -1269,7 +1289,12 @@ impl App {
             }
             opened.id
         });
-        let mut pane = search::build_pane(self.search_mode, id, self.msg_tx.clone());
+        let mut pane = search::build_pane(
+            self.search_mode,
+            self.search_match_case,
+            id,
+            self.msg_tx.clone(),
+        );
         pane.origin = Some(at);
         self.wire_search(id, &pane);
         let root = pane.root.clone();
@@ -1371,6 +1396,10 @@ impl App {
             }
         });
         let tx = self.msg_tx.clone();
+        pane.case_check.connect_toggled(move |check| {
+            tx.emit(Msg::SetSearchMatchCase(id, check.is_active()));
+        });
+        let tx = self.msg_tx.clone();
         pane.range_dd.connect_selected_notify(move |dd| {
             let pos = dd.selected();
             if pos != gtk::INVALID_LIST_POSITION {
@@ -1442,7 +1471,7 @@ impl App {
 
     fn schedule_search(&mut self, id: TabId, append: bool) {
         let fallback = self.at();
-        let Some((next, query, origin, mode, range, chip, scope, gen_cell)) =
+        let Some((next, query, origin, mode, match_case, range, chip, scope, gen_cell)) =
             self.search_mut(id).map(|pane| {
                 let next = pane.gen.get().saturating_add(1);
                 pane.gen.set(next);
@@ -1451,6 +1480,7 @@ impl App {
                     pane.query.clone(),
                     pane.origin.unwrap_or(fallback),
                     pane.mode,
+                    pane.match_case,
                     pane.range,
                     pane.chip,
                     pane.scope,
@@ -1460,7 +1490,16 @@ impl App {
         else {
             return;
         };
-        let plan = search::plan(&query, &self.books, origin, mode, range, chip, scope);
+        let plan = search::plan(
+            &query,
+            &self.books,
+            origin,
+            mode,
+            match_case,
+            range,
+            chip,
+            scope,
+        );
         match plan {
             search::Plan::Idle => {
                 self.clear_search_results(id);
@@ -1495,13 +1534,8 @@ impl App {
             search::Plan::Ready(mut prepared) => {
                 prepared.db_path = self.search_db_path.clone().unwrap_or_default();
                 prepared.user_path = user_db::user_db_path();
-                let after = if append {
-                    self.search(id).and_then(|pane| {
-                        pane.hits.iter().rev().find_map(|hit| {
-                            let at = search::hit_ref(hit)?;
-                            Some((at.book, at.chapter, at.verse))
-                        })
-                    })
+                let cursor = if append {
+                    self.search(id).map(|pane| pane.cursor)
                 } else {
                     None
                 };
@@ -1512,7 +1546,7 @@ impl App {
                         return;
                     }
                     std::thread::spawn(move || {
-                        let outcome = search::execute(&prepared, after, append);
+                        let outcome = search::execute(&prepared, cursor, append);
                         glib::MainContext::default().invoke(move || {
                             tx.emit(Msg::SearchReady(id, gen, outcome));
                         });
@@ -1530,6 +1564,7 @@ impl App {
             pane.strongs = None;
             pane.counts.clear();
             pane.chosen = None;
+            pane.cursor = Default::default();
         }
         self.refill_hits(id, false);
         self.refill_chips(id);
@@ -1537,6 +1572,14 @@ impl App {
 
     fn apply_outcome(&mut self, id: TabId, outcome: search::Outcome) {
         let append = outcome.append;
+        let book_filter = self
+            .search(id)
+            .and_then(|pane| match pane.chip {
+                search::BookChip::Book(book) => Some(book),
+                search::BookChip::AllBooks => None,
+            })
+            .and_then(|book| self.books.iter().find(|b| b.id == book))
+            .map(|book| book.name.clone());
         let Some(pane) = self.search_mut(id) else {
             return;
         };
@@ -1548,6 +1591,7 @@ impl App {
             pane.chosen = outcome.chosen_book;
         }
         pane.total = outcome.total;
+        pane.cursor = outcome.next;
         pane.tokens = outcome.tokens;
         pane.strongs = outcome.strongs;
         let scope = pane.scope;
@@ -1559,10 +1603,14 @@ impl App {
         let shown = pane
             .hits
             .iter()
-            .filter(|hit| search::hit_ref(hit).is_some())
+            .filter(|hit| hit.kind != LibraryKind::Lexicon)
             .count();
         let total = pane.total;
-        pane.show_status(&search::status(&query, shown, total, scope));
+        let mut status = search::status(&query, shown, total, scope);
+        if let Some(book) = book_filter {
+            status.push_str(&format!(" · {book}"));
+        }
+        pane.show_status(&status);
         pane.sync_empty();
         let selected = if !append {
             pane.list.selected_row().map(|row| row.index())
@@ -1585,6 +1633,9 @@ impl App {
         let Some(code) = pane.strongs.clone() else {
             return;
         };
+        if pane.match_case && !code.starts_with(['G', 'H']) {
+            return;
+        }
         if pane.hits.iter().any(|hit| hit.kind == LibraryKind::Lexicon) {
             return;
         }
@@ -1639,28 +1690,21 @@ impl App {
             return;
         }
         let sender = self.msg_tx.clone();
-        if pane.chosen.is_some() {
-            let all = gtk::ToggleButton::with_label("All");
-            all.add_css_class("flat");
-            all.set_active(false);
-            let tx = sender.clone();
-            all.connect_clicked(move |btn| {
-                if btn.is_active() {
-                    tx.emit(Msg::SelectSearchBook(id, None));
-                }
-            });
-            pane.chips.append(&all);
-        }
-        let mut leader: Option<gtk::ToggleButton> = None;
+        let all = gtk::ToggleButton::with_label("All");
+        all.add_css_class("flat");
+        all.set_active(pane.chosen.is_none());
+        let tx = sender.clone();
+        all.connect_clicked(move |btn| {
+            if btn.is_active() {
+                tx.emit(Msg::SelectSearchBook(id, None));
+            }
+        });
+        pane.chips.append(&all);
         for count in &pane.counts {
             let button = gtk::ToggleButton::with_label(&search::chip_text(&self.books, count));
             button.add_css_class("flat");
+            button.set_group(Some(&all));
             button.set_active(Some(count.book) == pane.chosen);
-            if let Some(first) = &leader {
-                button.set_group(Some(first));
-            } else {
-                leader = Some(button.clone());
-            }
             let tx = sender.clone();
             let book = count.book;
             button.connect_clicked(move |btn| {
@@ -1707,6 +1751,7 @@ impl App {
                         &mark.tokens,
                         mark.strongs.as_deref(),
                         mark.words,
+                        mark.match_case,
                     );
                 }
             }
@@ -1735,6 +1780,7 @@ impl App {
                     .unwrap_or_default(),
                 self.search(id).and_then(|pane| pane.strongs.clone()),
                 self.search(id).map(|pane| pane.words).unwrap_or_default(),
+                self.search(id).is_some_and(|pane| pane.match_case),
             )
         });
         if dismiss {
@@ -1750,13 +1796,13 @@ impl App {
                     self.open_search_verse_beside(id, at);
                 } else if beside {
                     let dest = self.go_beside_in(window, at);
-                    let (tokens, strongs, words) = bits.unwrap_or_default();
-                    self.bind_search_mark(dest, at, tokens, strongs, words);
+                    let (tokens, strongs, words, match_case) = bits.unwrap_or_default();
+                    self.bind_search_mark(dest, at, tokens, strongs, words, match_case);
                     self.reload_passage(dest, true);
                 } else {
                     let dest = self.go_in(window, at, true);
-                    let (tokens, strongs, words) = bits.unwrap_or_default();
-                    self.bind_search_mark(dest, at, tokens, strongs, words);
+                    let (tokens, strongs, words, match_case) = bits.unwrap_or_default();
+                    self.bind_search_mark(dest, at, tokens, strongs, words, match_case);
                     self.reload_passage(dest, true);
                 }
             }
@@ -1771,8 +1817,8 @@ impl App {
                 } else {
                     self.go_in(window, at, true)
                 };
-                let (tokens, strongs, words) = bits.unwrap_or_default();
-                self.bind_search_mark(dest, at, tokens, strongs, words);
+                let (tokens, strongs, words, match_case) = bits.unwrap_or_default();
+                self.bind_search_mark(dest, at, tokens, strongs, words, match_case);
                 self.reload_passage(dest, true);
                 if hit.module == "TSK" {
                     let _ = self.ensure_tsk();
@@ -1869,7 +1915,8 @@ impl App {
             .search(search)
             .map(|pane| pane.words)
             .unwrap_or_default();
-        self.bind_search_mark(passage, at, tokens, strongs, words);
+        let match_case = self.search(search).is_some_and(|pane| pane.match_case);
+        self.bind_search_mark(passage, at, tokens, strongs, words, match_case);
     }
 
     fn bind_search_mark(
@@ -1879,6 +1926,7 @@ impl App {
         tokens: Vec<String>,
         strongs: Option<String>,
         words: WordMatch,
+        match_case: bool,
     ) {
         self.search_mark = Some(SearchMark {
             tab: passage,
@@ -1886,6 +1934,7 @@ impl App {
             tokens,
             strongs,
             words,
+            match_case,
         });
     }
 
@@ -2033,6 +2082,7 @@ impl App {
     fn save_state(&self) {
         let mut state = config::State::from_ref(self.at(), self.font_size, self.paragraphs);
         state.search_mode = self.search_mode.index();
+        state.search_match_case = self.search_match_case;
         state.column_width = self.column_width;
         config::save_state(&state);
     }
@@ -2530,6 +2580,7 @@ impl App {
                         &mark.tokens,
                         mark.strongs.as_deref(),
                         mark.words,
+                        mark.match_case,
                     );
                 }
             }
@@ -4125,8 +4176,7 @@ fn remember_study(
     }
 }
 
-fn loaded_column_width() -> i32 {
-    let width = config::load_state().column_width;
+fn loaded_column_width(width: i32) -> i32 {
     if width > 0 {
         layout::clamp_column_px(width)
     } else {
@@ -4145,7 +4195,7 @@ fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<us
         .collect()
 }
 
-fn load_library() -> Result<LoadedLibrary, String> {
+fn load_library(state: &config::State) -> Result<LoadedLibrary, String> {
     let path = config::locate_database()?;
     let conn = bible_app_db::open(&path)
         .map_err(|e| format!("Could not open {}:\n{e}", path.display()))?;
@@ -4153,11 +4203,10 @@ fn load_library() -> Result<LoadedLibrary, String> {
     if books.is_empty() {
         return Err("The database has no books.".into());
     }
-    let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
     let paragraphs = state.paragraphs;
     let search_mode = MatchMode::from_saved(state.search_mode, state.search_words);
-    let mut at = Ref::from(state);
+    let mut at = Ref::from(state.clone());
     if bible_app_db::chapter(&conn, at.book, at.chapter)
         .map(|v| v.is_empty())
         .unwrap_or(true)
@@ -4669,7 +4718,8 @@ mod tests {
         let id = workspace.open_search(crate::workspace::WindowId::MAIN).id;
         assert!(workspace.place_in_study_stack(id));
         let (tx, rx) = relm4::channel();
-        let pane = crate::search::build_pane(bible_app_db::MatchMode::Phrase, id, tx.clone());
+        let pane =
+            crate::search::build_pane(bible_app_db::MatchMode::Phrase, false, id, tx.clone());
         pane.entry.set_text("dream");
         pane.list.append(&gtk::Label::new(Some("Genesis 41:1")));
         let row = pane.list.row_at_index(0).unwrap();
