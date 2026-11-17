@@ -1,4 +1,4 @@
-use rusqlite::{params_from_iter, Connection, OptionalExtension};
+use rusqlite::{functions::FunctionFlags, params_from_iter, Connection, OptionalExtension};
 
 use crate::DbError;
 
@@ -170,12 +170,14 @@ impl WordMatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledQuery {
     pub fts: String,
-    /// `LIKE` fragment with `{c}` for the text column, when Prefix matches
-    /// any part of a word. Exact word and explicit operators keep FTS MATCH.
+    /// Substring predicate with `{c}` for the text column. Exact word and
+    /// explicit operators keep FTS MATCH.
     pub substring: Option<String>,
     pub tokens: Vec<String>,
     /// Set when the whole query is a Strong's code such as `H430`.
     pub strongs: Option<String>,
+    pub match_case: bool,
+    case_matcher: Option<CaseExpr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,15 +239,31 @@ pub fn match_query(input: &str) -> Option<String> {
 /// prefixes a shorter stem in Exact word. Apostrophes break tokens, so "God's"
 /// searches God.
 pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
+    compile_query_with_case(input, mode, false)
+}
+
+/// Compile a query, optionally preserving case in text and Strong's matches.
+pub fn compile_query_with_case(
+    input: &str,
+    mode: MatchMode,
+    match_case: bool,
+) -> Option<CompiledQuery> {
     let word_match = mode.word_match();
     let mode = mode.combine();
     let trimmed = input.trim();
     if let Some(code) = strongs_query(trimmed) {
+        let code = if match_case {
+            format!("{}{}", trimmed.chars().next()?, &code[1..])
+        } else {
+            code
+        };
         return Some(CompiledQuery {
             fts: String::new(),
             substring: None,
             tokens: Vec::new(),
             strongs: Some(code),
+            match_case,
+            case_matcher: None,
         });
     }
     let pieces = tokenize(trimmed);
@@ -262,7 +280,7 @@ pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
     } else {
         mode_fts(&pieces, mode, word_match)
     };
-    let fts = fts?;
+    let mut fts = fts?;
     let tokens: Vec<String> = pieces
         .iter()
         .filter_map(|p| match p {
@@ -271,7 +289,30 @@ pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
         })
         .collect();
     let substring = if word_match.partial() && !explicit {
-        substring_pred(&tokens, mode)
+        substring_pred(&tokens, mode, match_case)
+    } else {
+        None
+    };
+    let case_matcher = if match_case && substring.is_none() {
+        let matcher = case_expression(&pieces, mode, word_match, explicit)?;
+        // Case-insensitive FTS NOT could discard a valid case-sensitive match.
+        // An OR of all terms is a broad candidate set; the matcher applies the
+        // full expression before counts and pagination.
+        if explicit
+            && pieces
+                .iter()
+                .any(|p| matches!(p, Piece::Op(op) if op == "NOT"))
+        {
+            fts = pieces
+                .iter()
+                .filter_map(|p| match p {
+                    Piece::Word { text, prefix } => Some(word_fts(text, *prefix, word_match)),
+                    Piece::Op(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+        }
+        Some(matcher)
     } else {
         None
     };
@@ -280,6 +321,8 @@ pub fn compile_query(input: &str, mode: MatchMode) -> Option<CompiledQuery> {
         substring,
         tokens,
         strongs: None,
+        match_case,
+        case_matcher,
     })
 }
 
@@ -300,6 +343,7 @@ fn strongs_query(input: &str) -> Option<String> {
     Some(format!("{lang}{num}"))
 }
 
+#[derive(Debug, Clone)]
 enum Piece {
     Word { text: String, prefix: bool },
     Op(String),
@@ -393,7 +437,7 @@ fn word_fts(text: &str, prefix: bool, word_match: WordMatch) -> String {
     }
 }
 
-fn substring_pred(tokens: &[String], mode: MatchMode) -> Option<String> {
+fn substring_pred(tokens: &[String], mode: MatchMode, match_case: bool) -> Option<String> {
     if tokens.is_empty()
         || tokens
             .iter()
@@ -401,7 +445,13 @@ fn substring_pred(tokens: &[String], mode: MatchMode) -> Option<String> {
     {
         return None;
     }
-    let like = |t: &str| format!("{{c}} LIKE '%{t}%' COLLATE NOCASE");
+    let like = |t: &str| {
+        if match_case {
+            format!("instr({{c}}, '{t}') > 0")
+        } else {
+            format!("{{c}} LIKE '%{t}%' COLLATE NOCASE")
+        }
+    };
     Some(match mode {
         MatchMode::Phrase | MatchMode::ExactWord => like(&tokens.join(" ")),
         MatchMode::AllWords => tokens
@@ -420,21 +470,31 @@ fn substring_pred(tokens: &[String], mode: MatchMode) -> Option<String> {
     })
 }
 
-fn text_pred(compiled: &CompiledQuery, fts_table: &str, text_col: &str) -> String {
-    match &compiled.substring {
+pub fn text_pred(compiled: &CompiledQuery, fts_table: &str, text_col: &str) -> String {
+    let pred = match &compiled.substring {
         Some(sql) => sql.replace("{c}", text_col),
         None => format!("{fts_table} MATCH ?1"),
+    };
+    if compiled.case_matcher.is_some() {
+        format!("({pred}) AND search_match_case({text_col})")
+    } else {
+        pred
     }
 }
 
 fn entry_pred(compiled: &CompiledQuery) -> String {
-    match &compiled.substring {
+    let pred = match &compiled.substring {
         Some(sql) => {
             let text = sql.replace("{c}", "entries_fts.text");
             let head = sql.replace("{c}", "entries_fts.headword");
             format!("({text} OR {head})")
         }
         None => "entries_fts MATCH ?1".into(),
+    };
+    if compiled.case_matcher.is_some() {
+        format!("({pred}) AND search_match_case_entry(entries_fts.headword, entries_fts.text)")
+    } else {
+        pred
     }
 }
 
@@ -545,6 +605,161 @@ fn is_op(token: &str) -> bool {
         || token == "NOT"
         || token == "NEAR"
         || token.starts_with("NEAR/")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaseTerm {
+    text: String,
+    prefix: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaseExpr {
+    Term(CaseTerm),
+    Phrase(Vec<CaseTerm>),
+    And(Box<CaseExpr>, Box<CaseExpr>),
+    Or(Box<CaseExpr>, Box<CaseExpr>),
+    Not(Box<CaseExpr>, Box<CaseExpr>),
+}
+
+impl CaseExpr {
+    fn matches(&self, columns: &[&str]) -> bool {
+        let term_matches = |term: &CaseTerm, word: &str| {
+            if term.prefix {
+                word.starts_with(&term.text)
+            } else {
+                word == term.text
+            }
+        };
+        match self {
+            Self::Term(term) => columns.iter().any(|column| {
+                case_words(column)
+                    .iter()
+                    .any(|word| term_matches(term, word))
+            }),
+            Self::Phrase(phrase) => columns.iter().any(|column| {
+                case_words(column).windows(phrase.len()).any(|window| {
+                    phrase
+                        .iter()
+                        .zip(window)
+                        .all(|(term, word)| term_matches(term, word))
+                })
+            }),
+            Self::And(left, right) => left.matches(columns) && right.matches(columns),
+            Self::Or(left, right) => left.matches(columns) || right.matches(columns),
+            Self::Not(left, right) => left.matches(columns) && !right.matches(columns),
+        }
+    }
+}
+
+fn case_words(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn case_expression(
+    pieces: &[Piece],
+    mode: MatchMode,
+    word_match: WordMatch,
+    explicit: bool,
+) -> Option<CaseExpr> {
+    if explicit {
+        let fts = explicit_fts(pieces, word_match)?;
+        let tokens: Vec<&str> = fts.split_whitespace().collect();
+        let mut parser = CaseParser { tokens, pos: 0 };
+        let expr = parser.parse_or()?;
+        return (parser.pos == parser.tokens.len()).then_some(expr);
+    }
+    let terms: Vec<CaseTerm> = pieces
+        .iter()
+        .filter_map(|piece| match piece {
+            Piece::Word { text, prefix } => Some(CaseTerm {
+                text: text.clone(),
+                prefix: *prefix || (word_match.partial() && is_prefix_token(text)),
+            }),
+            Piece::Op(_) => None,
+        })
+        .collect();
+    if mode == MatchMode::Phrase && terms.len() > 1 && !terms.iter().any(|term| term.prefix) {
+        return Some(CaseExpr::Phrase(terms));
+    }
+    let mut terms = terms.into_iter().map(CaseExpr::Term);
+    let first = terms.next()?;
+    Some(terms.fold(first, |left, right| {
+        CaseExpr::And(Box::new(left), Box::new(right))
+    }))
+}
+
+struct CaseParser<'a> {
+    tokens: Vec<&'a str>,
+    pos: usize,
+}
+
+impl CaseParser<'_> {
+    fn take(&mut self, token: &str) -> bool {
+        if self.tokens.get(self.pos) == Some(&token) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_or(&mut self) -> Option<CaseExpr> {
+        let mut left = self.parse_and()?;
+        while self.take("OR") {
+            left = CaseExpr::Or(Box::new(left), Box::new(self.parse_and()?));
+        }
+        Some(left)
+    }
+
+    fn parse_and(&mut self) -> Option<CaseExpr> {
+        let mut left = self.parse_not()?;
+        while self.take("AND") {
+            left = CaseExpr::And(Box::new(left), Box::new(self.parse_not()?));
+        }
+        Some(left)
+    }
+
+    fn parse_not(&mut self) -> Option<CaseExpr> {
+        let mut left = self.parse_term()?;
+        while self.take("NOT") {
+            left = CaseExpr::Not(Box::new(left), Box::new(self.parse_term()?));
+        }
+        Some(left)
+    }
+
+    fn parse_term(&mut self) -> Option<CaseExpr> {
+        let token = *self.tokens.get(self.pos)?;
+        if is_op(token) {
+            return None;
+        }
+        self.pos += 1;
+        Some(CaseExpr::Term(CaseTerm {
+            text: token.trim_end_matches('*').to_string(),
+            prefix: token.ends_with('*'),
+        }))
+    }
+}
+
+/// Register per-query case checks on a connection before executing its SQL.
+pub fn register_case_matcher(conn: &Connection, compiled: &CompiledQuery) -> rusqlite::Result<()> {
+    let Some(matcher) = compiled.case_matcher.clone() else {
+        return Ok(());
+    };
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    let entry_matcher = matcher.clone();
+    conn.create_scalar_function("search_match_case", 1, flags, move |ctx| {
+        let text: String = ctx.get(0)?;
+        Ok(matcher.matches(&[&text]))
+    })?;
+    conn.create_scalar_function("search_match_case_entry", 2, flags, move |ctx| {
+        let headword: String = ctx.get(0)?;
+        let text: String = ctx.get(1)?;
+        Ok(entry_matcher.matches(&[&headword, &text]))
+    })?;
+    Ok(())
 }
 
 pub fn rebuild_verses_fts(conn: &Connection) -> Result<(), DbError> {
@@ -747,6 +962,7 @@ pub fn search_verse_page(
     after: Option<(u8, u8, u8)>,
     limit: usize,
 ) -> Result<LibraryPage, DbError> {
+    register_case_matcher(conn, compiled)?;
     if compiled.strongs.is_some() || compiled.fts.is_empty() {
         return Ok(LibraryPage {
             hits: Vec::new(),
@@ -923,18 +1139,35 @@ fn plain_line(text: &str) -> String {
 }
 
 pub fn window_snippet(text: &str, tokens: &[String], width: usize) -> String {
+    window_snippet_with_case(text, tokens, width, false)
+}
+
+fn window_snippet_with_case(
+    text: &str,
+    tokens: &[String],
+    width: usize,
+    match_case: bool,
+) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.is_empty() {
         return String::new();
     }
-    let lower = flat.to_lowercase();
+    let haystack = if match_case {
+        flat.clone()
+    } else {
+        flat.to_lowercase()
+    };
     let mut at = 0usize;
     for token in tokens {
-        let needle = token.to_lowercase();
+        let needle = if match_case {
+            token.clone()
+        } else {
+            token.to_lowercase()
+        };
         if needle.is_empty() {
             continue;
         }
-        if let Some(pos) = find_token(&lower, &needle) {
+        if let Some(pos) = find_token(&haystack, &needle) {
             at = pos;
             break;
         }
@@ -1016,6 +1249,7 @@ pub fn search_filtered(
     after: Option<(u8, u8, u8)>,
     limit: usize,
 ) -> Result<LibraryPage, DbError> {
+    register_case_matcher(conn, compiled)?;
     if compiled.strongs.is_some() || compiled.fts.is_empty() {
         return Ok(empty_page());
     }
@@ -1097,7 +1331,7 @@ fn commentary_hits(
     let limit = limit.max(1) as i64;
     let o = param_base(compiled);
     let pred = text_pred(compiled, "resources_fts", "resources_fts.text");
-    let snippet_col = if compiled.substring.is_some() {
+    let snippet_col = if compiled.substring.is_some() || compiled.match_case {
         "resources_fts.text"
     } else {
         "snippet(resources_fts, 0, '', '', '…', 16)"
@@ -1146,12 +1380,13 @@ fn commentary_hits(
         &limit,
     ];
     let tokens = compiled.tokens.clone();
-    let partial = compiled.substring.is_some();
+    let custom_snippet = compiled.substring.is_some() || compiled.match_case;
+    let match_case = compiled.match_case;
     let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest)), move |row| {
         let text: String = row.get(5)?;
         let snippet: String = row.get(6)?;
-        let snippet = if partial {
-            window_snippet(&text, &tokens, 80)
+        let snippet = if custom_snippet {
+            window_snippet_with_case(&text, &tokens, 80, match_case)
         } else {
             coalesce_snippet(snippet, &text)
         };
@@ -1251,7 +1486,7 @@ fn search_entry_kind(
     let exact = compiled.tokens.first().cloned().unwrap_or_default();
     let o = param_base(compiled);
     let pred = entry_pred(compiled);
-    let snippet_col = if compiled.substring.is_some() {
+    let snippet_col = if compiled.substring.is_some() || compiled.match_case {
         "entries_fts.text"
     } else {
         "snippet(entries_fts, 1, '', '', '…', 16)"
@@ -1288,14 +1523,15 @@ fn search_entry_kind(
     let mut stmt = conn.prepare(&sql)?;
     let rest: [&dyn rusqlite::ToSql; 3] = [&kind, &limit, &exact];
     let tokens = compiled.tokens.clone();
-    let partial = compiled.substring.is_some();
+    let custom_snippet = compiled.substring.is_some() || compiled.match_case;
+    let match_case = compiled.match_case;
     let rows = stmt.query_map(params_from_iter(bind_params(compiled, &rest)), move |row| {
         let headword: String = row.get(2)?;
         let text: String = row.get(3)?;
         let snippet: String = row.get(4)?;
         let fallback = if text.is_empty() { &headword } else { &text };
-        let snippet = if partial {
-            window_snippet(fallback, &tokens, 80)
+        let snippet = if custom_snippet {
+            window_snippet_with_case(fallback, &tokens, 80, match_case)
         } else {
             coalesce_snippet(snippet, fallback)
         };
@@ -1323,16 +1559,17 @@ fn search_all_page(
     let per = (limit / 4).max(5);
     let verses = search_verse_page(conn, compiled, filter, chip, None, per)?;
     let comments = search_commentary_page(conn, compiled, filter, chip, None, per)?;
-    let dicts = search_entry_kind(conn, compiled, "dictionary", per)?;
-    let topics = search_entry_kind(conn, compiled, "topic", per)?;
+    let dicts = search_entry_page(conn, compiled, "dictionary", per)?;
+    let topics = search_entry_page(conn, compiled, "topic", per)?;
+    let total = verses.total + comments.total + dicts.total + topics.total;
     let mut hits = verses.hits;
     hits.extend(comments.hits);
-    hits.extend(dicts);
-    hits.extend(topics);
+    hits.extend(dicts.hits);
+    hits.extend(topics.hits);
     hits.truncate(limit);
     Ok(LibraryPage {
         hits,
-        total: verses.total + comments.total,
+        total,
         by_book: verses.by_book,
     })
 }
@@ -1479,6 +1716,87 @@ mod tests {
         assert_eq!(MatchMode::ExactWord.label(), "Exact word");
         assert_eq!(MatchMode::Phrase.word_match(), WordMatch::Prefix);
         assert_eq!(MatchMode::ExactWord.word_match(), WordMatch::Exact);
+    }
+
+    #[test]
+    fn match_case_keeps_exact_boundaries_phrases_prefixes_and_operators() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO books (id, abbrev, name) VALUES (1, 'Ge', 'Genesis');
+            INSERT INTO verses (book, chapter, verse, text) VALUES
+                (1, 1, 1, 'holy one'),
+                (1, 1, 2, 'Holy One'),
+                (1, 1, 3, 'Holy [One]'),
+                (1, 1, 4, 'Holy one'),
+                (1, 1, 5, 'Holiness One');
+            "#,
+        )
+        .unwrap();
+        rebuild_verses_fts(&conn).unwrap();
+        let verses = |query: &str, mode: MatchMode, match_case: bool| {
+            let compiled = compile_query_with_case(query, mode, match_case).unwrap();
+            let page =
+                search_verse_page(&conn, &compiled, VerseFilter::all(), None, None, 20).unwrap();
+            page.hits
+                .into_iter()
+                .map(|hit| hit.verse.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(verses("Holy One", MatchMode::ExactWord, true), vec![2, 3]);
+        assert_eq!(verses("holy one", MatchMode::ExactWord, true), vec![1]);
+        assert_eq!(
+            verses("Holy One", MatchMode::ExactWord, false),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(verses("Hol*", MatchMode::ExactWord, true), vec![2, 3, 4, 5]);
+        assert_eq!(verses("Holy NOT One", MatchMode::ExactWord, true), vec![4]);
+        assert_eq!(
+            verses("Holy OR one", MatchMode::ExactWord, true),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn match_case_evaluates_entry_columns_without_joining_phrases() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO modules (id, kind, title, license)
+                VALUES ('Easton', 'dictionary', 'Easton', 'public-domain');
+            INSERT INTO entries (module, i, headword, text) VALUES
+                ('Easton', 0, 'Holy', 'One followed by holy one'),
+                ('Easton', 1, 'other', 'Holy One');
+            "#,
+        )
+        .unwrap();
+        rebuild_entries_fts(&conn).unwrap();
+        let phrase = compile_query_with_case("Holy One", MatchMode::ExactWord, true).unwrap();
+        let page = search_filtered(
+            &conn,
+            &phrase,
+            SearchScope::Dictionaries,
+            VerseFilter::all(),
+            None,
+            None,
+            20,
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.hits[0].headword.as_deref(), Some("other"));
+
+        let and = compile_query_with_case("Holy AND One", MatchMode::ExactWord, true).unwrap();
+        let page = search_filtered(
+            &conn,
+            &and,
+            SearchScope::Dictionaries,
+            VerseFilter::all(),
+            None,
+            None,
+            20,
+        )
+        .unwrap();
+        assert_eq!(page.total, 2);
     }
 
     #[test]

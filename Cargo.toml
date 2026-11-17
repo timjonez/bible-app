@@ -12,7 +12,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 thiserror = "2"
 relm4 = { version = "0.11", features = ["libadwaita", "gnome_47"] }
 serde = { version = "1", features = ["derive"] }
