@@ -30,37 +30,6 @@ pub fn parse_ref(input: &str, books: &[Book], current: Ref) -> Option<Ref> {
     })
 }
 
-/// Search can require the typed book name or abbreviation to preserve case.
-/// A numeric-only reference has no book name to compare.
-pub fn parse_search_ref(
-    input: &str,
-    books: &[Book],
-    current: Ref,
-    match_case: bool,
-) -> Option<Ref> {
-    let at = parse_ref(input, books, current)?;
-    if !match_case {
-        return Some(at);
-    }
-    let (book_part, _) = split_book_and_nums(input.trim());
-    if book_part.is_empty() {
-        return Some(at);
-    }
-    let query = normalize_case(book_part);
-    let book = books.iter().find(|book| book.id == at.book)?;
-    let matches_name = normalize_case(&book.name).starts_with(&query)
-        || normalize_case(&book.abbrev).starts_with(&query);
-    let matches_alias = ALIASES.iter().any(|(alias, name)| {
-        let canonical_alias = alias
-            .chars()
-            .enumerate()
-            .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
-            .collect::<String>();
-        canonical_alias == query && normalize(&book.name) == *name
-    });
-    (matches_name || matches_alias).then_some(at)
-}
-
 fn split_book_and_nums(input: &str) -> (&str, &str) {
     let bytes = input.as_bytes();
     let mut i = bytes.len();
@@ -146,12 +115,6 @@ fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_whitespace() && *c != '.')
         .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn normalize_case(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_whitespace() && *c != '.')
         .collect()
 }
 

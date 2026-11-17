@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 rusqlite.workspace = true
 thiserror.workspace = true
+unicode-normalization = "0.1"

@@ -851,6 +851,26 @@ fn token_spans(
         return Vec::new();
     }
     let slice: String = chars[start..end].iter().collect();
+    if match_case && word_match == WordMatch::Exact {
+        let mut spans = Vec::new();
+        for token in tokens {
+            for (lo, hi) in bible_app_db::case_match_ranges(&slice, token, true) {
+                let abs = (start + slice[..lo].chars().count()) as i32;
+                let abs_end = (start + slice[..hi].chars().count()) as i32;
+                let before = neighbor_char(&chars, abs as isize - 1, skip, false);
+                let after = neighbor_char(&chars, abs_end as isize, skip, true);
+                if before.is_none_or(|c| !c.is_ascii_alphanumeric())
+                    && after.is_none_or(|c| !c.is_ascii_alphanumeric())
+                {
+                    spans.push(layout::Span {
+                        start: abs,
+                        end: abs_end,
+                    });
+                }
+            }
+        }
+        return spans;
+    }
     let haystack = if match_case {
         slice.clone()
     } else {
@@ -983,5 +1003,16 @@ mod token_span_tests {
         assert_eq!(exact, vec![layout::Span { start: 5, end: 9 }]);
         let insensitive = token_spans(text, 0, 14, &tokens, WordMatch::Exact, false, &[]);
         assert_eq!(insensitive.len(), 3);
+        let text = "Elōhim elōhim";
+        let accented = token_spans(
+            text,
+            0,
+            text.chars().count() as i32,
+            &["Elohim".into()],
+            WordMatch::Exact,
+            true,
+            &[],
+        );
+        assert_eq!(accented, vec![layout::Span { start: 0, end: 6 }]);
     }
 }

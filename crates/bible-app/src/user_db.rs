@@ -351,6 +351,7 @@ pub fn search_notes(
     book_max: u8,
     book: Option<u8>,
     chapter: Option<u8>,
+    offset: usize,
     limit: usize,
 ) -> rusqlite::Result<NotePage> {
     if compiled.fts.trim().is_empty() && compiled.substring.is_none() {
@@ -406,7 +407,15 @@ pub fn search_notes(
     } else {
         by_book.iter().map(|(_, n)| *n).sum()
     };
-    let limit = limit.max(1) as i64;
+    if limit == 0 || offset as i64 >= total {
+        return Ok(NotePage {
+            hits: Vec::new(),
+            total,
+            by_book,
+        });
+    }
+    let limit = limit as i64;
+    let offset = offset as i64;
     let list_sql = format!(
         "
         SELECT book, chapter, verse, text
@@ -416,18 +425,19 @@ pub fn search_notes(
           AND (?{book} = 0 OR book = ?{book})
           AND (?{chapter} = 0 OR chapter = ?{chapter})
         ORDER BY book, chapter, verse
-        LIMIT ?{limit}
+        LIMIT ?{limit} OFFSET ?{offset}
         ",
         bmin = o + 1,
         bmax = o + 2,
         book = o + 3,
         chapter = o + 4,
         limit = o + 5,
+        offset = o + 6,
     );
     let mut stmt = conn.prepare(&list_sql)?;
     let rows = if compiled.substring.is_some() {
         stmt.query_map(
-            rusqlite::params![book_min_n, book_max_n, book_n, chapter_n, limit],
+            rusqlite::params![book_min_n, book_max_n, book_n, chapter_n, limit, offset],
             |row| {
                 Ok(NoteHit {
                     book: row.get(0)?,
@@ -440,7 +450,15 @@ pub fn search_notes(
         .collect::<Result<Vec<_>, _>>()?
     } else {
         stmt.query_map(
-            rusqlite::params![compiled.fts, book_min, book_max, book_n, chapter_n, limit],
+            rusqlite::params![
+                compiled.fts,
+                book_min,
+                book_max,
+                book_n,
+                chapter_n,
+                limit,
+                offset
+            ],
             |row| {
                 Ok(NoteHit {
                     book: row.get(0)?,
@@ -987,7 +1005,7 @@ mod tests {
         upsert_note(&user, at(1, 1, 1), "creation").unwrap();
         let query =
             bible_app_db::compile_query("everlasting", bible_app_db::MatchMode::ExactWord).unwrap();
-        let page = search_notes(&user, &query, 1, 66, None, None, 20).unwrap();
+        let page = search_notes(&user, &query, 1, 66, None, None, 0, 20).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.hits.len(), 1);
         assert_eq!(
@@ -996,7 +1014,7 @@ mod tests {
         );
         assert_eq!(page.by_book, vec![(43, 1)]);
         delete_note(&user, at(43, 3, 16)).unwrap();
-        let page = search_notes(&user, &query, 1, 66, None, None, 20).unwrap();
+        let page = search_notes(&user, &query, 1, 66, None, None, 0, 20).unwrap();
         assert_eq!(page.total, 0);
         assert!(page.hits.is_empty());
     }

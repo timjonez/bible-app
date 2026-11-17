@@ -324,8 +324,9 @@ impl SimpleComponent for App {
             );
         }
 
+        let state = config::load_state();
         let (conn, search_db_path, books, at, font_size, paragraphs, search_mode, error) =
-            match load_library() {
+            match load_library(&state) {
                 Ok((conn, path, books, at, font_size, paragraphs, mode)) => (
                     Some(conn),
                     Some(path),
@@ -517,12 +518,12 @@ impl SimpleComponent for App {
             books,
             error,
             search_mode,
-            search_match_case: config::load_state().search_match_case,
+            search_match_case: state.search_match_case,
             search_mark: None,
             search_db_path,
             dict_modules,
             font_size,
-            column_width: loaded_column_width(),
+            column_width: loaded_column_width(state.column_width),
             paragraphs,
             font_provider,
             _theme_watch,
@@ -1514,13 +1515,6 @@ impl App {
                     pane.sync_empty();
                 }
             }
-            search::Plan::NoMatch => {
-                self.clear_search_results(id);
-                if let Some(pane) = self.search(id) {
-                    pane.show_status(&search::status(&query, 0, 0, scope));
-                    pane.sync_empty();
-                }
-            }
             search::Plan::Goto(at) => {
                 let hit = search::ListedHit::plain(search::goto_hit(at, &self.books));
                 let label = format!("Go to {}", nav::format_ref(&self.books, at));
@@ -1540,13 +1534,8 @@ impl App {
             search::Plan::Ready(mut prepared) => {
                 prepared.db_path = self.search_db_path.clone().unwrap_or_default();
                 prepared.user_path = user_db::user_db_path();
-                let after = if append {
-                    self.search(id).and_then(|pane| {
-                        pane.hits.iter().rev().find_map(|hit| {
-                            let at = search::hit_ref(hit)?;
-                            Some((at.book, at.chapter, at.verse))
-                        })
-                    })
+                let cursor = if append {
+                    self.search(id).map(|pane| pane.cursor)
                 } else {
                     None
                 };
@@ -1557,7 +1546,7 @@ impl App {
                         return;
                     }
                     std::thread::spawn(move || {
-                        let outcome = search::execute(&prepared, after, append);
+                        let outcome = search::execute(&prepared, cursor, append);
                         glib::MainContext::default().invoke(move || {
                             tx.emit(Msg::SearchReady(id, gen, outcome));
                         });
@@ -1575,6 +1564,7 @@ impl App {
             pane.strongs = None;
             pane.counts.clear();
             pane.chosen = None;
+            pane.cursor = Default::default();
         }
         self.refill_hits(id, false);
         self.refill_chips(id);
@@ -1601,6 +1591,7 @@ impl App {
             pane.chosen = outcome.chosen_book;
         }
         pane.total = outcome.total;
+        pane.cursor = outcome.next;
         pane.tokens = outcome.tokens;
         pane.strongs = outcome.strongs;
         let scope = pane.scope;
@@ -4185,8 +4176,7 @@ fn remember_study(
     }
 }
 
-fn loaded_column_width() -> i32 {
-    let width = config::load_state().column_width;
+fn loaded_column_width(width: i32) -> i32 {
     if width > 0 {
         layout::clamp_column_px(width)
     } else {
@@ -4205,7 +4195,7 @@ fn strongs_counts(conn: &Connection, defs: &[bible_app_db::StrongDef]) -> Vec<us
         .collect()
 }
 
-fn load_library() -> Result<LoadedLibrary, String> {
+fn load_library(state: &config::State) -> Result<LoadedLibrary, String> {
     let path = config::locate_database()?;
     let conn = bible_app_db::open(&path)
         .map_err(|e| format!("Could not open {}:\n{e}", path.display()))?;
@@ -4213,11 +4203,10 @@ fn load_library() -> Result<LoadedLibrary, String> {
     if books.is_empty() {
         return Err("The database has no books.".into());
     }
-    let state = config::load_state();
     let font_size = state.font_size.clamp(layout::MIN_FONT, layout::MAX_FONT);
     let paragraphs = state.paragraphs;
     let search_mode = MatchMode::from_saved(state.search_mode, state.search_words);
-    let mut at = Ref::from(state);
+    let mut at = Ref::from(state.clone());
     if bible_app_db::chapter(&conn, at.book, at.chapter)
         .map(|v| v.is_empty())
         .unwrap_or(true)
