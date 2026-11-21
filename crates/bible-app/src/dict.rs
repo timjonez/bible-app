@@ -36,12 +36,23 @@ pub struct DictWidgets {
     pub query: String,
     /// `-1` when no entry is open.
     pub entry_i: Cell<i32>,
-    pub trail: RefCell<History<i32>>,
+    /// Entries opened in this view, across dictionaries.
+    pub trail: RefCell<Option<History<Place>>>,
+    /// End of the location bar. A lone guest puts its pane controls here.
+    pub bar_end: gtk::Box,
     books: Vec<Book>,
     see_kjv: gtk::Button,
     pub column: column::Column,
     occ_code: Rc<RefCell<String>>,
     syncing: Rc<Cell<bool>>,
+    /// Search text the app set, not the reader.
+    placed: Rc<RefCell<Option<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub module: String,
+    pub i: i32,
 }
 
 pub fn build(
@@ -103,8 +114,17 @@ pub fn build(
     });
     let send_q = sender.clone();
     let sync_search = syncing.clone();
+    let placed = Rc::new(RefCell::new(None::<String>));
+    let placed_search = placed.clone();
     search.connect_search_changed(move |entry| {
+        // A non-empty search-changed arrives after a delay, once `syncing`
+        // is cleared. Skip text the app placed, or opening an entry pops
+        // the suggestion list over it.
         if sync_search.get() {
+            return;
+        }
+        let placed = placed_search.borrow_mut().take();
+        if placed.as_deref() == Some(entry.text().as_str()) {
             return;
         }
         send_q.emit(super::app::Msg::DictSearch(id, entry.text().to_string()));
@@ -191,12 +211,14 @@ pub fn build(
         hits: Vec::new(),
         query: String::new(),
         entry_i: Cell::new(-1),
-        trail: RefCell::new(History::new(0)),
+        trail: RefCell::new(None),
+        bar_end: bar.end,
         books: books.to_vec(),
         see_kjv,
         column,
         occ_code,
         syncing,
+        placed,
     };
     sync_history(&widgets);
     widgets
@@ -228,8 +250,37 @@ pub fn sync_history(widgets: &DictWidgets) {
     let trail = widgets.trail.borrow();
     widgets.prev.set_sensitive(open);
     widgets.next.set_sensitive(open);
-    widgets.back.set_sensitive(open && trail.can_back());
-    widgets.forward.set_sensitive(open && trail.can_forward());
+    // From an empty page (after switching dictionaries), Back returns to
+    // the last entry read.
+    let (back, forward) = match trail.as_ref() {
+        Some(trail) if open => (trail.can_back(), trail.can_forward()),
+        Some(_) => (true, false),
+        None => (false, false),
+    };
+    widgets.back.set_sensitive(back);
+    widgets.forward.set_sensitive(forward);
+}
+
+fn place_search_text(widgets: &DictWidgets, text: &str) {
+    *widgets.placed.borrow_mut() = Some(text.to_string());
+    widgets.syncing.set(true);
+    widgets.search.set_text(text);
+    widgets.syncing.set(false);
+}
+
+fn record(widgets: &DictWidgets, i: i32) {
+    let Some(module) = current_module(widgets) else {
+        return;
+    };
+    let place = Place {
+        module: module.to_string(),
+        i,
+    };
+    let mut trail = widgets.trail.borrow_mut();
+    match trail.as_mut() {
+        Some(trail) => trail.navigate(place),
+        None => *trail = Some(History::new(place)),
+    }
 }
 
 pub fn load_modules(widgets: &mut DictWidgets, conn: &Connection) {
@@ -294,9 +345,7 @@ pub fn select_module(widgets: &mut DictWidgets, id: &str) {
     if changed {
         widgets.entry_i.set(-1);
     }
-    widgets.syncing.set(true);
-    widgets.search.set_text("");
-    widgets.syncing.set(false);
+    place_search_text(widgets, "");
     widgets.query.clear();
     widgets.hits.clear();
     refill_list(&widgets.list, &[]);
@@ -329,9 +378,7 @@ pub fn tab_title(widgets: &DictWidgets) -> String {
 pub fn open_headword(widgets: &mut DictWidgets, conn: &Connection, module: &str, headword: &str) {
     select_module(widgets, module);
     widgets.query = headword.to_string();
-    widgets.syncing.set(true);
-    widgets.search.set_text(headword);
-    widgets.syncing.set(false);
+    place_search_text(widgets, headword);
     search_hits(widgets, conn, false);
     let idx = widgets
         .hits
@@ -405,9 +452,7 @@ pub fn display(widgets: &DictWidgets, conn: &Connection, i: i32) -> Option<Strin
     };
     match loaded {
         Ok(Some((head, text))) => {
-            widgets.syncing.set(true);
-            widgets.search.set_text(&head);
-            widgets.syncing.set(false);
+            place_search_text(widgets, &head);
             paint_text(widgets, &format!("{head}\n\n{text}"));
             widgets.popover.popdown();
             widgets.entry_i.set(i);
@@ -456,16 +501,8 @@ pub fn display(widgets: &DictWidgets, conn: &Connection, i: i32) -> Option<Strin
 pub fn open_hit(widgets: &DictWidgets, conn: &Connection, idx: i32) -> Option<String> {
     let idx = usize::try_from(idx).ok()?;
     let i = widgets.hits.get(idx)?.i;
-    let was_empty = widgets.entry_i.get() < 0;
     let key = display(widgets, conn, i)?;
-    {
-        let mut trail = widgets.trail.borrow_mut();
-        if was_empty {
-            trail.restart(i);
-        } else {
-            trail.navigate(i);
-        }
-    }
+    record(widgets, i);
     sync_history(widgets);
     Some(key)
 }
@@ -482,26 +519,35 @@ pub fn step(widgets: &DictWidgets, conn: &Connection, forward: bool) -> Option<S
         bible_app_db::adjacent_entry(conn, &module, i, forward).ok()?
     }?;
     let key = display(widgets, conn, hit.i)?;
-    widgets.trail.borrow_mut().navigate(hit.i);
+    record(widgets, hit.i);
     sync_history(widgets);
     Some(key)
 }
 
-pub fn history_step(widgets: &DictWidgets, conn: &Connection, forward: bool) -> Option<String> {
-    if widgets.entry_i.get() < 0 {
-        return None;
-    }
-    let i = {
+/// Back or forward through the entries read here. Returns the dictionary
+/// and headword now showing.
+pub fn history_step(
+    widgets: &mut DictWidgets,
+    conn: &Connection,
+    forward: bool,
+) -> Option<(String, String)> {
+    let open = widgets.entry_i.get() >= 0;
+    let place = {
         let mut trail = widgets.trail.borrow_mut();
-        if forward {
-            trail.forward()?
-        } else {
-            trail.back()?
+        let trail = trail.as_mut()?;
+        match (open, forward) {
+            (false, false) => trail.current(),
+            (false, true) => return None,
+            (true, true) => trail.forward()?,
+            (true, false) => trail.back()?,
         }
     };
-    let key = display(widgets, conn, i);
+    if current_module(widgets) != Some(place.module.as_str()) {
+        select_module(widgets, &place.module);
+    }
+    let key = display(widgets, conn, place.i);
     sync_history(widgets);
-    key
+    Some((place.module, key?))
 }
 
 /// Keys while the suggestion list is open. The entry keeps the caret;

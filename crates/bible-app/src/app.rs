@@ -2504,6 +2504,7 @@ impl App {
                 dict::open_headword(widgets, conn, module, headword);
             }
         }
+        self.workspace.set_library_module(id, module.to_string());
         self.workspace
             .set_library_headword(id, Some(headword.to_string()));
         self.sync_tab_title(id);
@@ -3044,6 +3045,13 @@ impl App {
             move_widget(pin.upcast_ref(), &home);
         }
         let guests = self.workspace.guests_of(id);
+        // Pane controls a library bar held as a lone guest. Rebuilt below if
+        // it still is one.
+        for tab in std::iter::once(id).chain(guests.iter().copied()) {
+            if let Some(end) = self.library_bar_end(tab) {
+                clear_box(&end);
+            }
+        }
         let visible = self.workspace.guest_of(id);
         let guest_panes: Vec<(TabId, gtk::Widget, String)> = guests
             .iter()
@@ -3069,6 +3077,10 @@ impl App {
             .first()
             .map(|(guest, _, _)| self.guest_title(*guest))
             .unwrap_or_default();
+        let lone_bar_end = guest_panes
+            .first()
+            .filter(|_| lone)
+            .and_then(|(guest, _, _)| self.library_bar_end(*guest));
         if let Some(body) = &host_body {
             unparent(body);
         }
@@ -3099,7 +3111,7 @@ impl App {
                 paned.set_end_child(Some(&study_pane(
                     visible.or_else(|| guests.first().copied()),
                     &guest_panes,
-                    (&lone_title, header_pin.as_ref()),
+                    (&lone_title, header_pin.as_ref(), lone_bar_end.as_ref()),
                     &self.msg_tx,
                 )));
                 shell::mark_split_handle(&paned);
@@ -3514,6 +3526,13 @@ impl App {
             // go stale when that picker changes.
             Some(TabKind::Library { .. }) => "Library".into(),
             _ => self.tab_label(id),
+        }
+    }
+
+    fn library_bar_end(&self, id: TabId) -> Option<gtk::Box> {
+        match &self.hosted.get(&id)?.content {
+            TabContent::Library(w) => Some(w.bar_end.clone()),
+            _ => None,
         }
     }
 
@@ -4044,12 +4063,14 @@ impl App {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
-        let key = match self.hosted.get(&id).map(|hosted| &hosted.content) {
+        let shown = match self.hosted.get_mut(&id).map(|hosted| &mut hosted.content) {
             Some(TabContent::Library(widgets)) => dict::history_step(widgets, conn, forward),
             _ => None,
         };
-        if let Some(key) = key {
+        if let Some((module, key)) = shown {
+            self.workspace.set_library_module(id, module);
             self.workspace.set_library_headword(id, Some(key));
+            self.sync_tab_title(id);
         }
     }
 
@@ -4410,7 +4431,21 @@ fn split_close_button() -> gtk::Button {
     close
 }
 
+fn move_to_tab_button(id: TabId, tx: &relm4::Sender<Msg>) -> gtk::Button {
+    let move_to_tab = gtk::Button::from_icon_name("tab-new-symbolic");
+    move_to_tab.add_css_class("flat");
+    move_to_tab.set_valign(gtk::Align::Center);
+    move_to_tab.set_tooltip_text(Some("Move to tab"));
+    move_to_tab.update_property(&[gtk::accessible::Property::Label("Move to tab")]);
+    let send_move = tx.clone();
+    move_to_tab.connect_clicked(move |_| send_move.emit(Msg::MoveToTab(id)));
+    move_to_tab
+}
+
 /// One study view beside the chapter: a title row over its body.
+///
+/// With `bar_end`, the view's own location bar takes the pane controls and
+/// there is no title row, so the bar lines up with the chapter's.
 ///
 /// The body sits in an Overlay so `rescue_guest_widgets` and `unparent`
 /// release it the same way when the split is rebuilt.
@@ -4419,6 +4454,7 @@ fn guest_frame(
     title: &str,
     body: &gtk::Widget,
     extra: Option<&gtk::Widget>,
+    bar_end: Option<&gtk::Box>,
     tx: &relm4::Sender<Msg>,
 ) -> gtk::Box {
     let holder = gtk::Overlay::new();
@@ -4431,14 +4467,17 @@ fn guest_frame(
     let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
     frame.set_hexpand(true);
     frame.set_vexpand(true);
+    let move_to_tab = move_to_tab_button(id, tx);
+    if let Some(end) = bar_end {
+        clear_box(end);
+        close.set_margin_top(0);
+        close.set_margin_end(0);
+        end.append(&move_to_tab);
+        end.append(&close);
+        frame.append(&holder);
+        return frame;
+    }
     let header = shell::guest_header(title, &close);
-    let move_to_tab = gtk::Button::from_icon_name("tab-new-symbolic");
-    move_to_tab.add_css_class("flat");
-    move_to_tab.set_valign(gtk::Align::Center);
-    move_to_tab.set_tooltip_text(Some("Move to tab"));
-    move_to_tab.update_property(&[gtk::accessible::Property::Label("Move to tab")]);
-    let send_move = tx.clone();
-    move_to_tab.connect_clicked(move |_| send_move.emit(Msg::MoveToTab(id)));
     header.insert_child_after(&move_to_tab, close.prev_sibling().as_ref());
     if let Some(extra) = extra {
         if extra.parent().is_some() {
@@ -4452,18 +4491,24 @@ fn guest_frame(
     frame
 }
 
-/// `lone` is the title and header widget used when there is one guest.
+fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+/// `lone` is the title, header widget, and bar slot used when there is one guest.
 fn study_pane(
     visible: Option<TabId>,
     guests: &[(TabId, gtk::Widget, String)],
-    lone: (&str, Option<&gtk::Widget>),
+    lone: (&str, Option<&gtk::Widget>, Option<&gtk::Box>),
     tx: &relm4::Sender<Msg>,
 ) -> gtk::Widget {
     if guests.len() == 1 {
         let (id, body, _) = &guests[0];
         body.set_hexpand(true);
         body.set_vexpand(true);
-        return guest_frame(*id, lone.0, body, lone.1, tx).upcast();
+        return guest_frame(*id, lone.0, body, lone.1, lone.2, tx).upcast();
     }
     let stack = adw::ViewStack::new();
     stack.set_hexpand(true);
@@ -4724,7 +4769,7 @@ mod tests {
         pane.list.append(&gtk::Label::new(Some("Genesis 41:1")));
         let row = pane.list.row_at_index(0).unwrap();
         pane.list.select_row(Some(&row));
-        let frame = super::guest_frame(id, "Search", pane.root.upcast_ref(), None, &tx);
+        let frame = super::guest_frame(id, "Search", pane.root.upcast_ref(), None, None, &tx);
         let header = frame.first_child().unwrap();
         let button = header
             .last_child()
