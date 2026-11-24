@@ -1,6 +1,7 @@
 use crate::column;
 use crate::layout::{self, ChapterLayout};
 use crate::nav::{self, Ref};
+use crate::shell;
 use crate::user_db::{self, Bookmark, Note, VerseMarks};
 use crate::workspace::TabId;
 use adw::prelude::*;
@@ -50,13 +51,17 @@ pub struct NotesWidgets {
     sender: relm4::Sender<super::app::Msg>,
 }
 
-pub struct NoteDialog {
-    pub dialog: adw::Dialog,
+pub struct NotePaneWidgets {
+    pub root: gtk::Widget,
+    pub title: gtk::Label,
     pub editor: gtk::TextView,
     pub buffer: gtk::TextBuffer,
     pub delete: gtk::Button,
-    pub editing: Option<Ref>,
+    pub editing: Rc<Cell<Ref>>,
     pub syncing: Rc<Cell<bool>>,
+    /// End of the note header bar. A lone guest puts its pane controls here.
+    pub bar_end: gtk::Box,
+    pub column: column::Column,
 }
 
 pub fn install_tags(buffer: &gtk::TextBuffer) {
@@ -303,32 +308,67 @@ pub fn build_notes(
     }
 }
 
-pub fn build_note_dialog(sender: relm4::Sender<super::app::Msg>) -> NoteDialog {
-    let dialog = adw::Dialog::new();
-    dialog.set_content_width(520);
-    dialog.set_content_height(380);
+pub fn build_note_pane(
+    id: TabId,
+    at: Ref,
+    books: &[Book],
+    text: &str,
+    sender: relm4::Sender<super::app::Msg>,
+    column_px: i32,
+) -> NotePaneWidgets {
+    let editing = Rc::new(Cell::new(at));
 
-    let delete = gtk::Button::with_label("Delete");
-    delete.add_css_class("destructive-action");
-    delete.set_sensitive(false);
+    let title = gtk::Label::new(Some(&nav::format_ref(books, at)));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    let delete = gtk::Button::from_icon_name("user-trash-symbolic");
+    delete.add_css_class("flat");
+    delete.set_valign(gtk::Align::Center);
+    delete.set_tooltip_text(Some("Delete note"));
+    delete.update_property(&[gtk::accessible::Property::Label("Delete note")]);
+    delete.set_sensitive(!text.trim().is_empty());
     let send_del = sender.clone();
+    let editing_del = editing.clone();
     delete.connect_clicked(move |btn| {
+        let at = editing_del.get();
         confirm_delete_note(btn, {
             let send_del = send_del.clone();
-            move || send_del.emit(super::app::Msg::DeleteDialogNote)
+            move || send_del.emit(super::app::Msg::DeleteNote(at))
         });
     });
 
-    let header = adw::HeaderBar::new();
-    header.pack_start(&delete);
+    let bar_end = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    bar_end.set_valign(gtk::Align::Center);
+
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    header.add_css_class("guest-header");
+    // Same box as the location bar beside it (6px margins around a 34px
+    // control row), so the two rules under them line up.
+    header.set_margin_top(6);
+    header.set_margin_bottom(6);
+    header.set_size_request(-1, 34);
+    header.set_margin_start(16);
+    header.set_margin_end(6);
+    header.append(&title);
+    header.append(&delete);
+    header.append(&bar_end);
 
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    buffer.set_text(text);
+    let end = buffer.end_iter();
+    buffer.place_cursor(&end);
     let editor = note_editor(&buffer);
     editor.set_sensitive(true);
     let editor_scroll = gtk::ScrolledWindow::new();
     editor_scroll.set_hexpand(true);
     editor_scroll.set_vexpand(true);
+    editor_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     editor_scroll.set_child(Some(&editor));
+    let column = column::Column::new(&editor_scroll, &editor, column_px);
+    column.bind(sender.clone());
 
     let syncing = Rc::new(Cell::new(false));
     let send_save = sender;
@@ -337,21 +377,21 @@ pub fn build_note_dialog(sender: relm4::Sender<super::app::Msg>) -> NoteDialog {
         if sync_save.get() {
             return;
         }
-        send_save.emit(super::app::Msg::SaveDialogNote);
+        send_save.emit(super::app::Msg::SaveNote(id));
     });
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&editor_scroll));
-    dialog.set_child(Some(&toolbar));
+    let page = shell::bar_page(&header, &column.root);
 
-    NoteDialog {
-        dialog,
+    NotePaneWidgets {
+        root: page.upcast(),
+        title,
         editor,
         buffer,
         delete,
-        editing: None,
+        editing,
         syncing,
+        bar_end,
+        column,
     }
 }
 
@@ -359,8 +399,8 @@ pub fn editor_text(widgets: &NotesWidgets) -> String {
     buffer_text(&widgets.buffer)
 }
 
-pub fn dialog_text(dialog: &NoteDialog) -> String {
-    buffer_text(&dialog.buffer)
+pub fn note_pane_text(widgets: &NotePaneWidgets) -> String {
+    buffer_text(&widgets.buffer)
 }
 
 pub fn fill_bookmarks(widgets: &mut BookmarksWidgets, user: &Connection, books: &[Book]) {
@@ -450,29 +490,35 @@ pub fn clear_editor(widgets: &mut NotesWidgets) {
     widgets.actions.set_sensitive(false);
 }
 
-pub fn open_note_dialog(
-    dialog: &mut NoteDialog,
-    books: &[Book],
-    at: Ref,
-    text: &str,
-    parent: Option<&impl IsA<gtk::Widget>>,
-) {
-    dialog.syncing.set(true);
-    dialog.editing = Some(at);
-    dialog.buffer.set_text(text);
-    dialog.syncing.set(false);
-    dialog.dialog.set_title(&nav::format_ref(books, at));
-    dialog.delete.set_sensitive(!text.trim().is_empty());
-    dialog.dialog.set_focus(Some(&dialog.editor));
-    dialog.dialog.present(parent);
+pub fn show_note_pane(widgets: &NotePaneWidgets, books: &[Book], at: Ref, text: &str) {
+    widgets.syncing.set(true);
+    widgets.editing.set(at);
+    widgets.buffer.set_text(text);
+    let end = widgets.buffer.end_iter();
+    widgets.buffer.place_cursor(&end);
+    widgets.syncing.set(false);
+    widgets.title.set_label(&nav::format_ref(books, at));
+    widgets.delete.set_sensitive(!text.trim().is_empty());
 }
 
-pub fn clear_dialog(dialog: &mut NoteDialog) {
-    dialog.syncing.set(true);
-    dialog.editing = None;
-    dialog.buffer.set_text("");
-    dialog.syncing.set(false);
-    dialog.delete.set_sensitive(false);
+pub fn sync_note_pane_text(widgets: &NotePaneWidgets, text: &str) {
+    if buffer_text(&widgets.buffer) == text {
+        widgets.delete.set_sensitive(!text.trim().is_empty());
+        return;
+    }
+    widgets.syncing.set(true);
+    widgets.buffer.set_text(text);
+    widgets.syncing.set(false);
+    widgets.delete.set_sensitive(!text.trim().is_empty());
+}
+
+pub fn sync_notes_editor_text(widgets: &NotesWidgets, text: &str) {
+    if buffer_text(&widgets.buffer) == text {
+        return;
+    }
+    widgets.syncing.set(true);
+    widgets.buffer.set_text(text);
+    widgets.syncing.set(false);
 }
 
 fn note_editor(buffer: &gtk::TextBuffer) -> gtk::TextView {

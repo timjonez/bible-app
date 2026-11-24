@@ -51,6 +51,9 @@ pub enum TabKind {
     },
     Bookmarks,
     Notes,
+    Note {
+        at: Ref,
+    },
     Search,
     /// An empty tab with ways to open a passage or a study view.
     Blank,
@@ -71,6 +74,7 @@ impl TabKind {
                 | Self::Tsk { .. }
                 | Self::Library { .. }
                 | Self::Notes
+                | Self::Note { .. }
         )
     }
 
@@ -82,6 +86,10 @@ impl TabKind {
         matches!(self, Self::Tsk { .. })
     }
 
+    pub fn is_note(&self) -> bool {
+        matches!(self, Self::Note { .. })
+    }
+
     pub fn is_search(&self) -> bool {
         matches!(self, Self::Search)
     }
@@ -90,11 +98,15 @@ impl TabKind {
         matches!(self, Self::Blank)
     }
 
-    /// Search, Henry, Treasury, or library — views that share a split's right pane.
+    /// Search, Henry, Treasury, library, or a verse note — views that share a split's right pane.
     pub fn is_study_view(&self) -> bool {
         matches!(
             self,
-            Self::Mhc { .. } | Self::Tsk { .. } | Self::Library { .. } | Self::Search
+            Self::Mhc { .. }
+                | Self::Tsk { .. }
+                | Self::Library { .. }
+                | Self::Note { .. }
+                | Self::Search
         )
     }
 
@@ -107,7 +119,10 @@ impl TabKind {
 
     pub fn at(&self) -> Option<Ref> {
         match self {
-            Self::Passage { at } | Self::Mhc { at, .. } | Self::Tsk { at, .. } => Some(*at),
+            Self::Passage { at }
+            | Self::Mhc { at, .. }
+            | Self::Tsk { at, .. }
+            | Self::Note { at } => Some(*at),
             _ => None,
         }
     }
@@ -738,6 +753,20 @@ impl Workspace {
         let window = self.focused_window();
         let id = self.add_tab(TabKind::Notes, window);
         OpenResult { id, created: true }
+    }
+
+    pub fn open_note(&mut self, at: Ref) -> OpenResult {
+        let window = self.focused_window();
+        let id = self.add_tab(TabKind::Note { at }, window);
+        OpenResult { id, created: true }
+    }
+
+    pub fn set_note_at(&mut self, id: TabId, at: Ref) {
+        if let Some(tab) = self.tab_mut(id) {
+            if let TabKind::Note { at: slot } = &mut tab.kind {
+                *slot = at;
+            }
+        }
     }
 
     pub fn open_blank(&mut self, window: WindowId) -> OpenResult {
@@ -1624,6 +1653,8 @@ mod tests {
         assert!(shows_column_edges(&treasury, false, false));
         assert!(shows_column_edges(&library, false, false));
         assert!(shows_column_edges(&TabKind::Notes, false, false));
+        assert!(shows_column_edges(&TabKind::Note { at: r(1, 1, 1) }, false, false));
+        assert!(!shows_column_edges(&TabKind::Note { at: r(1, 1, 1) }, true, false));
         assert!(!shows_column_edges(&TabKind::Search, false, false));
         assert!(!shows_column_edges(&TabKind::Bookmarks, false, false));
         assert!(!shows_column_edges(&TabKind::Blank, false, false));
@@ -1649,5 +1680,24 @@ mod tests {
             TabKind::Library { headword, .. } => assert_eq!(headword.as_deref(), Some("grace")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn verse_note_opens_beside_passage_as_study_view() {
+        let mut ws = start();
+        let passage = ws.focused();
+        let note = ws.open_note(r(44, 15, 29)).id;
+        assert!(ws.place_in_study_stack(note));
+        assert_eq!(ws.tab(note).unwrap().host, Some(passage));
+        assert_eq!(ws.study_stack_host(WindowId::MAIN), Some(passage));
+        assert_eq!(ws.stack_guest_kind(passage, TabKind::is_note), Some(note));
+        assert_eq!(ws.tab(note).unwrap().kind.at(), Some(r(44, 15, 29)));
+
+        ws.set_note_at(note, r(44, 15, 30));
+        assert_eq!(ws.tab(note).unwrap().kind.at(), Some(r(44, 15, 30)));
+
+        assert_eq!(ws.move_to_tab(note), Some(passage));
+        assert!(ws.tab(note).unwrap().host.is_none());
+        assert!(!ws.is_split());
     }
 }

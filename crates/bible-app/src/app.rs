@@ -46,6 +46,7 @@ enum TabContent {
     Library(dict::DictWidgets),
     Bookmarks(marks::BookmarksWidgets),
     Notes(marks::NotesWidgets),
+    Note(marks::NotePaneWidgets),
     Search(search::Pane),
     Blank(launcher::BlankPage),
 }
@@ -57,6 +58,7 @@ fn reading_column(content: &TabContent) -> Option<&column::Column> {
         TabContent::Tsk(widgets) => Some(&widgets.column),
         TabContent::Library(widgets) => Some(&widgets.column),
         TabContent::Notes(widgets) => Some(&widgets.column),
+        TabContent::Note(widgets) => Some(&widgets.column),
         TabContent::Bookmarks(_) | TabContent::Search(_) | TabContent::Blank(_) => None,
     }
 }
@@ -103,7 +105,6 @@ pub struct App {
     actions: gio::SimpleActionGroup,
     msg_tx: relm4::Sender<Msg>,
     copy_offset: Rc<Cell<i32>>,
-    note_dialog: marks::NoteDialog,
 }
 
 #[derive(Clone, Debug)]
@@ -215,9 +216,7 @@ pub enum Msg {
     OpenNoteVerse(TabId, Ref),
     OpenNoteTab(TabId, Ref),
     SaveNote(TabId),
-    SaveDialogNote,
     DeleteNote(Ref),
-    DeleteDialogNote,
     OpenBookmarkTab(TabId, Ref),
     RemoveBookmark(Ref),
     ToggleBookmark,
@@ -542,7 +541,6 @@ impl SimpleComponent for App {
             actions: gio::SimpleActionGroup::new(),
             msg_tx: sender.input_sender().clone(),
             copy_offset,
-            note_dialog: marks::build_note_dialog(sender.input_sender().clone()),
         };
         model.apply_font();
         picker::install_css();
@@ -1038,39 +1036,22 @@ impl SimpleComponent for App {
             Msg::OpenNoteVerse(id, at) => self.open_note_verse(id, at),
             Msg::OpenNoteTab(id, at) => self.open_note_tab(id, at),
             Msg::SaveNote(id) => {
-                let Some(TabContent::Notes(widgets)) = self.hosted.get(&id).map(|h| &h.content)
-                else {
-                    return;
+                let saved = match self.hosted.get(&id).map(|h| &h.content) {
+                    Some(TabContent::Notes(widgets)) if !widgets.syncing.get() => {
+                        widgets.editing.get().map(|at| (at, marks::editor_text(widgets)))
+                    }
+                    Some(TabContent::Note(widgets)) if !widgets.syncing.get() => {
+                        let text = marks::note_pane_text(widgets);
+                        widgets.delete.set_sensitive(!text.trim().is_empty());
+                        Some((widgets.editing.get(), text))
+                    }
+                    _ => None,
                 };
-                if widgets.syncing.get() {
-                    return;
+                if let Some((at, text)) = saved {
+                    self.save_note_text(id, at, &text);
                 }
-                let Some(at) = widgets.editing.get() else {
-                    return;
-                };
-                let text = marks::editor_text(widgets);
-                self.save_note_text(at, &text);
-            }
-            Msg::SaveDialogNote => {
-                if self.note_dialog.syncing.get() {
-                    return;
-                }
-                let Some(at) = self.note_dialog.editing else {
-                    return;
-                };
-                let text = marks::dialog_text(&self.note_dialog);
-                self.save_note_text(at, &text);
-                self.note_dialog
-                    .delete
-                    .set_sensitive(!text.trim().is_empty());
             }
             Msg::DeleteNote(at) => self.delete_note_at(at),
-            Msg::DeleteDialogNote => {
-                let Some(at) = self.note_dialog.editing else {
-                    return;
-                };
-                self.delete_note_at(at);
-            }
             Msg::OpenBookmarkTab(id, at) => self.open_bookmark_tab(id, at),
             Msg::RemoveBookmark(at) => {
                 if let Some(user) = &self.user {
@@ -2847,6 +2828,7 @@ impl App {
             },
             TabKind::Bookmarks => "Bookmarks".into(),
             TabKind::Notes => "Notes".into(),
+            TabKind::Note { at } => format!("Note · {}", nav::format_ref(&self.books, *at)),
             TabKind::Search => "Search".into(),
             TabKind::Blank => "New".into(),
         })
@@ -3511,6 +3493,7 @@ impl App {
             },
             Some(TabKind::Bookmarks) => "Bookmarks".into(),
             Some(TabKind::Notes) => "Notes".into(),
+            Some(TabKind::Note { .. }) => "Note".into(),
             Some(TabKind::Search) => "Search".into(),
             Some(TabKind::Blank) => "New".into(),
             None => String::new(),
@@ -3532,6 +3515,7 @@ impl App {
     fn library_bar_end(&self, id: TabId) -> Option<gtk::Box> {
         match &self.hosted.get(&id)?.content {
             TabContent::Library(w) => Some(w.bar_end.clone()),
+            TabContent::Note(w) => Some(w.bar_end.clone()),
             _ => None,
         }
     }
@@ -3712,38 +3696,75 @@ impl App {
         if self.error.is_some() || self.user.is_none() {
             return;
         }
+        let window = self.window_of(self.workspace.focused());
         let at = self.at();
         let text = self
             .user
             .as_ref()
             .and_then(|u| user_db::get_note(u, at).ok().flatten())
             .unwrap_or_default();
-        let parent = self.note_dialog_parent();
-        marks::open_note_dialog(
-            &mut self.note_dialog,
-            &self.books,
+        if self.open_beside {
+            if let Some(id) = self.reuse_stack_guest(window, TabKind::is_note) {
+                self.workspace.set_note_at(id, at);
+                if let Some(TabContent::Note(widgets)) =
+                    self.hosted.get(&id).map(|h| &h.content)
+                {
+                    marks::show_note_pane(widgets, &self.books, at, &text);
+                }
+                self.sync_tab_title(id);
+                self.focus_note_pane(id);
+                return;
+            }
+        }
+        let opened = self.workspace.open_note(at);
+        if self.open_beside {
+            let _ = self.place_study_beside(opened.id);
+        }
+        let widgets = marks::build_note_pane(
+            opened.id,
             at,
+            &self.books,
             &text,
-            parent.as_ref(),
+            self.msg_tx.clone(),
+            self.effective_column_px(),
         );
+        let root = widgets.root.clone();
+        let title = format!("Note · {}", nav::format_ref(&self.books, at));
+        self.add_page(opened.id, &root, &title, TabContent::Note(widgets));
+        self.focus_note_pane(opened.id);
     }
 
-    fn note_dialog_parent(&self) -> Option<gtk::Widget> {
-        self.focused_passage()
-            .and_then(|p| p.view.root())
-            .map(|root| root.upcast::<gtk::Widget>())
-            .or_else(|| {
-                self.shell
-                    .as_ref()
-                    .map(|s| s.host.view.clone().upcast::<gtk::Widget>())
-            })
+    fn focus_note_pane(&self, id: TabId) {
+        let Some(TabContent::Note(widgets)) = self.hosted.get(&id).map(|h| &h.content) else {
+            return;
+        };
+        let editor = widgets.editor.clone();
+        glib::timeout_add_local_once(Duration::from_millis(50), move || {
+            if editor.parent().is_some() {
+                editor.grab_focus();
+            }
+        });
     }
 
-    fn save_note_text(&mut self, at: Ref, text: &str) {
+    fn save_note_text(&mut self, source: TabId, at: Ref, text: &str) {
         let was_present = self.note_is_listed(at);
         let now_present = !text.trim().is_empty();
         if let Some(user) = &self.user {
             let _ = user_db::upsert_note(user, at, text);
+        }
+        for (&id, hosted) in &self.hosted {
+            if id == source {
+                continue;
+            }
+            match &hosted.content {
+                TabContent::Note(w) if w.editing.get() == at => {
+                    marks::sync_note_pane_text(w, text);
+                }
+                TabContent::Notes(w) if w.editing.get() == Some(at) => {
+                    marks::sync_notes_editor_text(w, text);
+                }
+                _ => {}
+            }
         }
         self.reload_user_marks(was_present != now_present);
     }
@@ -3759,9 +3780,16 @@ impl App {
         if let Some(user) = &self.user {
             let _ = user_db::delete_note(user, at);
         }
-        if self.note_dialog.editing == Some(at) {
-            marks::clear_dialog(&mut self.note_dialog);
-            let _ = self.note_dialog.dialog.close();
+        let note_panes: Vec<TabId> = self
+            .hosted
+            .iter()
+            .filter_map(|(id, h)| match &h.content {
+                TabContent::Note(w) if w.editing.get() == at => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in note_panes {
+            self.request_close(id);
         }
         let ids: Vec<TabId> = self
             .hosted
