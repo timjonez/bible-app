@@ -1206,12 +1206,32 @@ impl App {
             self.popdown_goto(window);
             return;
         }
+        if self.close_visible_callouts(window) {
+            return;
+        }
         let Some(id) = self.workspace.focused_in(window) else {
             return;
         };
         if self.workspace.tab(id).is_some_and(|t| t.kind.is_search()) {
             self.request_close(id);
         }
+    }
+
+    fn close_visible_callouts(&self, window: WindowId) -> bool {
+        let mut closed = false;
+        for (&id, hosted) in &self.hosted {
+            if self.window_of(id) != window {
+                continue;
+            }
+            if let TabContent::Passage(p) = &hosted.content {
+                if p.callout.is_visible_in_window() {
+                    p.callout.close();
+                    p.view.grab_focus();
+                    closed = true;
+                }
+            }
+        }
+        closed
     }
 
     fn goto_open(&self, window: WindowId) -> bool {
@@ -2072,6 +2092,11 @@ impl App {
         self.font_provider
             .load_from_string(&layout::reading_css(self.font_size));
         self.apply_column();
+        for hosted in self.hosted.values() {
+            if let TabContent::Passage(passage) = &hosted.content {
+                passage.callout.refresh();
+            }
+        }
     }
 
     fn effective_column_px(&self) -> i32 {
@@ -2120,7 +2145,10 @@ impl App {
     fn recolor_passages(&self) {
         for hosted in self.hosted.values() {
             match &hosted.content {
-                TabContent::Passage(passage) => theme::paint_buffer(&passage.buffer),
+                TabContent::Passage(passage) => {
+                    theme::paint_buffer(&passage.buffer);
+                    passage.callout.redraw();
+                }
                 TabContent::Tsk(widgets) => theme::paint_buffer(&widgets.buffer),
                 TabContent::Mhc(widgets) => theme::paint_buffer(&widgets.buffer),
                 TabContent::Library(widgets) => theme::paint_buffer(&widgets.buffer),
@@ -2162,40 +2190,38 @@ impl App {
     fn handle_click(&mut self, id: TabId, offset: i32) {
         let tsk_hit = self.passage(id).and_then(|p| {
             p.tsk_at(offset)
-                .map(|m| (m.span.start, m.heading.clone(), m.dests.clone()))
+                .map(|m| (m.span, m.heading.clone(), m.dests.clone()))
         });
-        if let Some((start, heading, dests)) = tsk_hit {
+        if let Some((span, heading, dests)) = tsk_hit {
             let dests = tsk::phrase_dests(&dests, &self.books, self.conn.as_ref());
             if let Some(p) = self.passage(id) {
-                p.strongs_popover.popdown();
-                tsk::present_phrase(
-                    &p.tsk_popover,
-                    &p.view,
-                    start,
-                    &heading,
-                    &dests,
-                    self.msg_tx.clone(),
-                );
+                let content = tsk::build_phrase_content(&heading, &dests, self.msg_tx.clone());
+                p.callout
+                    .present(span, "Treasury of Scripture Knowledge", content);
             }
             return;
         }
         if let Some(at) = self.passage(id).and_then(|p| p.xref_at(offset)) {
+            if let Some(p) = self.passage(id) {
+                p.callout.close();
+            }
             self.apply_passage_ref(id, at, true, true);
             return;
         }
         if let Some(verse) = self.passage(id).and_then(|p| p.verse_num_at(offset)) {
             if let Some(p) = self.passage(id) {
-                p.strongs_popover.popdown();
+                p.callout.close();
             }
             self.select_verse(id, verse);
             return;
         }
         let note = self
             .passage(id)
-            .and_then(|p| p.note_at(offset).map(|n| (n.span.start, n.text.clone())));
-        if let Some((start, text)) = note {
+            .and_then(|p| p.note_at(offset).map(|n| (n.span, n.text.clone())));
+        if let Some((span, text)) = note {
             if let Some(p) = self.passage(id) {
-                strongs::present_text(&p.strongs_popover, &p.view, start, &text);
+                let content = strongs::build_note_content(&text);
+                p.callout.present(span, "Translator Note", content);
             }
             return;
         }
@@ -2217,7 +2243,7 @@ impl App {
             .and_then(|p| layout::verse_at_offset(&p.layout.verse_start, offset))
         {
             if let Some(p) = self.passage(id) {
-                p.strongs_popover.popdown();
+                p.callout.close();
             }
             self.select_verse(id, verse);
         }
@@ -2430,23 +2456,25 @@ impl App {
         let mut dict = bible_app_db::lookup_clicked_word(conn, &surface).unwrap_or_default();
         dict.lexicons = bible_app_db::lookup_lexicons_for_defs(conn, &defs).unwrap_or_default();
         if defs.is_empty() && dict.is_empty() {
+            if let Some(p) = self.passage(id) {
+                p.callout.close();
+            }
             return;
         }
         let tx = self.msg_tx.clone();
         let books = self.books.clone();
         if let Some(TabContent::Passage(p)) = self.hosted.get_mut(&id).map(|h| &mut h.content) {
-            p.strongs_at = word.span.start;
-            p.tsk_popover.popdown();
-            strongs::present(
-                &p.strongs_popover,
-                &p.view,
-                p.strongs_at,
-                &defs,
-                &counts,
-                &dict,
-                &books,
-                tx,
-            );
+            let Some(content) = strongs::build_content(&defs, &counts, &dict, &books, tx) else {
+                p.callout.close();
+                return;
+            };
+            let label = p.span_label(word.span);
+            let title = if label.is_empty() {
+                "Word Lookup".to_string()
+            } else {
+                format!("“{label}”")
+            };
+            p.callout.present(word.span, &title, content);
         }
     }
 
@@ -3814,8 +3842,7 @@ impl App {
         self.focus_tab(id);
         if let Some(p) = self.passage_mut(id) {
             p.capture_menu_sel();
-            p.tsk_popover.popdown();
-            p.strongs_popover.popdown();
+            p.callout.close();
         }
         if let Some(verse) = self
             .passage(id)

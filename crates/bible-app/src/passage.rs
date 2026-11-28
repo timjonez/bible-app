@@ -1,3 +1,4 @@
+use crate::callout;
 use crate::column;
 use crate::history::History;
 use crate::layout::{self, ChapterLayout};
@@ -6,7 +7,6 @@ use crate::nav::Ref;
 use crate::picker;
 use crate::strongs;
 use crate::theme;
-use crate::tsk;
 use crate::user_db;
 use crate::workspace::TabId;
 use adw::prelude::*;
@@ -45,13 +45,11 @@ pub struct PassageView {
     /// Strong's-tagged words, for the hover cue.
     hover_words: Rc<RefCell<Vec<layout::WordSpan>>>,
     hovered_word: Rc<Cell<Option<layout::Span>>>,
-    pub strongs_popover: gtk::Popover,
-    pub tsk_popover: gtk::Popover,
+    pub callout: callout::Callout,
     pub verse_menu: gtk::PopoverMenu,
     /// Centered measure and the edge handles.
     pub column: column::Column,
     pub chapter_marks: HashMap<u8, user_db::VerseMarks>,
-    pub strongs_at: i32,
     /// Buffer selection captured when the verse menu opens (copy and highlight).
     pub menu_sel: Option<(i32, i32)>,
 }
@@ -83,23 +81,18 @@ impl PassageView {
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_child(Some(&view));
         let column = column::Column::new(&scroll, &view, column_px);
+        let callout = callout::Callout::new(&column.root, &scroll, &view);
 
         let bar = passage_bar();
-        let page = crate::shell::bar_page(&bar.row, &column.root);
+        let page = crate::shell::bar_page(&bar.row, &callout.root);
 
-        let strongs_popover = strongs::create(&view);
-        let tsk_popover = tsk::create_popover(&view);
         let verse_menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
         verse_menu.set_parent(&view);
         verse_menu.set_has_arrow(false);
         verse_menu.set_halign(gtk::Align::Start);
         verse_menu.insert_action_group("win", Some(actions));
-        let strongs_on_destroy = strongs_popover.clone();
-        let tsk_on_destroy = tsk_popover.clone();
         let verse_on_destroy = verse_menu.clone();
         view.connect_destroy(move |_| {
-            strongs_on_destroy.unparent();
-            tsk_on_destroy.unparent();
             verse_on_destroy.unparent();
         });
 
@@ -120,12 +113,10 @@ impl PassageView {
             xref_tips: Rc::new(RefCell::new(Vec::new())),
             hover_words: Rc::new(RefCell::new(Vec::new())),
             hovered_word: Rc::new(Cell::new(None)),
-            strongs_popover,
-            tsk_popover,
+            callout,
             verse_menu,
             column,
             chapter_marks: HashMap::new(),
-            strongs_at: 0,
             menu_sel: None,
         }
     }
@@ -159,7 +150,11 @@ impl PassageView {
         click.set_button(1);
         let view = self.view.clone();
         let click_sender = sender.clone();
+        let click_callout = self.callout.clone();
         click.connect_released(move |_, _, x, y| {
+            if view.buffer().has_selection() {
+                return;
+            }
             let (bx, by) =
                 view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
             if let Some(iter) = view.iter_at_location(bx, by) {
@@ -167,6 +162,8 @@ impl PassageView {
                     id,
                     offset: iter.offset(),
                 });
+            } else {
+                click_callout.close();
             }
         });
         self.view.add_controller(click);
@@ -278,6 +275,7 @@ impl PassageView {
         // Offsets belong to the old buffer. Clear them before replacing it,
         // even if the next chapter has a word at exactly the same offsets.
         show_word_hover(&self.buffer, &self.hovered_word, None);
+        self.callout.close();
         self.view.set_cursor(None);
         let verses = match bible_app_db::chapter(ctx.conn, self.at.book, self.at.chapter) {
             Ok(verses) if !verses.is_empty() => verses,
@@ -327,8 +325,7 @@ impl PassageView {
             },
         );
         *self.hover_words.borrow_mut() = self.layout.words.clone();
-        self.strongs_popover.popdown();
-        self.tsk_popover.popdown();
+        self.callout.close();
         self.apply_layout_tags();
         self.chapter_marks = ctx
             .user
@@ -591,9 +588,14 @@ impl PassageView {
     }
 
     pub fn popdown(&self) {
-        self.strongs_popover.popdown();
-        self.tsk_popover.popdown();
+        self.callout.close();
         self.verse_menu.popdown();
+    }
+
+    /// Clean passage wording for `span`, stripping inline superscripts and edge punctuation.
+    pub fn span_label(&self, span: layout::Span) -> String {
+        let skip = mark_spans(&self.layout);
+        clean_span_label(&self.layout.text, span, &skip)
     }
 }
 
@@ -761,9 +763,66 @@ mod hover_widget_tests {
         let tag = passage.buffer.tag_table().lookup(WORD_HOVER_TAG).unwrap();
         assert!(passage.buffer.start_iter().has_tag(&tag));
     }
+
+    #[test]
+    #[ignore = "requires a GTK display; run separately with a Broadway or desktop display"]
+    fn callout_highlights_open_word_moves_and_clears_on_close_or_reload() {
+        adw::init().expect("GTK display");
+        let at = Ref {
+            book: 1,
+            chapter: 1,
+            verse: 1,
+        };
+        let mut passage = PassageView::new(at, &gio::SimpleActionGroup::new(), 640);
+        passage
+            .buffer
+            .set_text("neither robbers of churches, nor yet");
+        let span = layout::Span { start: 8, end: 27 };
+        let body = gtk::Label::new(Some("G2417 hierosulos"));
+
+        passage.callout.present(span, "“robbers of churches”", body);
+        assert!(passage.callout.is_open());
+        assert_eq!(passage.callout.active_span(), Some(span));
+
+        let open_tag = passage.buffer.tag_table().lookup(WORD_OPEN_TAG).unwrap();
+        assert!(passage.buffer.iter_at_offset(8).has_tag(&open_tag));
+        assert!(passage.buffer.iter_at_offset(26).has_tag(&open_tag));
+        assert!(!passage.buffer.iter_at_offset(27).has_tag(&open_tag));
+
+        let moved = callout::Point { x: 48.0, y: 96.0 };
+        passage.callout.set_position(moved);
+        assert_eq!(passage.callout.card_position(), Some(moved));
+        assert!(passage.buffer.iter_at_offset(8).has_tag(&open_tag));
+
+        passage.callout.close();
+        assert!(!passage.callout.is_open());
+        assert_eq!(passage.callout.active_span(), None);
+        assert!(!passage.buffer.iter_at_offset(8).has_tag(&open_tag));
+
+        // Loading a new chapter also dismisses an open callout and clears its tag.
+        passage.callout.present(
+            span,
+            "“robbers of churches”",
+            gtk::Label::new(Some("again")),
+        );
+        assert!(passage.callout.is_open());
+        let conn = Connection::open_in_memory().unwrap();
+        passage.load(
+            &ChapterCtx {
+                conn: &conn,
+                books: &[],
+                user: None,
+                paragraphs: true,
+            },
+            false,
+        );
+        assert!(!passage.callout.is_open());
+        assert_eq!(passage.callout.active_span(), None);
+    }
 }
 
 pub const WORD_HOVER_TAG: &str = "word-hover";
+pub const WORD_OPEN_TAG: &str = "word-open";
 
 pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     buffer.tag_table().add(&strongs::make_tag());
@@ -811,6 +870,9 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     let word_hover = gtk::TextTag::new(Some(WORD_HOVER_TAG));
     word_hover.set_underline(gtk::pango::Underline::Single);
     buffer.tag_table().add(&word_hover);
+    let word_open = gtk::TextTag::new(Some(WORD_OPEN_TAG));
+    word_open.set_underline(gtk::pango::Underline::Single);
+    buffer.tag_table().add(&word_open);
     marks::install_tags(buffer);
     theme::paint_buffer(buffer);
     current_verse.set_priority(0);
@@ -825,6 +887,28 @@ pub fn install_buffer_tags(buffer: &gtk::TextBuffer) {
     note_mark.set_priority(2);
     search_hit.set_priority(3);
     word_hover.set_priority(3);
+    word_open.set_priority(4);
+}
+
+fn clean_span_label(text: &str, span: layout::Span, skip: &[layout::Span]) -> String {
+    let mut out = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        let pos = idx as i32;
+        if pos < span.start {
+            continue;
+        }
+        if pos >= span.end {
+            break;
+        }
+        if skip.iter().any(|s| s.contains(pos)) {
+            continue;
+        }
+        out.push(ch);
+    }
+    let trimmed = out
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+        .trim();
+    trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn mark_spans(layout: &layout::ChapterLayout) -> Vec<layout::Span> {
@@ -1017,5 +1101,19 @@ mod token_span_tests {
             &[],
         );
         assert_eq!(accented, vec![layout::Span { start: 0, end: 6 }]);
+    }
+
+    #[test]
+    fn clean_span_label_strips_marks_and_edge_punctuation() {
+        let text = "whicha are neither robbers of churches, nor";
+        let skip = [layout::Span { start: 5, end: 6 }];
+        assert_eq!(
+            clean_span_label(text, layout::Span { start: 0, end: 6 }, &skip),
+            "which"
+        );
+        assert_eq!(
+            clean_span_label(text, layout::Span { start: 19, end: 39 }, &skip),
+            "robbers of churches"
+        );
     }
 }
