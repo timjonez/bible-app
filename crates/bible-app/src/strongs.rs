@@ -6,31 +6,17 @@ use gtk::gio;
 use gtk::glib;
 use relm4::{adw, gtk};
 
-pub fn create(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
-    let popover = gtk::Popover::new();
-    popover.set_parent(parent);
-    popover.set_autohide(true);
-    popover.set_position(gtk::PositionType::Bottom);
-    popover.set_accessible_role(gtk::AccessibleRole::Dialog);
-    popover.add_css_class("word-popover");
-    install_css();
-    popover
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn present(
-    popover: &gtk::Popover,
-    view: &gtk::TextView,
-    start: i32,
+pub fn build_content(
     defs: &[StrongDef],
     counts: &[usize],
     dict: &ClickedDict,
     books: &[Book],
     sender: relm4::Sender<super::app::Msg>,
-) {
+) -> Option<gtk::Widget> {
+    install_css();
     let tabs = source_tabs(!defs.is_empty(), dict);
     if tabs.is_empty() {
-        return;
+        return None;
     }
     let stack = gtk::Stack::new();
     stack.set_hhomogeneous(true);
@@ -75,7 +61,7 @@ pub fn present(
         );
     }
     let content = scrolled_page(stack.clone());
-    // The popover keeps the height it opened at. Open it tall enough for the
+    // The callout keeps the height it opened at. Open it tall enough for the
     // longest source so switching to an article does not squeeze it into the
     // space a short Strong's entry needed. Short pages keep their own height.
     content.set_min_content_height(tallest_page(&stack).clamp(PAGE_MIN_HEIGHT, PAGE_MAX_HEIGHT));
@@ -84,9 +70,7 @@ pub fn present(
     } else {
         with_source_sidebar(stack, content, &tabs)
     };
-    popover.set_child(Some(&child));
-    point_at_word(popover, view, start);
-    popover.popup();
+    Some(child)
 }
 
 const PAGE_MAX_HEIGHT: i32 = 360;
@@ -203,14 +187,6 @@ fn install_css() {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(
             r#"
-            popover.word-popover contents {
-              padding: 0;
-            }
-            /* The popover inherits the chapter's leading, which GTK applies
-               to the headword at some widths only. */
-            popover.word-popover .title-3 {
-              line-height: normal;
-            }
             .word-sources {
               padding: 4px 0;
             }
@@ -547,28 +523,19 @@ fn append_dict_entry(
     body.append(&text);
 }
 
-fn point_at_word(popover: &gtk::Popover, view: &gtk::TextView, start: i32) {
-    let buffer = view.buffer();
-    let iter = buffer.iter_at_offset(start);
-    let loc = view.iter_location(&iter);
-    let (x, y) =
-        view.buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y() + loc.height());
-    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, loc.width().max(1), 1)));
-}
-
-pub fn present_text(popover: &gtk::Popover, view: &gtk::TextView, start: i32, text: &str) {
+pub fn build_note_content(text: &str) -> gtk::Widget {
+    install_css();
     let label = gtk::Label::new(Some(text));
     label.set_wrap(true);
     label.set_max_width_chars(44);
     label.set_xalign(0.0);
     label.set_selectable(true);
+    label.set_focusable(false);
     label.set_margin_start(14);
     label.set_margin_end(14);
     label.set_margin_top(12);
     label.set_margin_bottom(12);
-    popover.set_child(Some(&label));
-    point_at_word(popover, view, start);
-    popover.popup();
+    label.upcast()
 }
 
 pub fn make_tag() -> gtk::TextTag {

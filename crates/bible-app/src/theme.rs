@@ -153,6 +153,8 @@ pub fn paint_buffer(buffer: &gtk::TextBuffer) {
     set_bg(buffer, "user-note", &palette.magenta, 0.34);
     set_underline(buffer, "user-bookmark", &palette.orange);
     set_underline(buffer, crate::passage::WORD_HOVER_TAG, &palette.muted);
+    set_bg(buffer, crate::passage::WORD_OPEN_TAG, &palette.accent, 0.24);
+    set_underline(buffer, crate::passage::WORD_OPEN_TAG, &palette.accent);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

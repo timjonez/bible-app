@@ -1,4 +1,5 @@
 mod app;
+mod callout;
 mod cite;
 mod column;
 mod config;

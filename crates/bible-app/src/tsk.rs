@@ -229,17 +229,6 @@ fn scroll_to(widgets: &TskWidgets, verse: u8) {
     });
 }
 
-pub fn create_popover(parent: &impl gtk::prelude::IsA<gtk::Widget>) -> gtk::Popover {
-    let popover = gtk::Popover::new();
-    popover.set_parent(parent);
-    popover.set_autohide(true);
-    popover.set_position(gtk::PositionType::Bottom);
-    popover.set_accessible_role(gtk::AccessibleRole::Dialog);
-    popover.add_css_class("tsk-popover");
-    install_css();
-    popover
-}
-
 const PAGE_MAX_HEIGHT: i32 = 360;
 
 pub(crate) struct PhraseDest {
@@ -263,25 +252,19 @@ pub(crate) fn phrase_dests(
         .collect()
 }
 
-pub fn present_phrase(
-    popover: &gtk::Popover,
-    view: &gtk::TextView,
-    start: i32,
+pub fn build_phrase_content(
     heading: &str,
     dests: &[PhraseDest],
     sender: relm4::Sender<super::app::Msg>,
-) {
-    let title = crate::strongs::entry_header(
-        Some("Treasury of Scripture Knowledge"),
-        &format!("“{heading}”"),
-        None,
-    );
+) -> gtk::Widget {
+    install_css();
+    let title = crate::strongs::entry_header(None, &format!("“{heading}”"), None);
     title.set_margin_start(12);
     title.set_margin_end(12);
     title.set_margin_top(10);
     title.set_margin_bottom(8);
 
-    let child: gtk::Widget = if dests.is_empty() {
+    if dests.is_empty() {
         title.upcast()
     } else {
         let (verse, verse_title, verse_text) = verse_page();
@@ -295,16 +278,7 @@ pub fn present_phrase(
         wrap.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         wrap.append(&pane);
         wrap.upcast()
-    };
-    popover.set_child(Some(&child));
-
-    let buffer = view.buffer();
-    let iter = buffer.iter_at_offset(start);
-    let loc = view.iter_location(&iter);
-    let (x, y) =
-        view.buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y() + loc.height());
-    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, loc.width().max(1), 1)));
-    popover.popup();
+    }
 }
 
 fn dest_list(
@@ -530,9 +504,6 @@ fn install_css() {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(
             r#"
-            popover.tsk-popover contents {
-              padding: 0;
-            }
             .tsk-sources {
               padding: 4px 0;
             }
